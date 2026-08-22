@@ -186,10 +186,27 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     let mut sort_clicked: Option<ServiceSortKey> = None;
     let mut action: Option<Action> = None;
 
+    // PID to process name, built once for the whole table rather than
+    // searched per row: the process list is four hundred entries and the
+    // service list is three hundred, and a linear search per row inside
+    // a draw call is the sixty-thousand-comparisons-a-frame shape this
+    // codebase has a rule against.
+    let hosts: std::collections::HashMap<u32, String> =
+        app.snapshot
+            .as_ref()
+            .map_or_else(std::collections::HashMap::new, |snapshot| {
+                snapshot
+                    .processes
+                    .iter()
+                    .map(|process| (process.pid, process.name.clone()))
+                    .collect()
+            });
+
     // Captured before the builder borrows the `Ui`; see
     // `widgets::row_background` on why a row needs it.
     let viewport = ui.available_rect_before_wrap();
 
+    theme::quiet_column_rules(ui);
     TableBuilder::new(ui)
         .resizable(true)
         .vscroll(true)
@@ -204,6 +221,18 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
         )
         .column(Column::initial(90.0).at_least(70.0).resizable(true))
         .column(Column::initial(70.0).at_least(56.0).resizable(true))
+        // The host process. Ten services share one `svchost.exe`, and
+        // "which of the fifteen services inside this svchost is the one
+        // burning the CPU" is the question this view exists beside the
+        // process list to answer — see the module docs. The PID column
+        // alone makes the reader carry a number across two views to find
+        // out; naming the process closes it here.
+        .column(
+            Column::initial(200.0)
+                .at_least(120.0)
+                .resizable(true)
+                .clip(true),
+        )
         .header(HEADER_HEIGHT, |mut header| {
             for (index, key) in [
                 ServiceSortKey::Name,
@@ -231,6 +260,9 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                     }
                 });
             }
+            // Not sortable: it is the process's name, and the PID column
+            // beside it already sorts services onto their shared host.
+            header.col(|ui| widgets::plain_header(ui, theme, "Host process"));
         })
         .body(|body| {
             body.rows(ROW_HEIGHT, visible.len(), |mut row| {
@@ -272,13 +304,29 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         ServiceState::Starting | ServiceState::Stopping => theme.warning,
                         ServiceState::Other => theme.text_muted,
                     };
-                    widgets::chip(ui, service.state.label(), theme.raised, color);
+                    widgets::status_chip(ui, service.state.label(), color);
                 });
                 row.col(|ui| {
                     let text = service
                         .pid
                         .map_or_else(|| crate::format::DASH.to_string(), |pid| pid.to_string());
                     widgets::number(ui, theme, &text, service.pid.is_none());
+                });
+                row.col(|ui| {
+                    // A stopped service has no host, and neither has a
+                    // running one whose host is outside this snapshot —
+                    // a service can start between two samples. Both read
+                    // as absence rather than as an empty cell.
+                    let host = service
+                        .pid
+                        .and_then(|pid| hosts.get(&pid).cloned())
+                        .unwrap_or_else(|| crate::format::DASH.to_string());
+                    ui.add_space(SPACE_SM);
+                    ui.label(
+                        egui::RichText::new(host)
+                            .color(theme::rgb(theme.text_muted))
+                            .text_style(egui::TextStyle::Small),
+                    );
                 });
 
                 let response = row.response();
@@ -506,19 +554,34 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     // `widgets::row_background` on why a row needs it.
     let viewport = ui.available_rect_before_wrap();
 
+    theme::quiet_column_rules(ui);
     TableBuilder::new(ui)
         .resizable(true)
         .vscroll(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .sense(Sense::click())
-        .column(Column::remainder().at_least(200.0).clip(true))
-        .column(Column::initial(90.0).at_least(70.0).resizable(true))
+        // Name is a stated width rather than the remainder. As the
+        // remainder it absorbed every point of a 1440-wide window that
+        // the other two columns did not want — seven hundred of them for
+        // entries like "OneDrive" — while the one thing a person opens
+        // this view to check, *what the entry actually runs*, was in a
+        // hover tooltip. The command is a column now, and it is the
+        // column the slack goes to, because a command line is the one
+        // field here that can genuinely use six hundred points.
         .column(
-            Column::initial(210.0)
-                .at_least(120.0)
+            Column::initial(240.0)
+                .at_least(140.0)
                 .resizable(true)
                 .clip(true),
         )
+        .column(Column::initial(90.0).at_least(70.0).resizable(true))
+        .column(
+            Column::initial(150.0)
+                .at_least(110.0)
+                .resizable(true)
+                .clip(true),
+        )
+        .column(Column::remainder().at_least(160.0).clip(true))
         .header(HEADER_HEIGHT, |mut header| {
             for (index, key) in [
                 StartupSortKey::Name,
@@ -545,6 +608,10 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                     }
                 });
             }
+            // Not sortable: sorting a list of command lines alphabetically
+            // orders it by drive letter and then by `Program Files`,
+            // which is not an order anyone wants a startup list in.
+            header.col(|ui| widgets::plain_header(ui, theme, "Command"));
         })
         .body(|body| {
             body.rows(ROW_HEIGHT, entries.len(), |mut row| {
@@ -568,7 +635,7 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                     ui.label(egui::RichText::new(&entry.name).color(theme::rgb(theme.text)));
                     if entry.all_users {
                         ui.add_space(SPACE_XS);
-                        widgets::chip(ui, "All users", theme.raised, theme.text_muted);
+                        widgets::status_chip(ui, "All users", theme.text_muted);
                     }
                 });
                 row.col(|ui| {
@@ -577,13 +644,24 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                     } else {
                         ("Disabled", theme.text_muted)
                     };
-                    widgets::chip(ui, label, theme.raised, color);
+                    widgets::status_chip(ui, label, color);
                 });
                 row.col(|ui| {
                     ui.label(
                         egui::RichText::new(entry.location)
                             .color(theme::rgb(theme.text_muted))
                             .text_style(egui::TextStyle::Small),
+                    );
+                });
+                row.col(|ui| {
+                    // Monospace, because this is a path: a proportional
+                    // font makes two entries under the same directory
+                    // look like two unrelated strings, and the shared
+                    // prefix is most of what a person is scanning for.
+                    ui.label(
+                        egui::RichText::new(&entry.command)
+                            .color(theme::rgb(theme.text_faint))
+                            .text_style(egui::TextStyle::Monospace),
                     );
                 });
 

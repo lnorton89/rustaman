@@ -79,10 +79,12 @@ mod windows {
 
     /// The window size a scene is drawn at unless `--size` says otherwise.
     ///
-    /// A normal window on a 1080p screen, which is the size at which the
-    /// layout has to work — a screenshot taken at 2560 points wide makes
-    /// every crowded panel look spacious.
-    const DEFAULT_SIZE: (f32, f32) = (1280.0, 860.0);
+    /// The size the app itself opens at — `config::Config::default`'s
+    /// `window_size`. Any other number here tests a window nobody has:
+    /// a screenshot taken at 2560 points wide makes every crowded panel
+    /// look spacious, and one taken narrower invents crowding that is
+    /// not there.
+    const DEFAULT_SIZE: (f32, f32) = (1440.0, 900.0);
 
     #[derive(clap::Parser, Debug)]
     #[command(name = "screenshot", about = "Render a view of the app to a PNG")]
@@ -130,10 +132,14 @@ mod windows {
         size: Option<(f32, f32)>,
         /// Whether to draw this machine instead of the fabricated one.
         live: bool,
+        /// Whether to select a row — the third of the app's three row
+        /// states, after resting and hovered, and the one that opens the
+        /// Details view's inspector.
+        select: bool,
     }
 
     /// Every scene, in the order `--list` prints them.
-    const SCENES: [Scene; 10] = [
+    const SCENES: [Scene; 16] = [
         Scene {
             name: "live-network",
             about: "Performance › Network on THIS machine, really sampled",
@@ -142,6 +148,7 @@ mod windows {
             expanded: true,
             size: Some((1280.0, 1500.0)),
             live: true,
+            select: false,
         },
         Scene {
             name: "live-processes",
@@ -151,6 +158,7 @@ mod windows {
             expanded: false,
             size: None,
             live: true,
+            select: false,
         },
         Scene {
             name: "network",
@@ -160,6 +168,7 @@ mod windows {
             expanded: false,
             size: None,
             live: false,
+            select: false,
         },
         Scene {
             name: "network-open",
@@ -169,6 +178,7 @@ mod windows {
             expanded: true,
             size: None,
             live: false,
+            select: false,
         },
         Scene {
             name: "network-narrow",
@@ -178,6 +188,7 @@ mod windows {
             expanded: false,
             size: Some((900.0, 720.0)),
             live: false,
+            select: false,
         },
         Scene {
             name: "cpu",
@@ -187,6 +198,7 @@ mod windows {
             expanded: false,
             size: None,
             live: false,
+            select: false,
         },
         Scene {
             name: "memory",
@@ -196,6 +208,7 @@ mod windows {
             expanded: false,
             size: None,
             live: false,
+            select: false,
         },
         Scene {
             name: "disk",
@@ -205,6 +218,7 @@ mod windows {
             expanded: false,
             size: None,
             live: false,
+            select: false,
         },
         Scene {
             name: "gpu",
@@ -214,6 +228,7 @@ mod windows {
             expanded: false,
             size: None,
             live: false,
+            select: false,
         },
         Scene {
             name: "processes",
@@ -223,6 +238,67 @@ mod windows {
             expanded: false,
             size: None,
             live: false,
+            select: false,
+        },
+        Scene {
+            name: "details",
+            about: "The flat process table",
+            view: View::Details,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: false,
+        },
+        Scene {
+            name: "services",
+            about: "The services list",
+            view: View::Services,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: false,
+        },
+        Scene {
+            name: "startup",
+            about: "The startup entries",
+            view: View::Startup,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: false,
+        },
+        Scene {
+            name: "details-selected",
+            about: "The flat table with a row selected, so the inspector opens",
+            view: View::Details,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: true,
+        },
+        Scene {
+            name: "processes-selected",
+            about: "The process tree with a row selected",
+            view: View::Processes,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: true,
+        },
+        Scene {
+            name: "settings",
+            about: "Theme, interval and the about panel",
+            view: View::Settings,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: false,
         },
     ];
 
@@ -319,11 +395,50 @@ mod windows {
 
         if scene.live {
             sample_this_machine(&mut app)?;
+            app.services.services = rustaman::win::services::enumerate();
+            app.startup.entries = rustaman::win::startup::enumerate();
         } else {
             let snapshot = fabricate();
             fill_history(&mut app, &snapshot);
             app.snapshot = Some(snapshot);
+            app.services.services = services();
+            app.startup.entries = startup();
         }
+        if scene.select {
+            // A row a long way down the list and with something to show:
+            // the selection bar, the hover ramp underneath it, and the
+            // inspector's own content all draw differently from an empty
+            // one, and none of them appears in a screenshot of a table
+            // nobody has touched.
+            let chosen = app.snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .processes
+                    .iter()
+                    .find(|process| process.name == "chrome.exe")
+                    .map(rustaman::model::ProcessRow::key)
+            });
+            app.processes.selected = chosen;
+            app.details.selected = chosen;
+        }
+
+        // Every branch open. A tree screenshotted collapsed is a
+        // screenshot of one row, and the indent, the disclosure arrows
+        // and the way a long name behaves three levels deep are the
+        // things worth looking at.
+        if let Some(snapshot) = &app.snapshot {
+            app.processes.expanded = snapshot
+                .processes
+                .iter()
+                .map(rustaman::model::ProcessRow::key)
+                .collect();
+        }
+
+        // Both lists are read on the view's own schedule rather than by
+        // the sampler, and a view that has never refreshed starts a
+        // background read on its first frame — which would race the
+        // fabricated list this scene just installed and win.
+        app.services.refreshed = Some(std::time::Instant::now());
+        app.startup.refreshed = app.services.refreshed;
 
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(width, height))
@@ -463,8 +578,230 @@ mod windows {
                 thread_count: 6_112,
                 handle_count: 214_998,
             },
-            ..Snapshot::default()
+            processes: processes(),
+            interval: std::time::Duration::from_secs(1),
+            sequence: 42,
         }
+    }
+
+    /// A process list with the shapes the table has to survive.
+    ///
+    /// A very long name, a deep parent chain, a process with no
+    /// description, a suspended one, an elevated one, a 32-bit one, and
+    /// one process saturating four cores — the rows that break a column
+    /// width, a tree indent or a heat cell, rather than four hundred
+    /// rows of `svchost.exe` at 0%.
+    fn processes() -> Vec<rustaman::model::ProcessRow> {
+        use rustaman::model::{Architecture, Priority, ProcessKind, ProcessStatus};
+
+        /// One row of the table below, before it becomes a `ProcessRow`.
+        struct Row {
+            pid: u32,
+            parent: u32,
+            name: &'static str,
+            description: &'static str,
+            kind: ProcessKind,
+            cpu: f64,
+            memory: u64,
+            threads: u32,
+            handles: u32,
+            window: Option<&'static str>,
+        }
+
+        // Written as a table and kept as one: every row is a machine
+        // state chosen on purpose, and reading down a column is how you
+        // check the set still covers them. `rustfmt` would otherwise
+        // give each field its own line, which is 250 lines of vertical
+        // scrolling for fifteen rows of data.
+        #[rustfmt::skip]
+        let table = [
+            // `parent: 0` roots a row. Nothing here claims the idle
+            // process as its parent: a tree descending from one node has
+            // no shape to look at.
+            Row { pid: 0, parent: 0, name: "System Idle Process", description: "", kind: ProcessKind::System, cpu: 76.5, memory: 8_192, threads: 16, handles: 0, window: None },
+            Row { pid: 4, parent: 0, name: "System", description: "", kind: ProcessKind::System, cpu: 0.8, memory: 2_285_568, threads: 274, handles: 4_812, window: None },
+            Row { pid: 1204, parent: 4, name: "svchost.exe", description: "Host Process for Windows Services", kind: ProcessKind::System, cpu: 0.2, memory: 41_943_040, threads: 24, handles: 892, window: None },
+            Row { pid: 1288, parent: 4, name: "MsMpEng.exe", description: "Antimalware Service Executable", kind: ProcessKind::System, cpu: 12.4, memory: 412_090_368, threads: 41, handles: 1_204, window: None },
+            Row { pid: 2044, parent: 4, name: "dwm.exe", description: "Desktop Window Manager", kind: ProcessKind::System, cpu: 3.6, memory: 132_120_576, threads: 16, handles: 2_204, window: None },
+            // Parented to a `userinit.exe` that has already exited, the
+            // way a real shell is — so the row re-roots itself, which is
+            // the orphan-adoption path, on screen.
+            Row { pid: 3312, parent: 1100, name: "explorer.exe", description: "Windows Explorer", kind: ProcessKind::App, cpu: 1.1, memory: 168_820_736, threads: 92, handles: 3_401, window: Some("Program Manager") },
+            Row { pid: 7784, parent: 3312, name: "chrome.exe", description: "Google Chrome", kind: ProcessKind::App, cpu: 18.9, memory: 1_374_389_534, threads: 48, handles: 2_190, window: Some("Cards vs. Lists vs. Tables vs. Data Grids — Smart Interface Design Patterns — Google Chrome") },
+            Row { pid: 7912, parent: 7784, name: "chrome.exe", description: "Google Chrome", kind: ProcessKind::Background, cpu: 4.2, memory: 289_406_976, threads: 18, handles: 604, window: None },
+            Row { pid: 7998, parent: 7784, name: "chrome.exe", description: "Google Chrome", kind: ProcessKind::Background, cpu: 0.0, memory: 96_468_992, threads: 14, handles: 421, window: None },
+            Row { pid: 8102, parent: 3312, name: "Code.exe", description: "Visual Studio Code", kind: ProcessKind::App, cpu: 9.7, memory: 812_055_040, threads: 61, handles: 1_802, window: Some("performance.rs — rustaman — Visual Studio Code") },
+            Row { pid: 8340, parent: 8102, name: "rust-analyzer.exe", description: "", kind: ProcessKind::Background, cpu: 398.0, memory: 3_221_225_472, threads: 32, handles: 988, window: None },
+            Row { pid: 9001, parent: 3312, name: "WindowsTerminal.exe", description: "Windows Terminal", kind: ProcessKind::App, cpu: 0.4, memory: 78_643_200, threads: 22, handles: 712, window: Some("rustaman — pwsh") },
+            Row { pid: 9014, parent: 9001, name: "cargo.exe", description: "", kind: ProcessKind::Background, cpu: 62.1, memory: 204_472_320, threads: 12, handles: 388, window: None },
+            Row { pid: 9020, parent: 9014, name: "rustc.exe", description: "", kind: ProcessKind::Background, cpu: 96.3, memory: 1_073_741_824, threads: 9, handles: 274, window: None },
+            Row { pid: 5560, parent: 3312, name: "Teams.exe", description: "Microsoft Teams", kind: ProcessKind::App, cpu: 0.0, memory: 508_559_360, threads: 39, handles: 1_144, window: Some("Microsoft Teams") },
+        ];
+
+        table
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| rustaman::model::ProcessRow {
+                pid: row.pid,
+                parent_pid: row.parent,
+                // Ascending with the table's order, so a parent always
+                // started before its child — the model rejects a parent
+                // link that did not, which would otherwise re-root half
+                // this tree and make the scene test the wrong thing.
+                started_at: 133_000_000_000_000_000 + index as u64 * 1_000_000_000,
+                name: row.name.to_string(),
+                description: row.description.to_string(),
+                path: Some(PathBuf::from(format!(
+                    "C:\\Windows\\System32\\{}",
+                    row.name
+                ))),
+                user: if matches!(row.kind, ProcessKind::System) {
+                    "NT AUTHORITY\\SYSTEM".to_string()
+                } else {
+                    "DESKTOP-7F2K1\\lawrence".to_string()
+                },
+                session_id: u32::from(!matches!(row.kind, ProcessKind::System)),
+                kind: row.kind,
+                elevated: row.pid == 1288,
+                architecture: if row.pid == 5560 {
+                    Architecture::X86
+                } else {
+                    Architecture::X64
+                },
+                window_title: row.window.map(str::to_string),
+                status: if row.pid == 5560 {
+                    ProcessStatus::Suspended
+                } else {
+                    ProcessStatus::Running
+                },
+                cpu_percent: row.cpu / 16.0,
+                cpu_time_ms: row.handles as u64 * 97,
+                working_set: row.memory,
+                private_bytes: row.memory / 2,
+                virtual_bytes: row.memory * 3,
+                thread_count: row.threads,
+                handle_count: row.handles,
+                disk_read_rate: f64::from(row.threads) * 4_096.0,
+                disk_write_rate: f64::from(row.handles) * 64.0,
+                io_read_bytes: u64::from(row.handles) * 1_048_576,
+                io_write_bytes: u64::from(row.threads) * 1_048_576,
+                connections: if row.name == "chrome.exe" { 24 } else { 0 },
+                gpu_percent: if row.pid == 2044 { 8.0 } else { 0.0 },
+                gpu_memory: if row.pid == 2044 { 268_435_456 } else { 0 },
+                priority: if row.pid == 0 {
+                    Priority::Idle
+                } else {
+                    Priority::Normal
+                },
+            })
+            .collect()
+    }
+
+    /// A services list, of the shapes the table has to survive: a very
+    /// long display name, a stopped service with no PID, and several
+    /// sharing one `svchost.exe`.
+    fn services() -> Vec<rustaman::win::services::Service> {
+        use rustaman::win::services::{Service, ServiceState};
+
+        [
+            (
+                "Appinfo",
+                "Application Information",
+                ServiceState::Running,
+                Some(1204),
+            ),
+            (
+                "AudioSrv",
+                "Windows Audio",
+                ServiceState::Running,
+                Some(1204),
+            ),
+            (
+                "BITS",
+                "Background Intelligent Transfer Service",
+                ServiceState::Stopped,
+                None,
+            ),
+            ("Dhcp", "DHCP Client", ServiceState::Running, Some(1204)),
+            ("Dnscache", "DNS Client", ServiceState::Running, Some(1204)),
+            (
+                "EventLog",
+                "Windows Event Log",
+                ServiceState::Running,
+                Some(1204),
+            ),
+            (
+                "MSDTC",
+                "Distributed Transaction Coordinator",
+                ServiceState::Stopped,
+                None,
+            ),
+            (
+                "Spooler",
+                "Print Spooler",
+                ServiceState::Running,
+                Some(3312),
+            ),
+            ("SysMain", "SysMain", ServiceState::Running, Some(1204)),
+            (
+                "WSearch",
+                "Windows Search",
+                ServiceState::Starting,
+                Some(9014),
+            ),
+            (
+                "WdNisSvc",
+                "Microsoft Defender Antivirus Network Inspection Service",
+                ServiceState::Running,
+                Some(1288),
+            ),
+            (
+                "WinDefend",
+                "Microsoft Defender Antivirus Service",
+                ServiceState::Running,
+                Some(1288),
+            ),
+            (
+                "wuauserv",
+                "Windows Update",
+                ServiceState::Stopping,
+                Some(1204),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, display_name, state, pid)| Service {
+            name: name.to_string(),
+            display_name: display_name.to_string(),
+            state,
+            pid,
+        })
+        .collect()
+    }
+
+    /// A startup list, including the two shapes that break the column: a
+    /// quoted command line with arguments, and a disabled entry.
+    fn startup() -> Vec<rustaman::win::startup::StartupEntry> {
+        use rustaman::win::startup::StartupEntry;
+
+        [
+            ("OneDrive", "\"C:\\Program Files\\Microsoft OneDrive\\OneDrive.exe\" /background", "HKCU Run", false, true),
+            ("SecurityHealth", "%windir%\\system32\\SecurityHealthSystray.exe", "HKLM Run", true, true),
+            ("Steam", "\"C:\\Program Files (x86)\\Steam\\steam.exe\" -silent", "HKCU Run", false, false),
+            ("Discord", "C:\\Users\\lawrence\\AppData\\Local\\Discord\\Update.exe --processStart Discord.exe", "Startup folder", false, true),
+            ("Docker Desktop", "\"C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe\" -Autostart", "HKCU Run", false, true),
+            ("RtkAudUService", "\"C:\\WINDOWS\\System32\\DriverStore\\FileRepository\\realtekservice.inf_amd64_9c1\\RtkAudUService64.exe\" -background", "HKLM Run", true, true),
+        ]
+        .into_iter()
+        .map(
+            |(name, command, location, all_users, enabled)| StartupEntry {
+                name: name.to_string(),
+                command: command.to_string(),
+                location,
+                all_users,
+                enabled,
+            },
+        )
+        .collect()
     }
 
     /// The twenty-one adapters.

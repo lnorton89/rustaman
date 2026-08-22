@@ -290,11 +290,29 @@ pub enum ProcessStatus {
 }
 
 impl ProcessStatus {
-    /// The word shown in the Status column.
+    /// The word for this status, in full. For a tooltip, a details pane,
+    /// or a confirmation — anywhere the reader is looking at one process
+    /// and wants it named.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Running => "Running",
+            Self::Suspended => "Suspended",
+        }
+    }
+
+    /// The word for a **column** of these, which is a different job.
+    ///
+    /// Running renders as an em dash, the same way
+    /// [`crate::format::rate_or_dash`] hides a rate of nothing. On a
+    /// normal machine every process but a handful is running, so the
+    /// column was four hundred repetitions of one word with the two rows
+    /// that were not somewhere inside it — which is the exact shape a
+    /// column exists to make findable, printed as noise instead.
+    #[must_use]
+    pub fn column_label(self) -> &'static str {
+        match self {
+            Self::Running => crate::format::DASH,
             Self::Suspended => "Suspended",
         }
     }

@@ -268,6 +268,33 @@ pub fn card(theme: &Palette) -> egui::Frame {
         .inner_margin(margin(SPACE_MD))
 }
 
+/// Silences the resting rule `egui_extras` draws at every resizable
+/// column boundary, for this `Ui` and everything drawn inside it.
+///
+/// A resizable table paints a line at each boundary, the full height of
+/// the scroll area — through the rows, and on down through the empty
+/// space under the last one. Four columns of numbers over three hundred
+/// rows becomes a spreadsheet grid, and on a short list it is mostly a
+/// set of vertical rules through nothing.
+///
+/// Rows are separated by their own fill: the stripe, the hover lift and
+/// the selection bar all run the width of the row (see
+/// [`super::widgets::row_background`]), which is what makes a row
+/// readable across eight columns. Vertical rules on top of that are a
+/// second, competing structure, and the one that wins is the one drawn
+/// in a solid colour from top to bottom.
+///
+/// Only the **resting** stroke goes. `egui_extras` picks the hovered and
+/// dragged strokes from different visuals, so the boundary still lights
+/// up under the pointer — the affordance survives; the grid does not.
+///
+/// Scoped to a `Ui` rather than set in [`visuals`] because
+/// `noninteractive.bg_stroke` is also what egui draws a menu separator
+/// and a group frame with, and those want their line.
+pub fn quiet_column_rules(ui: &mut egui::Ui) {
+    ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::NONE;
+}
+
 /// The frame the window's central content sits in.
 pub fn content(theme: &Palette) -> egui::Frame {
     egui::Frame::new()

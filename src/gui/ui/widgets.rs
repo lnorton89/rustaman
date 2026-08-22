@@ -258,6 +258,99 @@ pub fn chip(ui: &mut Ui, text: &str, fill: Rgb, text_color: Rgb) -> Response {
     response
 }
 
+/// Lays a single line of text out, truncated with an ellipsis if it does
+/// not fit `width`.
+///
+/// `Painter::text` neither wraps nor truncates — it draws the whole
+/// string wherever it is told to, so a long value runs straight through
+/// whatever is drawn beside it. Clipping the painter instead would hide
+/// the overflow but leave a word cut mid-glyph, which reads as a
+/// rendering fault rather than as elision.
+pub fn truncated(
+    ui: &Ui,
+    text: &str,
+    font: FontId,
+    color: Rgb,
+    width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_string(),
+        egui::TextFormat::simple(font, theme::rgb(color)),
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.0));
+    ui.painter().layout_job(job)
+}
+
+/// A chip carrying a **status**, tinted with the colour of that status.
+///
+/// [`chip`] takes a flat fill, and every status chip in the app passed
+/// it `theme.raised` — which is also the colour of a striped row. That
+/// worked only for as long as a row's stripe was (wrongly) confined to
+/// its first column: the moment a row filled edge to edge, every chip on
+/// every second row lost its pill and became a coloured word floating in
+/// the middle of a table. See [`row_background`].
+///
+/// Tinting with the status's own colour fixes it in the direction the
+/// design wanted anyway. A green pill for Running and an amber one for
+/// Starting say what they mean before the word is read, and the tint
+/// reads against both of the surfaces a row can be, because it is not
+/// either of them.
+pub fn status_chip(ui: &mut Ui, text: &str, color: Rgb) -> Response {
+    /// How strongly the status colour tints the pill.
+    ///
+    /// Low: the word on top is drawn in the same hue at full strength,
+    /// and a fill that approached it would leave the two the same
+    /// colour. This is a wash behind the text, not a badge.
+    const TINT: u8 = 38;
+
+    let font = TextStyle::Small.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font, theme::rgb(color));
+    let size = galley.size() + Vec2::new(SPACE_SM * 2.0, SPACE_XS * 1.5);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        CornerRadius::same(RADIUS),
+        theme::translucent(color, TINT),
+    );
+    painter.galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        theme::rgb(color),
+    );
+    response
+}
+
+/// A column heading for a column that cannot be sorted.
+///
+/// Drawn rather than composed so it matches [`sortable_header`]'s text
+/// exactly — the same style, the same colour, the same baseline. A
+/// heading that is a plain `ui.label` beside four drawn ones is a
+/// heading sitting a pixel off the others in a slightly different grey,
+/// which is the sort of difference nobody can name and everybody sees.
+///
+/// It reserves no arrow column: there is no arrow that could appear
+/// there, so the space would be a permanent gap the sortable headings
+/// do not have.
+pub fn plain_header(ui: &mut Ui, theme: &Palette, label: &str) {
+    let font = TextStyle::Small.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font, theme::rgb(theme.text_muted));
+    let (rect, _) = ui.allocate_exact_size(
+        galley.size() + Vec2::new(SPACE_SM, SPACE_XS),
+        Sense::hover(),
+    );
+    ui.painter().galley(
+        egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
+        galley,
+        theme::rgb(theme.text_muted),
+    );
+}
+
 /// A column heading that can be clicked to sort.
 ///
 /// `claims_width` is the trap this signature exists for. `egui_extras`
@@ -466,6 +559,41 @@ pub fn meter(ui: &mut Ui, theme: &Palette, fraction: f32, fill: Rgb) -> Response
     response
 }
 
+/// Fills a table row edge to edge from inside its first cell, returning
+/// the painter and the rect it used.
+///
+/// A table cell's painter is clipped to that cell, and a row's fill has
+/// to be painted while drawing the *first* cell so that everything else
+/// lands on top of it. Widening the rect is not enough — the clip is
+/// what truncates it — and `Painter::with_clip_rect` is not enough
+/// either, because it *intersects* with the clip already in force rather
+/// than replacing it. That last detail is what made every table in this
+/// app draw its stripes, its hover and its selection across the first
+/// column only, under a comment claiming otherwise.
+///
+/// The gaps `egui_extras` leaves between columns are covered too, which
+/// is the other half of a row reading as one row: a per-cell fill leaves
+/// a hairline of panel colour at every boundary, so eight filled cells
+/// read as eight cells.
+fn row_fill(ui: &Ui, viewport: Rect, fill: Color32) -> (egui::Painter, Rect) {
+    let cell = ui.max_rect();
+    let rect = Rect::from_min_max(cell.min, egui::pos2(viewport.right(), cell.bottom()));
+    let mut painter = ui.painter().clone();
+    painter.set_clip_rect(viewport);
+    painter.rect_filled(rect, CornerRadius::ZERO, fill);
+    (painter, rect)
+}
+
+/// Fills a grouping row — a category heading, not a record — edge to
+/// edge.
+///
+/// The heading and its per-column totals are separate cells of one row,
+/// and each used to fill its own rect, so the row read as a strip of
+/// tiles with the column gaps showing between them. See [`row_fill`].
+pub fn group_row_background(ui: &Ui, theme: &Palette, viewport: Rect) {
+    row_fill(ui, viewport, theme::rgb(theme.raised));
+}
+
 /// Paints a row's background, its hover lift, and its selection bar.
 ///
 /// One function for all three so that a row cannot be selected-looking in
@@ -493,16 +621,13 @@ pub fn row_background(
     // rect alone does not help — the clip is what truncates it — which
     // is why `viewport` is a parameter and why computing the rect is
     // this function's job and not four call sites'.
-    let cell = ui.max_rect();
-    let rect = Rect::from_min_max(cell.min, egui::pos2(viewport.right(), cell.bottom()));
-    let painter = ui.painter().with_clip_rect(viewport);
     let base = if striped { theme.raised } else { theme.panel };
     let fill = if selected {
         theme::rgb(theme.selection)
     } else {
         hover_fill(ui, id, hovered, base, theme.hover)
     };
-    painter.rect_filled(rect, CornerRadius::ZERO, fill);
+    let (painter, rect) = row_fill(ui, viewport, fill);
 
     if selected {
         // The bar animates out from the leading edge rather than
@@ -735,26 +860,35 @@ pub fn empty_state(ui: &mut Ui, theme: &Palette, message: &str) {
 /// A key/value line for a details pane.
 pub fn detail_row(ui: &mut Ui, theme: &Palette, key: &str, value: &str) {
     /// The label column's width, so every value starts on one column.
-    const KEY_WIDTH: f32 = 130.0;
+    const KEY_WIDTH: f32 = 104.0;
 
-    ui.horizontal(|ui| {
-        ui.allocate_ui_with_layout(
-            Vec2::new(KEY_WIDTH, 0.0),
-            egui::Layout::left_to_right(Align::Center),
-            |ui| {
-                ui.label(
-                    egui::RichText::new(key)
-                        .color(theme::rgb(theme.text_muted))
-                        .text_style(TextStyle::Small),
-                );
-            },
-        );
-        ui.label(
-            egui::RichText::new(value)
-                .color(theme::rgb(theme.text))
-                .text_style(TextStyle::Small),
-        );
-    });
+    // Painted rather than composed from two labels in a `ui.horizontal`.
+    // That is what it was, and `ui.horizontal`'s centre cross-alignment
+    // put the value's baseline a couple of points above the key's on
+    // every row of the inspector — two columns of text that never quite
+    // sat on the same line, in a pane made of nothing but rows of two
+    // columns of text.
+    let height = ui.text_style_height(&TextStyle::Small);
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), height + SPACE_XS),
+        Sense::hover(),
+    );
+    let font = TextStyle::Small.resolve(ui.style());
+    let top = egui::pos2(rect.left(), rect.top());
+
+    ui.painter().galley(
+        top,
+        truncated(ui, key, font.clone(), theme.text_muted, KEY_WIDTH),
+        theme::rgb(theme.text_muted),
+    );
+    // Truncated to what is left of the pane. The inspector shows a
+    // window title, a full account name and a path, any of which is
+    // longer than the pane is wide.
+    ui.painter().galley(
+        egui::pos2(rect.left() + KEY_WIDTH, rect.top()),
+        truncated(ui, value, font, theme.text, rect.width() - KEY_WIDTH),
+        theme::rgb(theme.text),
+    );
     ui.add_space(SPACE_XS);
 }
 

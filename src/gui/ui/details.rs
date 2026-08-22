@@ -36,21 +36,39 @@ use egui::{Sense, Ui};
 use egui_extras::{Column, TableBuilder};
 
 /// The columns, with the width each starts at.
+///
+/// Sized so that all ten fit **beside an open inspector** at the
+/// window size the app opens at (`config::Config::default`, 1440 points
+/// wide). `every_details_column_fits_the_default_window` checks the sum
+/// against that budget, because the failure mode is not a warning: an
+/// `egui_extras` column keeps its stated width whatever the pane can
+/// afford, so a table that overruns simply paints over whatever is to
+/// its right — which is exactly what this one was doing to the
+/// inspector.
 const COLUMNS: [(SortKey, f32); 10] = [
-    (SortKey::Name, 260.0),
-    (SortKey::Pid, 64.0),
-    (SortKey::Status, 82.0),
-    (SortKey::User, 150.0),
-    (SortKey::Cpu, 62.0),
-    (SortKey::PrivateBytes, 88.0),
-    (SortKey::Threads, 64.0),
-    (SortKey::Handles, 72.0),
-    (SortKey::Architecture, 58.0),
-    (SortKey::Session, 62.0),
+    (SortKey::Name, 210.0),
+    (SortKey::Pid, 56.0),
+    // Sized for "Suspended", not for the em dash it shows on every
+    // running process — see `ProcessStatus::column_label`. A column
+    // sized for its common value clips the only value anyone is
+    // scanning for.
+    (SortKey::Status, 76.0),
+    (SortKey::User, 104.0),
+    (SortKey::Cpu, 56.0),
+    (SortKey::PrivateBytes, 84.0),
+    // These three are sized by their *headings* rather than their
+    // values. A four-digit thread count needs about forty points and
+    // the word "Threads" needs sixty-six with the sort arrow's reserved
+    // column beside it, so a column sized for the numbers renders its
+    // own heading as "Threa…".
+    (SortKey::Threads, 66.0),
+    (SortKey::Handles, 68.0),
+    (SortKey::Architecture, 50.0),
+    (SortKey::Session, 68.0),
 ];
 
 /// The width of the inspector pane.
-const INSPECTOR_WIDTH: f32 = 300.0;
+const INSPECTOR_WIDTH: f32 = 280.0;
 
 // `widgets::detail_row` gives the key column 130 points, so anything
 // narrower than this leaves nothing for the value. A relation between
@@ -72,21 +90,50 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     }
     refresh_rows(app);
 
-    // The inspector is drawn first so it claims its width before the
-    // table takes the rest — a table that measured first would take the
-    // whole pane and the inspector would have nothing left.
-    egui::Panel::right("details-inspector")
-        .exact_size(INSPECTOR_WIDTH)
-        .frame(egui::Frame::new().inner_margin(theme::margin_xy(SPACE_MD, 0.0)))
-        .show(ui, |ui| {
+    // The pane is split by hand rather than with `egui::Panel::right`.
+    //
+    // A right panel reserves its width by moving the parent's *cursor*,
+    // and in a top-down layout `available_rect_before_wrap` is derived
+    // from the parent's `max_rect` — so the table measured the full pane,
+    // laid its last columns out across the inspector, and painted its row
+    // backgrounds over the inspector's own text. Splitting the rect here
+    // and handing each half an explicit `max_rect` makes the reservation
+    // a fact rather than a request, and it is the same arithmetic the
+    // panel would have done.
+    //
+    // The inspector only exists when a row is selected. A permanently
+    // reserved three-hundred-point pane reading "Select a process" costs
+    // the table a quarter of its width to say nothing, on a view whose
+    // whole job is breadth.
+    let pane = ui.available_rect_before_wrap();
+    let inspector_open = app.selected_row().is_some();
+    let reserved = if inspector_open {
+        INSPECTOR_WIDTH + SPACE_MD * 2.0
+    } else {
+        0.0
+    };
+    let table_rect = egui::Rect::from_min_max(
+        pane.min,
+        egui::pos2((pane.right() - reserved).max(pane.left()), pane.bottom()),
+    );
+
+    if inspector_open {
+        let inspector_rect = egui::Rect::from_min_max(
+            egui::pos2(pane.right() - INSPECTOR_WIDTH, pane.top()),
+            pane.max,
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(inspector_rect), |ui| {
             inspector(app, ui, &theme);
         });
+    }
 
     if app.details.rows.entries().is_empty() {
         widgets::empty_state(ui, &theme, "No processes match that search");
         return;
     }
-    table(app, ui, &theme);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(table_rect), |ui| {
+        table(app, ui, &theme, table_rect);
+    });
 }
 
 /// The row above the table.
@@ -137,7 +184,7 @@ fn refresh_rows(app: &mut App) {
 }
 
 /// The table.
-fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
+fn table(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect) {
     let entries: Vec<Entry> = app.details.rows.entries().to_vec();
     let Some(snapshot) = app.snapshot.clone() else {
         return;
@@ -146,10 +193,19 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     let mut sort_clicked: Option<SortKey> = None;
     let mut action: Option<Action> = None;
 
-    // Captured before the builder borrows the `Ui`; see
-    // `widgets::row_background` on why a row needs it.
-    let viewport = ui.available_rect_before_wrap();
+    // The pane `draw` split off, not `available_rect_before_wrap` — see
+    // there. A row's background is painted to this edge; see
+    // `widgets::row_background`.
+    let viewport = egui::Rect::from_min_max(egui::pos2(pane.left(), ui.cursor().top()), pane.max);
 
+    theme::quiet_column_rules(ui);
+    // An `egui_extras` column keeps its stated width whatever the pane
+    // can afford, and the table does not clip itself — so a table wider
+    // than its pane paints straight over whatever sits beside it. This
+    // one was drawing its last three columns across the inspector, and
+    // over the inspector's own "Select a process". The clip is the
+    // backstop; `COLUMNS` is sized so it should never be reached.
+    ui.set_clip_rect(viewport);
     let mut builder = TableBuilder::new(ui)
         .resizable(true)
         .vscroll(true)
@@ -281,7 +337,7 @@ fn cell_text(ui: &mut Ui, theme: &Palette, column: usize, process: &ProcessRow) 
     };
     let text = match key {
         SortKey::Pid => process.pid.to_string(),
-        SortKey::Status => process.status.label().to_string(),
+        SortKey::Status => process.status.column_label().to_string(),
         SortKey::User => short_user(&process.user),
         SortKey::Cpu => crate::format::percent_or_dash(process.cpu_percent),
         SortKey::PrivateBytes => crate::format::bytes_or_dash(process.private_bytes),
@@ -439,6 +495,38 @@ fn inspector(app: &mut App, ui: &mut Ui, theme: &Palette) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_details_column_fits_the_default_window() {
+        // The regression this guards is silent and it is ugly. An
+        // `egui_extras` column keeps the width it was given whatever the
+        // pane can afford — only a `remainder()` shrinks — and the table
+        // neither clips nor scrolls when the total overruns. It simply
+        // paints past its own pane, over whatever is next to it. These
+        // ten columns summed to 962 points against a pane of about 924,
+        // so the last three were drawn across the inspector and over the
+        // inspector's own "Select a process".
+        //
+        // The budget is stated the way the window computes it, rather
+        // than as one number, so that a change to the nav rail or the
+        // content inset moves this test with it.
+        let window = 1440.0f32;
+        let pane =
+            window - theme::NAV_WIDTH - theme::PAD * 2.0 - (INSPECTOR_WIDTH + SPACE_MD * 2.0);
+        // `egui_extras` puts `item_spacing.x` between columns and
+        // reserves a lane for the vertical scrollbar.
+        let spacing = SPACE_SM * COLUMNS.len() as f32;
+        let scrollbar = 12.0;
+        let budget = pane - spacing - scrollbar;
+
+        let total: f32 = COLUMNS.iter().map(|(_, width)| width).sum();
+        assert!(
+            total <= budget,
+            "the ten columns want {total} points and the pane beside an \
+             open inspector has {budget} at the window size the app opens \
+             at — the overrun is painted over the inspector, not clipped"
+        );
+    }
 
     #[test]
     fn a_domain_qualified_account_is_shortened_to_its_name() {

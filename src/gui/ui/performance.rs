@@ -229,7 +229,7 @@ fn picker_entry(
     // has, so it used to run underneath the sparkline and the two
     // overprinted each other into something that read as neither.
     let value_width = (spark.left() - SPACE_SM - (rect.left() + SPACE_MD)).max(0.0);
-    let galley = clipped(
+    let galley = widgets::truncated(
         ui,
         value,
         egui::TextStyle::Small.resolve(ui.style()),
@@ -1033,7 +1033,7 @@ fn adapter_row(
     let name_color = if online { theme.text } else { theme.text_muted };
     ui.painter().galley(
         egui::pos2(name_left, rect.top() + SPACE_SM),
-        clipped(
+        widgets::truncated(
             ui,
             &adapter.name,
             egui::TextStyle::Body.resolve(ui.style()),
@@ -1053,7 +1053,7 @@ fn adapter_row(
     };
     ui.painter().galley(
         egui::pos2(name_left, rect.bottom() - SPACE_SM - small_height(ui)),
-        clipped(
+        widgets::truncated(
             ui,
             &subtitle,
             egui::TextStyle::Small.resolve(ui.style()),
@@ -1132,29 +1132,6 @@ fn state_color(theme: &Palette, state: crate::model::AdapterState) -> crate::col
             theme.text_faint
         }
     }
-}
-
-/// Lays a single line of text out, truncated with an ellipsis if it does
-/// not fit.
-///
-/// `Painter::text` neither wraps nor truncates — it draws the whole
-/// string wherever it is told to, so a long adapter description runs
-/// straight through the sparkline and the readouts beside it. Clipping
-/// the painter would hide the overflow but leave a word cut mid-glyph,
-/// which reads as a rendering fault rather than as elision.
-fn clipped(
-    ui: &Ui,
-    text: &str,
-    font: egui::FontId,
-    color: crate::color::Rgb,
-    width: f32,
-) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::single_section(
-        text.to_string(),
-        egui::TextFormat::simple(font, theme::rgb(color)),
-    );
-    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.0));
-    ui.painter().layout_job(job)
 }
 
 /// The height of one line of the small text style.

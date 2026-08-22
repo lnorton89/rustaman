@@ -56,7 +56,7 @@ use crate::model::sort::SortKey;
 use crate::model::tree::{Entry, Totals};
 use crate::model::{ProcessKey, ProcessKind, ProcessRow};
 use crate::theme::Palette;
-use egui::{Sense, Ui, Vec2};
+use egui::{Sense, Ui};
 use egui_extras::{Column, TableBuilder};
 
 /// The columns this build has, in the order a fresh install shows them.
@@ -119,7 +119,7 @@ const MIN_COLUMN: f32 = 48.0;
 ///
 /// Equal to the width [`widgets::disclosure`] allocates for its chevron
 /// — a leaf row spaces past where a chevron would sit by exactly this
-/// much, or its dot and label land to the left of a sibling row's.
+/// much, or its name starts to the left of a sibling row's.
 const INDENT: f32 = SPACE_XS + icons::DISCLOSURE;
 
 // Relations between constants, checked when the crate is compiled.
@@ -291,6 +291,10 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
         dnd::Axis::Horizontal,
     ));
 
+    theme::quiet_column_rules(ui);
+    // See `super::details`: a table wider than its pane paints over
+    // whatever is beside it rather than clipping or scrolling.
+    ui.set_clip_rect(viewport);
     let mut builder = TableBuilder::new(ui)
         .striped(false)
         .resizable(true)
@@ -396,16 +400,25 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         // or every row below stops one column short of
                         // the window edge.
                         for slot in 0..=columns.len() {
-                            row.col(|ui| match columns.get(slot) {
-                                // The heading sits in whichever slot the
-                                // Name column has been dragged to, not
-                                // in the first one.
-                                Some(SortKey::Name) => {
-                                    hit |= group_heading(ui, theme, *kind, totals, *collapsed);
+                            row.col(|ui| {
+                                // Once, across the whole row — the same
+                                // reason a process row's background is
+                                // painted from its first cell. See
+                                // `widgets::group_row_background`.
+                                if slot == 0 {
+                                    widgets::group_row_background(ui, theme, viewport);
                                 }
-                                Some(key) => group_cell(ui, theme, *key, totals),
-                                // The trailing spacer.
-                                None => {}
+                                match columns.get(slot) {
+                                    // The heading sits in whichever slot
+                                    // the Name column has been dragged
+                                    // to, not in the first one.
+                                    Some(SortKey::Name) => {
+                                        hit |= group_heading(ui, theme, *kind, totals, *collapsed);
+                                    }
+                                    Some(key) => group_cell(ui, theme, *key, totals),
+                                    // The trailing spacer.
+                                    None => {}
+                                }
                             });
                         }
                         if hit || row.response().clicked() {
@@ -546,10 +559,6 @@ fn group_heading(
     totals: &Totals,
     collapsed: bool,
 ) -> bool {
-    let rect = ui.max_rect();
-    ui.painter()
-        .rect_filled(rect, egui::CornerRadius::ZERO, theme::rgb(theme.raised));
-
     ui.horizontal_centered(|ui| {
         ui.add_space(SPACE_XS);
         widgets::disclosure(ui, theme, !collapsed, kind);
@@ -571,10 +580,6 @@ fn group_heading(
 
 /// Draws a category heading's aggregate figure for one column.
 fn group_cell(ui: &mut Ui, theme: &Palette, key: SortKey, totals: &Totals) {
-    let rect = ui.max_rect();
-    ui.painter()
-        .rect_filled(rect, egui::CornerRadius::ZERO, theme::rgb(theme.raised));
-
     // Only the summable columns carry a category total. A PID or a
     // status has no meaningful aggregate, and showing one would be worse
     // than showing nothing.
@@ -631,24 +636,26 @@ fn name_cell(
             ui.add_space(SPACE_XS + icons::DISCLOSURE);
         }
 
-        // A per-process colour dot, keyed on the process rather than its
-        // row index — so it does not change when the table is resorted,
-        // which would read as the table having reloaded.
-        let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-        let hue = theme.series_for(u64::from(process.pid) ^ process.started_at);
-        ui.painter()
-            .circle_filled(dot.center(), 3.0, theme::rgb(hue));
-        ui.add_space(SPACE_XS);
-
+        // There used to be a coloured dot here, hashed from the process
+        // key. It was stable across a re-sort, which was the property it
+        // was written for, and it meant *nothing* — a hue per process,
+        // carrying no fact about that process.
+        //
+        // Colour is the scarcest signal in this table and it is already
+        // spent: the heat tint and gauge in every metric cell encode
+        // load, the chips encode status and elevation, and the Network
+        // panel's dots encode an adapter's state. A fifteenth hue down
+        // the leading edge, meaning nothing, competes with all of them
+        // and wins, because it is the leftmost thing in the row.
         ui.label(egui::RichText::new(process.display_name()).color(theme::rgb(theme.text)));
 
         if process.status == crate::model::ProcessStatus::Suspended {
             ui.add_space(SPACE_XS);
-            widgets::chip(ui, "Suspended", theme.raised, theme.warning);
+            widgets::status_chip(ui, "Suspended", theme.warning);
         }
         if process.elevated {
             ui.add_space(SPACE_XS);
-            widgets::chip(ui, "Admin", theme.raised, theme.text_muted);
+            widgets::status_chip(ui, "Admin", theme.text_muted);
         }
     });
     hit
@@ -695,7 +702,7 @@ fn metric_cell(
 
     let (text, load) = match key {
         SortKey::Pid => (process.pid.to_string(), 0.0),
-        SortKey::Status => (process.status.label().to_string(), 0.0),
+        SortKey::Status => (process.status.column_label().to_string(), 0.0),
         SortKey::Cpu => {
             let value = smooth(
                 ui,
