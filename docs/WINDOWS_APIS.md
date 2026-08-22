@@ -65,6 +65,26 @@ divided by the logical processor count.
 Both are deltas between two samples with the same `ProcessKey`. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md) on why that matters.
 
+A second trap, in the query itself rather than the arithmetic: **this
+class rejects a buffer that is *larger* than it needs, not just a
+smaller one.** Every other class here follows the documented contract —
+`STATUS_INFO_LENGTH_MISMATCH` means "too small", and a bigger buffer than
+strictly necessary still succeeds — which is what `nt::query`'s
+grow-and-retry protocol assumes. `SystemProcessorPerformanceInformation`
+does not: an oversized buffer mismatches identically to an undersized
+one, every attempt, so `nt::query`'s "ask for more each time" schedule
+never converges — confirmed against a real machine, where the call
+reported needing exactly 768 bytes (16 cores × 48) while rejecting a
+512 KB buffer and every doubling of it in turn. This is not documented
+anywhere; it was found by instrumenting the call and reading the status
+and reported size back. `src/win/nt/cpu.rs::read` goes through
+`nt::query_exact` instead, which resizes to exactly what the kernel
+reports rather than growing past it — see that function's docs for why
+that is safe (the logical processor count does not change mid-process).
+If a future `NtQuerySystemInformation` class added here starts behaving
+strangely under `nt::query`, check this first before assuming the buffer
+math is wrong.
+
 ### Identity — owner, session, elevation, integrity
 
 `src/win/identity.rs`. `OpenProcessToken` → `GetTokenInformation` for
