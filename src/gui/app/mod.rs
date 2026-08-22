@@ -46,7 +46,7 @@ use crate::model::sort::{compare_text, SortKey};
 use crate::model::tree::Entry;
 use crate::model::{ProcessKey, ProcessKind, Snapshot};
 use crate::theme::{Catalog, Palette};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// How many samples of history each graph keeps.
 ///
@@ -236,19 +236,40 @@ pub struct PerformanceView {
     pub memory: Series,
     /// Combined disk throughput, in bytes per second.
     pub disk: Series,
-    /// Combined network throughput, in bytes per second.
+    /// Combined network throughput, in bytes per second. See
+    /// [`crate::model::SystemSample::network_rate`] on what "combined"
+    /// means here — it is not the sum of the list.
     pub network: Series,
+    /// The send half of it, drawn as a band beneath.
+    pub network_send: Series,
+    /// One ring per adapter, keyed by interface LUID.
+    ///
+    /// Keyed rather than indexed, and keyed on the LUID rather than the
+    /// name, for the reason every other identity in this app is: a
+    /// `Vec` parallel to the snapshot's adapter list gives an adapter
+    /// the history of whichever adapter used to occupy its slot the
+    /// moment one is added, removed or renamed.
+    pub adapters: HashMap<u64, Series>,
     /// Busiest GPU engine, as a percentage.
     pub gpu: Series,
     /// Which sub-panel the Performance view has selected.
     pub focus: PerformanceFocus,
-    /// Whether the Network panel's idle-adapter list is expanded.
+    /// Which adapter the Network panel's graph is showing, or `None`
+    /// for the machine's total.
+    pub network_selected: Option<u64>,
+    /// Whether the Network panel's virtual-adapter group is expanded.
     ///
     /// Collapsed by default: a dev machine running Hyper-V, WSL or a VPN
-    /// client reports a couple of dozen throughput-less adapters, and
-    /// opening the page to all of them drawn out is the thing this field
-    /// exists to avoid.
-    pub network_idle_expanded: bool,
+    /// client reports a couple of dozen virtual adapters, and opening
+    /// the page to all of them drawn out is the thing this field exists
+    /// to avoid.
+    ///
+    /// Note what the group is: adapters with no hardware behind them,
+    /// which is a *fixed* property. It used to be adapters carrying no
+    /// traffic, which is not — so an adapter with intermittent traffic
+    /// moved between the list and the drawer every second, and the row
+    /// someone was reaching for was gone by the time they clicked.
+    pub network_virtual_expanded: bool,
 }
 
 impl Default for PerformanceView {
@@ -266,9 +287,12 @@ impl Default for PerformanceView {
             memory: Series::new(HISTORY),
             disk: Series::new(HISTORY),
             network: Series::new(HISTORY),
+            network_send: Series::new(HISTORY),
+            adapters: HashMap::new(),
             gpu: Series::new(HISTORY),
             focus: PerformanceFocus::default(),
-            network_idle_expanded: false,
+            network_selected: None,
+            network_virtual_expanded: false,
         }
     }
 }
@@ -658,14 +682,33 @@ impl App {
                 .map(crate::model::DiskSample::total_rate)
                 .sum::<f64>() as f32,
         );
-        performance.network.push(
-            snapshot
-                .system
+        performance
+            .network
+            .push(snapshot.system.network_rate() as f32);
+        performance
+            .network_send
+            .push(snapshot.system.network_send_rate() as f32);
+
+        // One ring per adapter, so the Network panel can graph a single
+        // adapter rather than only the machine's total — and so a row
+        // can carry its own sparkline, which is what makes twenty rows
+        // scannable rather than twenty numbers to read.
+        //
+        // Rings for adapters that are gone are dropped rather than kept
+        // against a possible return: an adapter that comes back gets a
+        // fresh LUID from the driver stack, so a kept ring is a ring
+        // nothing will ever claim.
+        performance
+            .adapters
+            .retain(|luid, _| snapshot.system.adapters.iter().any(|a| a.luid == *luid));
+        for adapter in &snapshot.system.adapters {
+            performance
                 .adapters
-                .iter()
-                .map(crate::model::AdapterSample::total_rate)
-                .sum::<f64>() as f32,
-        );
+                .entry(adapter.luid)
+                .or_insert_with(|| Series::new(HISTORY))
+                .push(adapter.total_rate() as f32);
+        }
+
         performance.gpu.push(
             snapshot
                 .system
@@ -689,11 +732,15 @@ impl App {
             &mut performance.memory,
             &mut performance.disk,
             &mut performance.network,
+            &mut performance.network_send,
             &mut performance.gpu,
         ] {
             series.clear();
         }
         for series in &mut performance.cores {
+            series.clear();
+        }
+        for series in performance.adapters.values_mut() {
             series.clear();
         }
     }

@@ -35,40 +35,83 @@
 //! process talking to, and how much". `docs/WINDOWS_APIS.md` records the
 //! decision so it does not get re-litigated as an oversight.
 //!
-//! ## Loopback and the tunnels are excluded
+//! ## A filter module is not an adapter, and this is the bug it caused
 //!
-//! An adapter list that includes the loopback interface reports traffic
-//! that never left the machine, and one that includes every WFP callout
-//! and tunnel pseudo-adapter is a list of twenty entries of which two are
-//! real. [`adapters`] filters to interfaces that are connected, not
-//! loopback, and have a non-zero link speed.
+//! `GetIfTable2` returns a row for every NDIS **filter module** bound to
+//! an adapter as well as for the adapter itself. A machine with Npcap,
+//! the QoS packet scheduler and the two WFP lightweight filters
+//! installed — which is to say a stock Windows machine with Wireshark on
+//! it — reports five rows for one network card:
+//!
+//! ```text
+//! Ethernet 2
+//! Ethernet 2-Npcap Packet Driver (NPCAP)-0000
+//! Ethernet 2-QoS Packet Scheduler-0000
+//! Ethernet 2-WFP 802.3 MAC Layer LightWeight Filter-0000
+//! Ethernet 2-WFP Native MAC Layer LightWeight Filter-0000
+//! ```
+//!
+//! Every one of them carries the *same* octet counters as the adapter it
+//! is bound to, because they are the same bytes seen at a different
+//! layer of the same stack. Listing them is a list of near-identical
+//! cards showing near-identical numbers; **summing** them, which the
+//! Network panel's total did, reports five times the traffic the machine
+//! actually moved.
+//!
+//! The `FilterInterface` flag in `InterfaceAndOperStatusFlags` is what
+//! names them, and [`adapters`] drops them on it. Loopback goes too —
+//! traffic that never left the machine is not throughput.
+//!
+//! ## Everything else stays, in whatever state it is in
+//!
+//! This function used to also require `OperStatus == Up` and a non-zero
+//! link speed. That is a filter on a *live* property, and a list built
+//! from one is a list whose rows appear and vanish as the machine
+//! changes: unplug the cable and the row goes, so the panel answers
+//! "what is connected right now" when the question being asked is "what
+//! does this machine have". The state comes back as a field instead —
+//! see [`crate::model::AdapterState`] — and the row stays put.
 
 use super::strings;
+use crate::model::{AdapterKind, AdapterState};
 use std::collections::HashMap;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     FreeMibTable, GetExtendedTcpTable, GetExtendedUdpTable, GetIfTable2, MIB_IF_ROW2,
     MIB_IF_TABLE2, MIB_TCPTABLE_OWNER_PID, MIB_UDPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
     UDP_TABLE_OWNER_PID,
 };
-use windows_sys::Win32::NetworkManagement::Ndis::NET_IF_OPER_STATUS_UP;
 use windows_sys::Win32::Networking::WinSock::AF_INET;
 
-/// One adapter's cumulative counters.
+/// One adapter's cumulative counters and the facts that identify it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AdapterCounters {
+    /// The interface LUID — this adapter's identity across samples.
+    pub luid: u64,
     /// The adapter's friendly name, e.g. "Ethernet" or "Wi-Fi".
     pub name: String,
+    /// The hardware description, e.g. "Realtek Gaming 2.5GbE Family
+    /// Controller". What tells "Ethernet" and "Ethernet 2" apart.
+    pub description: String,
+    /// What kind of adapter this is.
+    pub kind: AdapterKind,
+    /// Whether it is up, and if not, why.
+    pub state: AdapterState,
+    /// Whether there is hardware behind it, from the `HardwareInterface`
+    /// flag.
+    pub hardware: bool,
     /// Cumulative octets received.
     pub received: u64,
     /// Cumulative octets sent.
     pub sent: u64,
-    /// Nominal link speed in bits per second, for the graph's scale.
+    /// Nominal link speed in bits per second, or zero where the adapter
+    /// reports none or reports the "unlimited" sentinel.
     pub link_speed: u64,
 }
 
-/// Reads every real, connected adapter's counters.
+/// Reads every adapter the machine has.
 ///
-/// See the module docs on what is filtered out and why.
+/// See the module docs on the two things filtered out — filter modules
+/// and loopback — and on why nothing else is.
 #[must_use]
 pub fn adapters() -> Vec<AdapterCounters> {
     let Some(table) = IfTable::read() else {
@@ -77,33 +120,175 @@ pub fn adapters() -> Vec<AdapterCounters> {
     table
         .rows()
         .iter()
-        .filter(|row| is_interesting(row))
+        .filter(|row| is_an_adapter(row))
         .map(|row| AdapterCounters {
+            luid: luid_of(row),
             name: strings::from_wide_nul(&row.Alias),
+            description: strings::from_wide_nul(&row.Description),
+            kind: kind_of(row),
+            state: state_of(row),
+            hardware: flags(row).hardware,
             received: row.InOctets,
             sent: row.OutOctets,
-            link_speed: row.TransmitLinkSpeed,
+            link_speed: link_speed(row),
         })
         .collect()
 }
 
-/// Whether an interface is one a person would recognise as their network
-/// connection.
-fn is_interesting(row: &MIB_IF_ROW2) -> bool {
-    /// `IF_TYPE_SOFTWARE_LOOPBACK`, from the IANA interface-type list.
-    const LOOPBACK: u32 = 24;
-    /// `IF_TYPE_TUNNEL`.
-    const TUNNEL: u32 = 131;
+/// `IF_TYPE_SOFTWARE_LOOPBACK`, from the IANA interface-type list.
+const IF_TYPE_LOOPBACK: u32 = 24;
+/// `IF_TYPE_TUNNEL`.
+const IF_TYPE_TUNNEL: u32 = 131;
+/// `IF_TYPE_IEEE80211` — an 802.11 wireless interface.
+const IF_TYPE_WIRELESS: u32 = 71;
+/// `IF_TYPE_IEEE80216_WMAN` — WiMAX mobile broadband.
+const IF_TYPE_WIMAX: u32 = 237;
+/// `IF_TYPE_WWANPP` — GSM mobile broadband.
+const IF_TYPE_WWANPP: u32 = 243;
+/// `IF_TYPE_WWANPP2` — CDMA mobile broadband.
+const IF_TYPE_WWANPP2: u32 = 244;
+/// `IF_TYPE_ETHERNET_CSMACD`.
+const IF_TYPE_ETHERNET: u32 = 6;
 
-    row.OperStatus == NET_IF_OPER_STATUS_UP
-        && row.Type != LOOPBACK
-        && row.Type != TUNNEL
-        // A pseudo-adapter with no link speed is not a network
-        // connection; a real one always reports one.
-        && row.TransmitLinkSpeed > 0
-        // `u64::MAX` is what a virtual adapter reports for "unlimited",
-        // which would make the graph's scale meaningless.
-        && row.TransmitLinkSpeed != u64::MAX
+/// An interface's LUID as a plain integer.
+///
+/// `NET_LUID_LH` is a union of a `u64` and a bitfield view of the same
+/// eight bytes — the interface index and the IANA type unpacked out of
+/// it. Reading the `u64` arm is the documented way to get an opaque
+/// identifier, which is the only use it has here.
+fn luid_of(row: &MIB_IF_ROW2) -> u64 {
+    // SAFETY: `NET_LUID_LH` is a union over eight bytes and `Value` is
+    // its `u64` arm, so every bit pattern the kernel can write into the
+    // field is a valid `u64`. The row was filled by `GetIfTable2`, which
+    // initialises the whole struct, so the bytes are not uninitialised.
+    unsafe { row.InterfaceLuid.Value }
+}
+
+/// Whether a row describes an adapter rather than a layer of one.
+fn is_an_adapter(row: &MIB_IF_ROW2) -> bool {
+    !flags(row).filter && row.Type != IF_TYPE_LOOPBACK
+}
+
+/// The `InterfaceAndOperStatusFlags` bitfield, unpacked.
+///
+/// Only the two bits anything here reads. The field is a C bitfield of
+/// eight `BOOLEAN : 1` members, which MSVC packs from the least
+/// significant bit up in declaration order — `HardwareInterface` first,
+/// `FilterInterface` second. `windows-sys` exposes it as one opaque
+/// `u8`, so the shifts are stated here rather than generated, and the
+/// order is the one `MIB_IF_ROW2`'s own declaration gives.
+struct Flags {
+    /// `HardwareInterface`: there is a physical device behind this.
+    hardware: bool,
+    /// `FilterInterface`: this is an NDIS filter module bound to some
+    /// other interface, not an interface in its own right.
+    filter: bool,
+}
+
+/// Unpacks the flags a row carries.
+fn flags(row: &MIB_IF_ROW2) -> Flags {
+    /// `HardwareInterface`, the first member of the bitfield.
+    const HARDWARE: u8 = 1 << 0;
+    /// `FilterInterface`, the second.
+    const FILTER: u8 = 1 << 1;
+
+    let bits = row.InterfaceAndOperStatusFlags._bitfield;
+    Flags {
+        hardware: bits & HARDWARE != 0,
+        filter: bits & FILTER != 0,
+    }
+}
+
+/// Classifies an adapter for the label beside its name.
+///
+/// Reads the IANA type first and the NDIS physical medium second: the
+/// type is what distinguishes a tunnel and mobile broadband, and the
+/// medium is what distinguishes Wi-Fi and Bluetooth from the Ethernet
+/// they both emulate to the rest of the stack. An adapter with no
+/// hardware behind it is `Virtual` whatever it claims to be, which is
+/// how a Hyper-V vSwitch — an `IF_TYPE_ETHERNET_CSMACD` with an Ethernet
+/// medium, indistinguishable from a network card by those two fields
+/// alone — ends up labelled honestly.
+fn kind_of(row: &MIB_IF_ROW2) -> AdapterKind {
+    /// `NdisPhysicalMediumWirelessLan`.
+    const MEDIUM_WIRELESS_LAN: i32 = 1;
+    /// `NdisPhysicalMediumWirelessWan`.
+    const MEDIUM_WIRELESS_WAN: i32 = 8;
+    /// `NdisPhysicalMediumNative802_11`.
+    const MEDIUM_NATIVE_802_11: i32 = 9;
+    /// `NdisPhysicalMediumBluetooth`.
+    const MEDIUM_BLUETOOTH: i32 = 10;
+
+    match row.Type {
+        IF_TYPE_TUNNEL => return AdapterKind::Tunnel,
+        IF_TYPE_WIRELESS => return AdapterKind::WiFi,
+        IF_TYPE_WIMAX | IF_TYPE_WWANPP | IF_TYPE_WWANPP2 => return AdapterKind::Cellular,
+        _ => {}
+    }
+    match row.PhysicalMediumType {
+        MEDIUM_WIRELESS_LAN | MEDIUM_NATIVE_802_11 => return AdapterKind::WiFi,
+        MEDIUM_BLUETOOTH => return AdapterKind::Bluetooth,
+        MEDIUM_WIRELESS_WAN => return AdapterKind::Cellular,
+        _ => {}
+    }
+    if !flags(row).hardware {
+        return AdapterKind::Virtual;
+    }
+    if row.Type == IF_TYPE_ETHERNET {
+        AdapterKind::Ethernet
+    } else {
+        AdapterKind::Other
+    }
+}
+
+/// Reads an adapter's state, preferring the *reason* it is down.
+///
+/// `OperStatus` alone says "down" for a disabled adapter, an unplugged
+/// cable and a missing device alike, and those are three different
+/// things to be told. `AdminStatus` distinguishes the disabled one and
+/// `MediaConnectState` the unplugged one, so both are consulted before
+/// falling back.
+fn state_of(row: &MIB_IF_ROW2) -> AdapterState {
+    /// `IfOperStatusUp`.
+    const OPER_UP: i32 = 1;
+    /// `IfOperStatusDormant`.
+    const OPER_DORMANT: i32 = 5;
+    /// `IfOperStatusNotPresent`.
+    const OPER_NOT_PRESENT: i32 = 6;
+    /// `IfOperStatusLowerLayerDown`.
+    const OPER_LOWER_LAYER_DOWN: i32 = 7;
+    /// `NET_IF_ADMIN_STATUS_DOWN`.
+    const ADMIN_DOWN: i32 = 2;
+    /// `MediaConnectStateDisconnected`.
+    const MEDIA_DISCONNECTED: i32 = 2;
+
+    if row.OperStatus == OPER_UP {
+        return AdapterState::Up;
+    }
+    if row.AdminStatus == ADMIN_DOWN {
+        return AdapterState::Disabled;
+    }
+    match row.OperStatus {
+        OPER_DORMANT => AdapterState::Dormant,
+        OPER_LOWER_LAYER_DOWN => AdapterState::LowerLayerDown,
+        OPER_NOT_PRESENT => AdapterState::NotPresent,
+        _ if row.MediaConnectState == MEDIA_DISCONNECTED => AdapterState::Disconnected,
+        _ => AdapterState::NotPresent,
+    }
+}
+
+/// An adapter's link speed, with the sentinels flattened to zero.
+///
+/// `u64::MAX` is what a virtual adapter reports for "unlimited", and a
+/// down adapter reports nothing at all. Both mean "there is no figure to
+/// show here", and a caller that has to know about two of them is a
+/// caller that will check for one.
+fn link_speed(row: &MIB_IF_ROW2) -> u64 {
+    if row.TransmitLinkSpeed == u64::MAX {
+        0
+    } else {
+        row.TransmitLinkSpeed
+    }
 }
 
 /// An owned `MIB_IF_TABLE2`, freed on drop.
@@ -331,34 +516,120 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_adapter_list_excludes_loopback_and_pseudo_adapters() {
-        // A list with loopback in it reports traffic that never left the
-        // machine; one with every tunnel and callout in it is twenty
-        // entries of which two are real.
-        for adapter in adapters() {
-            assert!(
-                adapter.link_speed > 0 && adapter.link_speed != u64::MAX,
-                "{} has an implausible link speed of {}",
-                adapter.name,
-                adapter.link_speed
-            );
+    fn the_adapter_list_excludes_loopback_and_filter_modules() {
+        // The regression this exists for: an NDIS filter module bound to
+        // an adapter gets its own row, carrying the *same* octet
+        // counters as the adapter it filters. On a machine with Npcap
+        // and the two WFP lightweight filters installed that is five
+        // rows for one network card, all reading the same throughput —
+        // and a total that sums them reports five times the traffic the
+        // machine moved.
+        //
+        // A filter module's alias is always the underlying adapter's
+        // alias with the filter's name appended, so a row whose name is
+        // a strict extension of another row's is the tell. Checked by
+        // shape rather than by looking for "WFP", because the set of
+        // filters installed is whatever the machine happens to have.
+        let adapters = adapters();
+        for adapter in &adapters {
             assert!(
                 !adapter.name.to_lowercase().contains("loopback"),
                 "the loopback interface should have been filtered out"
+            );
+            for other in &adapters {
+                if other.luid == adapter.luid {
+                    continue;
+                }
+                assert!(
+                    !adapter.name.starts_with(&format!("{}-", other.name)),
+                    "{} looks like a filter module bound to {} — its \
+                     counters are that adapter's counters counted twice",
+                    adapter.name,
+                    other.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_adapter_has_a_name_and_a_distinct_identity() {
+        // A machine with no network at all is possible, so this asserts
+        // the shape rather than the presence of an adapter. The LUID is
+        // the part that matters: it keys the rate delta, the history
+        // ring and the selection, so two adapters sharing one would
+        // subtract one adapter's counters from another's.
+        let adapters = adapters();
+        let mut seen = std::collections::HashSet::new();
+        for adapter in &adapters {
+            assert!(
+                !adapter.name.is_empty(),
+                "an adapter should report a friendly name"
+            );
+            assert!(
+                seen.insert(adapter.luid),
+                "{} shares a LUID with another adapter",
+                adapter.name
             );
         }
     }
 
     #[test]
-    fn adapter_counters_are_readable() {
-        // A machine with no network at all is possible, so this asserts
-        // the shape rather than the presence of an adapter.
-        for adapter in adapters() {
+    fn a_machine_with_a_network_card_reports_one_as_hardware() {
+        // The `HardwareInterface` flag is read out of a hand-unpacked
+        // bitfield, and getting the bit order wrong does not fail — it
+        // silently files every physical adapter under "virtual", which
+        // moves it into the collapsed group and drops it out of the
+        // machine's throughput total. This is the assertion that would
+        // notice.
+        //
+        // Guarded on the list being non-empty rather than asserting a
+        // card exists: a VM guest genuinely has only synthetic adapters.
+        let adapters = adapters();
+        if adapters.iter().any(|adapter| {
+            matches!(adapter.kind, AdapterKind::Ethernet | AdapterKind::WiFi)
+                && adapter.link_speed > 0
+        }) {
             assert!(
-                !adapter.name.is_empty(),
-                "an adapter should report a friendly name"
+                adapters.iter().any(|adapter| adapter.hardware),
+                "a machine with a live Ethernet or Wi-Fi adapter has at \
+                 least one hardware interface, got {:?}",
+                adapters
+                    .iter()
+                    .map(|adapter| (&adapter.name, adapter.kind, adapter.hardware))
+                    .collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn nothing_is_filtered_out_for_being_down() -> anyhow::Result<()> {
+        // A test cannot unplug a cable, so this checks the property that
+        // makes the disappearing rows impossible rather than the
+        // symptom: the predicate deciding what is in the list reads no
+        // live field. `OperStatus`, `AdminStatus`, `MediaConnectState`
+        // and the link speed all belong to `state_of` and `link_speed`,
+        // which describe an adapter — the moment one of them appears in
+        // `is_an_adapter` it decides whether the adapter exists, and the
+        // row starts vanishing when the machine changes.
+        let source = include_str!("net.rs");
+        let body = source
+            .split("fn is_an_adapter")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .ok_or_else(|| anyhow::anyhow!("is_an_adapter is no longer a plain function"))?;
+        for live in [
+            "OperStatus",
+            "AdminStatus",
+            "MediaConnectState",
+            "LinkSpeed",
+        ] {
+            assert!(
+                !body.contains(live),
+                "is_an_adapter reads {live}, which is a live property — \
+                 an adapter would drop out of the list when it changed"
+            );
+        }
+        Ok(())
     }
 
     #[test]

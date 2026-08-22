@@ -420,7 +420,16 @@ pub struct SystemSample {
     pub memory: MemorySample,
     /// One entry per physical disk.
     pub disks: Vec<DiskSample>,
-    /// One entry per network adapter that is up and not a loopback.
+    /// One entry per network adapter the machine has — connected or
+    /// not, hardware or virtual.
+    ///
+    /// Not "per adapter currently up". An adapter that vanishes from
+    /// this list the moment its cable is pulled takes its row with it,
+    /// and a row that disappears when the thing it describes develops a
+    /// problem is the opposite of what someone opened this panel for.
+    /// Filter-module pseudo-interfaces are the one thing excluded, and
+    /// they are excluded because they are not adapters at all — see
+    /// `src/win/net.rs`.
     pub adapters: Vec<AdapterSample>,
     /// One entry per GPU adapter the performance counters expose.
     pub gpus: Vec<GpuSample>,
@@ -432,6 +441,51 @@ pub struct SystemSample {
     pub thread_count: u64,
     /// Total open handles across every process.
     pub handle_count: u64,
+}
+
+impl SystemSample {
+    /// The machine's own network throughput, in bytes per second.
+    ///
+    /// **Not the sum of every adapter**, and the difference is not
+    /// small. Windows counts one byte once per interface it crosses, and
+    /// on a machine running Hyper-V, WSL or a VPN a single packet
+    /// crosses several: the virtual switch, the VPN's virtual NIC, and
+    /// the physical card underneath all count it. Summing the list
+    /// reports two or three times the traffic the machine actually
+    /// moved, and reports it as the headline figure on the page.
+    ///
+    /// So the total is the sum over *hardware* adapters, which is where
+    /// bytes genuinely enter and leave the machine. A guest VM with only
+    /// a synthetic NIC has no hardware adapter at all and would
+    /// otherwise graph a flat zero forever, so a machine with none falls
+    /// back to summing what it has.
+    #[must_use]
+    pub fn network_rate(&self) -> f64 {
+        let hardware: f64 = self
+            .adapters
+            .iter()
+            .filter(|adapter| adapter.hardware)
+            .map(AdapterSample::total_rate)
+            .sum();
+        if self.adapters.iter().any(|adapter| adapter.hardware) {
+            hardware
+        } else {
+            self.adapters.iter().map(AdapterSample::total_rate).sum()
+        }
+    }
+
+    /// The send half of [`SystemSample::network_rate`], over the same
+    /// adapters — so the band drawn under the total graph is a share of
+    /// it rather than a second, differently-scoped number.
+    #[must_use]
+    pub fn network_send_rate(&self) -> f64 {
+        let any_hardware = self.adapters.iter().any(|adapter| adapter.hardware);
+        self.adapters
+            .iter()
+            .filter(|adapter| adapter.hardware || !any_hardware)
+            .map(|adapter| adapter.send_rate)
+            .sum()
+    }
 }
 
 /// Processor utilisation, and the static facts about the CPU.
@@ -525,16 +579,156 @@ impl DiskSample {
     }
 }
 
+/// What kind of thing an adapter is, for the label beside its name.
+///
+/// Coarser than the IANA interface type deliberately: the question this
+/// answers is "is this the Wi-Fi, the cable, or something a program
+/// made up", and an eight-way split answers it where the IANA list's
+/// two hundred entries do not.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AdapterKind {
+    /// A wired Ethernet interface.
+    Ethernet,
+    /// 802.11 wireless.
+    WiFi,
+    /// Mobile broadband — WWAN, WiMAX.
+    Cellular,
+    /// A Bluetooth personal-area network.
+    Bluetooth,
+    /// A tunnel: Teredo, ISATAP, 6to4, and most VPN clients.
+    Tunnel,
+    /// A software adapter with no hardware behind it — a Hyper-V or WSL
+    /// virtual switch, a VPN's virtual NIC, a loopback-ish pseudo-device.
+    Virtual,
+    /// Something real that none of the above describes.
+    #[default]
+    Other,
+}
+
+impl AdapterKind {
+    /// The word shown beside the adapter's name.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Ethernet => "Ethernet",
+            Self::WiFi => "Wi-Fi",
+            Self::Cellular => "Cellular",
+            Self::Bluetooth => "Bluetooth",
+            Self::Tunnel => "Tunnel",
+            Self::Virtual => "Virtual",
+            Self::Other => "Adapter",
+        }
+    }
+}
+
+/// Whether an adapter is currently carrying traffic, and if not, why.
+///
+/// The whole point of this enum is that an adapter has a *state* rather
+/// than an existence: the list shows every adapter the machine has, and
+/// a cable pulled out changes this field rather than removing the row.
+/// See [`SystemSample::adapters`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AdapterState {
+    /// Up, connected, and able to pass packets.
+    Up,
+    /// Enabled and connected, but waiting on something external —
+    /// `IfOperStatusDormant`, which a Wi-Fi adapter mid-association sits
+    /// in for a second or two.
+    Dormant,
+    /// Enabled, but the media is not connected: a cable unplugged, or a
+    /// Wi-Fi radio associated with nothing.
+    Disconnected,
+    /// The interface this one runs on top of is down. A vSwitch whose
+    /// physical NIC lost its cable reports this.
+    LowerLayerDown,
+    /// Administratively disabled in Network Connections.
+    Disabled,
+    /// The hardware is gone — a USB adapter unplugged, a driver removed.
+    #[default]
+    NotPresent,
+}
+
+impl AdapterState {
+    /// The word shown beside the status dot.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Up => "Connected",
+            Self::Dormant => "Connecting",
+            // Not "No cable", which is what this said and which is
+            // wrong on exactly the adapter people look at most: a Wi-Fi
+            // radio associated with nothing has no cable to be missing.
+            Self::Disconnected => "Disconnected",
+            Self::LowerLayerDown => "Lower layer down",
+            Self::Disabled => "Disabled",
+            Self::NotPresent => "Not present",
+        }
+    }
+
+    /// Whether this state can pass packets, which is what decides
+    /// whether an adapter's rates mean anything.
+    #[must_use]
+    pub const fn is_online(self) -> bool {
+        matches!(self, Self::Up)
+    }
+
+    /// Whether the adapter is there at all.
+    ///
+    /// A cable pulled out leaves the adapter present; a device removed
+    /// or an adapter disabled in Network Connections does not. The
+    /// distinction earns its keep in [`adapter_order`]: it is the one
+    /// state fact slow enough to sort on. Up-versus-disconnected flips
+    /// whenever a Wi-Fi radio re-associates, which is often enough that
+    /// sorting on it would put the list back to reshuffling itself —
+    /// present-versus-absent needs someone to unplug something.
+    #[must_use]
+    pub const fn is_present(self) -> bool {
+        !matches!(self, Self::NotPresent | Self::Disabled)
+    }
+}
+
 /// One network adapter's throughput over the interval.
+///
+/// One of these exists for **every** adapter the machine has, connected
+/// or not — see [`SystemSample::adapters`] on why that is the shape.
 #[derive(Clone, Debug, Default)]
 pub struct AdapterSample {
-    /// The adapter's friendly name, e.g. "Ethernet" or "Wi-Fi".
+    /// The interface LUID, which is this adapter's identity.
+    ///
+    /// Not the name and not the interface index: an index changes when
+    /// an adapter is disabled and re-enabled, and a name changes when
+    /// someone renames the connection. The LUID survives both, and it is
+    /// what the rate delta, the history ring and the selection all key
+    /// on — the same reasoning as [`ProcessKey`], one layer down.
+    pub luid: u64,
+    /// The adapter's friendly name, e.g. "Ethernet" or "Wi-Fi". This is
+    /// what the Network Connections panel calls it, and it is what
+    /// someone renaming a connection changes.
     pub name: String,
+    /// The hardware description, e.g. "Intel(R) Wi-Fi 6E AX211 160MHz".
+    /// Two adapters called "Ethernet" and "Ethernet 2" are told apart by
+    /// this and by nothing else.
+    pub description: String,
+    /// What kind of adapter this is.
+    pub kind: AdapterKind,
+    /// Whether it is up, and if not, why.
+    pub state: AdapterState,
+    /// Whether there is real hardware behind it.
+    ///
+    /// The split the Network panel groups on, and the one that decides
+    /// which adapters [`SystemSample::network_rate`] sums — see there.
+    pub hardware: bool,
     /// Bytes per second received.
     pub receive_rate: f64,
     /// Bytes per second sent.
     pub send_rate: f64,
+    /// Cumulative octets received since the adapter came up.
+    pub received_total: u64,
+    /// Cumulative octets sent since the adapter came up.
+    pub sent_total: u64,
     /// Nominal link speed in bits per second, for the graph's scale.
+    /// Zero where the adapter does not report one, which every adapter
+    /// that is down does.
     pub link_speed: u64,
 }
 
@@ -544,6 +738,35 @@ impl AdapterSample {
     pub fn total_rate(&self) -> f64 {
         self.receive_rate + self.send_rate
     }
+}
+
+/// Orders adapters for display, and it is deliberately not by traffic.
+///
+/// Hardware first, then adapters that are actually there, then by kind,
+/// then by name. Every term is a property of the adapter rather than of
+/// what it happens to be doing, so the list a person is reading does not
+/// reshuffle underneath them once a second. Sorting a live list by a
+/// live value is what makes a row impossible to click: the row moves
+/// between the decision to click it and the click.
+///
+/// The absent-last term is what gives the list its shape on a real
+/// machine. A developer box carries eleven ISATAP tunnels for adapters
+/// that have never existed, and by name alone every one of them sorts
+/// above the Hyper-V switch moving eight hundred kilobytes a second. See
+/// [`AdapterState::is_present`] on why that particular state fact is
+/// safe to sort on when up-versus-disconnected is not.
+///
+/// The busiest-first ordering the disk and GPU grids use is right for
+/// *those* — they hold two or three entries that are all present all the
+/// time. This list holds twenty, and it is an inventory.
+#[must_use]
+pub fn adapter_order(adapter: &AdapterSample) -> (bool, bool, AdapterKind, String) {
+    (
+        !adapter.hardware,
+        !adapter.state.is_present(),
+        adapter.kind,
+        adapter.name.to_lowercase(),
+    )
 }
 
 /// One GPU adapter's utilisation over the interval.

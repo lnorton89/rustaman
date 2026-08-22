@@ -127,14 +127,7 @@ fn picker(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) -> R
                 (
                     PerformanceFocus::Network,
                     "Network",
-                    crate::format::rate(
-                        snapshot
-                            .system
-                            .adapters
-                            .iter()
-                            .map(crate::model::AdapterSample::total_rate)
-                            .sum(),
-                    ),
+                    crate::format::rate(snapshot.system.network_rate()),
                 ),
                 (
                     PerformanceFocus::Gpu,
@@ -230,11 +223,22 @@ fn picker_entry(
         egui::TextStyle::Body.resolve(ui.style()),
         theme::rgb(if active { theme.text } else { theme.text_muted }),
     );
-    ui.painter().text(
-        rect.left_bottom() + Vec2::new(SPACE_MD, -SPACE_SM),
-        egui::Align2::LEFT_BOTTOM,
+    // Truncated at the sparkline's left edge rather than drawn through
+    // it. The Memory entry's value is a pair — "25.6 GB / 64.0 GB" —
+    // which is wider than the 45% of the row the text column actually
+    // has, so it used to run underneath the sparkline and the two
+    // overprinted each other into something that read as neither.
+    let value_width = (spark.left() - SPACE_SM - (rect.left() + SPACE_MD)).max(0.0);
+    let galley = clipped(
+        ui,
         value,
         egui::TextStyle::Small.resolve(ui.style()),
+        theme.text_faint,
+        value_width,
+    );
+    ui.painter().galley(
+        rect.left_bottom() + Vec2::new(SPACE_MD, -SPACE_SM - galley.size().y),
+        galley,
         theme::rgb(theme.text_faint),
     );
 
@@ -355,7 +359,7 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     });
     ui.add_space(chrome::SECTION_GAP);
 
-    ui.horizontal(|ui| {
+    ui.horizontal_top(|ui| {
         let width = stat_column_width(ui.available_width());
         stat_column(
             ui,
@@ -444,7 +448,7 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     );
     ui.add_space(SPACE_MD);
 
-    ui.horizontal(|ui| {
+    ui.horizontal_top(|ui| {
         let width = stat_column_width(ui.available_width());
         stat_column(
             ui,
@@ -482,7 +486,7 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     ui.add_space(chrome::SECTION_GAP);
 
     widgets::section(ui, theme, "Kernel memory");
-    ui.horizontal(|ui| {
+    ui.horizontal_top(|ui| {
         let width = stat_column_width(ui.available_width());
         stat_column(
             ui,
@@ -576,7 +580,7 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
                 theme.heat((disk.active_percent / 100.0) as f32),
             );
             ui.add_space(SPACE_SM);
-            ui.horizontal(|ui| {
+            ui.horizontal_top(|ui| {
                 let width = stat_column_width(ui.available_width());
                 stat_column(
                     ui,
@@ -608,89 +612,558 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     });
 }
 
-/// The network panel.
+/// The network panel: one graph, its readouts, and the machine's
+/// adapter inventory.
+///
+/// ## Why this is a list and the disk panel is a grid
+///
+/// A card is the right container for an item with rich, varied content —
+/// a disk has a name, an active-time meter, a read rate, a write rate
+/// and a capacity pair, and five things want a box. An adapter has a
+/// name and two rates, and every adapter has exactly the same fields, so
+/// a card per adapter is a box drawn around one line of text. A machine
+/// with twenty adapters got twenty of those, and the two that mattered
+/// were somewhere in the middle of it.
+///
+/// A row per adapter puts the same information in a third of the height
+/// and — because every row's name starts at the same x and every row's
+/// number ends at the same x — makes the column scannable, which a grid
+/// of cards is not.
+///
+/// ## The graph can be scoped to one adapter
+///
+/// Clicking a row graphs that adapter instead of the machine total,
+/// which is the thing the old panel could not do at all: on a machine
+/// with a VPN up, "is this traffic going over the tunnel or around it"
+/// is the whole question, and a single summed graph cannot answer it.
 fn network(app: &mut App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
-    widgets::section(ui, theme, "Network");
+    // Ordered once, here, by a rule that reads no live value — see
+    // `model::adapter_order`. Everything below indexes into this.
+    let mut adapters = system.adapters.clone();
+    adapters.sort_by_key(crate::model::adapter_order);
+
+    // The selection is re-resolved against this sample rather than
+    // trusted: an adapter can be removed — a USB dongle unplugged, a VPN
+    // client shut down — while its row is the selected one, and a
+    // selection pointing at nothing would graph an empty series with a
+    // heading naming an adapter that is gone.
+    let selected = app
+        .performance
+        .network_selected
+        .filter(|luid| adapters.iter().any(|adapter| adapter.luid == *luid));
+    app.performance.network_selected = selected;
+    let focused = selected.and_then(|luid| adapters.iter().find(|a| a.luid == luid));
+
+    network_graph(app, ui, theme, system, focused);
+    ui.add_space(chrome::SECTION_GAP);
+
+    if adapters.is_empty() {
+        widgets::empty_state(ui, theme, "This machine reports no network adapters");
+        return;
+    }
+    adapter_list(app, ui, theme, &adapters, selected);
+}
+
+/// The Network panel's graph, its legend, and the four readouts under it.
+///
+/// Scoped to `focused` if an adapter is selected and to the machine
+/// otherwise, so the heading, the graph and every number below it are
+/// describing the same thing — a panel where the heading says "Wi-Fi"
+/// and the readouts are machine totals is worse than one that cannot
+/// scope at all.
+fn network_graph(
+    app: &App,
+    ui: &mut Ui,
+    theme: &Palette,
+    system: &SystemSample,
+    focused: Option<&crate::model::AdapterSample>,
+) {
+    let total_color = theme.series(3, 5);
+    // The send band is `info` rather than another ramp hue for the same
+    // reason the CPU panel's kernel band is `danger`: it is not a second
+    // series, it is a share of the one being drawn, and a colour from
+    // the ramp would claim equal billing with it.
+    let send_color = theme.info;
+
+    let heading = focused.map_or_else(
+        || "Network · all adapters".to_string(),
+        |adapter| format!("Network · {}", adapter.name),
+    );
+    widgets::section(ui, theme, &heading);
 
     let (rect, _) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), GRAPH_HEIGHT),
         Sense::hover(),
     );
-    graph::area(
+    let scoped = focused.and_then(|adapter| app.performance.adapters.get(&adapter.luid));
+    let series = scoped.unwrap_or(&app.performance.network);
+    match scoped {
+        // A per-adapter ring holds that adapter's combined throughput
+        // and nothing else, so there is no send band to draw under it.
+        Some(series) => graph::area(
+            ui,
+            theme,
+            rect,
+            &graph::Graph {
+                series,
+                color: total_color,
+                floor: 0.0,
+                unit: graph::Unit::Rate,
+            },
+        ),
+        None => graph::banded(
+            ui,
+            theme,
+            rect,
+            &graph::Graph {
+                series: &app.performance.network,
+                color: total_color,
+                floor: 0.0,
+                unit: graph::Unit::Rate,
+            },
+            &graph::Graph {
+                series: &app.performance.network_send,
+                color: send_color,
+                floor: 0.0,
+                unit: graph::Unit::Rate,
+            },
+        ),
+    }
+    // The same gap the CPU panel leaves between its graph and its
+    // legend, because this is the same pairing.
+    ui.add_space(SPACE_SM);
+
+    let (receive, send) = focused.map_or_else(
+        || {
+            (
+                system.network_rate() - system.network_send_rate(),
+                system.network_send_rate(),
+            )
+        },
+        |adapter| (adapter.receive_rate, adapter.send_rate),
+    );
+    ui.horizontal(|ui| {
+        graph::legend(
+            ui,
+            theme,
+            total_color,
+            "Total",
+            &crate::format::rate(receive + send),
+        );
+        if scoped.is_none() {
+            ui.add_space(SPACE_LG);
+            graph::legend(ui, theme, send_color, "Send", &crate::format::rate(send));
+        }
+    });
+    ui.add_space(chrome::SECTION_GAP);
+
+    // Cumulative counters, summed over whatever the graph is scoped to.
+    // Not "since boot": Windows resets these when an adapter comes up,
+    // so the caption says what they are rather than implying an epoch
+    // they do not have.
+    let (in_total, out_total) = focused.map_or_else(
+        || {
+            let hardware = system.adapters.iter().any(|adapter| adapter.hardware);
+            system
+                .adapters
+                .iter()
+                .filter(|adapter| adapter.hardware || !hardware)
+                .fold((0u64, 0u64), |(rx, tx), adapter| {
+                    (
+                        rx.saturating_add(adapter.received_total),
+                        tx.saturating_add(adapter.sent_total),
+                    )
+                })
+        },
+        |adapter| (adapter.received_total, adapter.sent_total),
+    );
+
+    ui.horizontal_top(|ui| {
+        let width = stat_column_width(ui.available_width());
+        stat_column(ui, theme, width, "Receive", &crate::format::rate(receive));
+        stat_column(ui, theme, width, "Send", &crate::format::rate(send));
+        // The peak over the window the graph draws, which is the context
+        // that makes the current number mean something: 1.3 MB/s is
+        // either busy or idle depending on what this link has been doing
+        // for the last minute, and the graph shows the shape of that
+        // without ever stating the figure.
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Peak",
+            &crate::format::rate(f64::from(series.max())),
+        );
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Total in / out",
+            &format!(
+                "{} / {}",
+                crate::format::bytes(in_total),
+                crate::format::bytes(out_total)
+            ),
+        );
+    });
+}
+
+/// The adapter inventory: every adapter the machine has, hardware first.
+///
+/// The two groups are split on [`crate::model::AdapterSample::hardware`],
+/// which is a fact about the adapter. The split used to be on whether
+/// the adapter had carried a byte in the last second, which is a fact
+/// about the *moment*, and the result was a list that reshuffled itself
+/// once a second: an adapter with intermittent traffic crossed between
+/// the visible grid and the collapsed drawer on every sample, so a row
+/// could be gone by the time someone finished reaching for it. Nothing
+/// in this list moves now unless the machine's hardware changes.
+fn adapter_list(
+    app: &mut App,
+    ui: &mut Ui,
+    theme: &Palette,
+    adapters: &[crate::model::AdapterSample],
+    selected: Option<u64>,
+) {
+    let connected = adapters
+        .iter()
+        .filter(|adapter| adapter.state.is_online())
+        .count();
+    widgets::section(
         ui,
         theme,
-        rect,
-        &graph::Graph {
-            series: &app.performance.network,
-            color: theme.series(3, 5),
-            floor: 0.0,
-            unit: graph::Unit::Rate,
-        },
+        &format!(
+            "Adapters · {connected} of {} connected",
+            crate::format::count(adapters.len() as u64)
+        ),
     );
-    ui.add_space(SPACE_MD);
 
-    if system.adapters.is_empty() {
-        widgets::empty_state(ui, theme, "No connected adapters");
-        return;
-    }
+    let physical: Vec<&crate::model::AdapterSample> =
+        adapters.iter().filter(|a| a.hardware).collect();
+    let virtualised: Vec<&crate::model::AdapterSample> =
+        adapters.iter().filter(|a| !a.hardware).collect();
 
-    // Busiest first, and split at the last one carrying any traffic. A
-    // machine running Hyper-V, WSL or a VPN client reports a real,
-    // throughput-less adapter for every virtual switch and filter driver
-    // bound to the physical one — two dozen is routine — and a grid that
-    // draws every one of them as a full card is a wall of near-identical
-    // boxes with the two that matter lost somewhere in it.
-    let (active, idle) = split_by_activity(system.adapters.clone());
-
-    if active.is_empty() {
-        widgets::empty_state(ui, theme, "No adapters are currently active");
+    let mut clicked = None;
+    if physical.is_empty() {
+        widgets::empty_state(ui, theme, "No hardware adapters — every adapter is virtual");
     } else {
-        widgets::card_grid(ui, DEVICE_CARD_WIDTH, active.len(), |ui, index| {
-            let Some(adapter) = active.get(index) else {
-                return;
-            };
-            chrome::panel_card(ui, theme, |ui| {
-                ui.label(
-                    egui::RichText::new(&adapter.name)
-                        .color(theme::rgb(theme.text))
-                        .strong(),
-                );
-                ui.add_space(SPACE_XS);
-                ui.horizontal(|ui| {
-                    let width = stat_column_width(ui.available_width());
-                    stat_column(
-                        ui,
-                        theme,
-                        width,
-                        "Receive",
-                        &crate::format::rate(adapter.receive_rate),
-                    );
-                    stat_column(
-                        ui,
-                        theme,
-                        width,
-                        "Send",
-                        &crate::format::rate(adapter.send_rate),
-                    );
-                    stat_column(
-                        ui,
-                        theme,
-                        width,
-                        "Link speed",
-                        // Link speed is in bits per second; the byte
-                        // formatter would report a gigabit adapter as
-                        // "119 MB/s", which is right and reads as wrong.
-                        &format!("{} Mbps", adapter.link_speed / 1_000_000),
-                    );
-                });
-            });
+        chrome::panel_card(ui, theme, |ui| {
+            for (index, adapter) in physical.iter().enumerate() {
+                if index > 0 {
+                    widgets::section_rule(ui, theme);
+                }
+                if adapter_row(app, ui, theme, adapter, selected == Some(adapter.luid)) {
+                    clicked = Some(adapter.luid);
+                }
+            }
         });
     }
 
-    if !idle.is_empty() {
+    if !virtualised.is_empty() {
         ui.add_space(SPACE_MD);
-        idle_adapters(app, ui, theme, &idle);
+        let expanded = app.performance.network_virtual_expanded;
+        let mut toggled = false;
+        chrome::panel_card(ui, theme, |ui| {
+            let header = ui.horizontal(|ui| {
+                widgets::disclosure(ui, theme, expanded, "network-virtual");
+                ui.add_space(SPACE_XS);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} virtual adapter{}",
+                        virtualised.len(),
+                        if virtualised.len() == 1 { "" } else { "s" }
+                    ))
+                    .color(theme::rgb(theme.text_muted))
+                    .text_style(egui::TextStyle::Small),
+                );
+                // The collapsed group still carries a signal: a VPN or a
+                // virtual switch moving real traffic is exactly what
+                // someone opens this panel to find, and a drawer that
+                // says only how many things are inside it hides that.
+                let traffic: f64 = virtualised.iter().map(|adapter| adapter.total_rate()).sum();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(crate::format::rate_or_dash(traffic))
+                            .color(theme::rgb(theme.text_faint))
+                            .text_style(egui::TextStyle::Small),
+                    );
+                });
+            });
+            // Sensed across the whole line rather than only the
+            // chevron's own small hit box — see `widgets::sortable_header`
+            // on why a control meant to be clicked casually should not
+            // require aiming at it.
+            let row = ui
+                .interact(
+                    header.response.rect,
+                    ui.id().with("network-virtual-row"),
+                    Sense::click(),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            toggled = row.clicked();
+
+            if expanded {
+                for adapter in &virtualised {
+                    widgets::section_rule(ui, theme);
+                    if adapter_row(app, ui, theme, adapter, selected == Some(adapter.luid)) {
+                        clicked = Some(adapter.luid);
+                    }
+                }
+            }
+        });
+        if toggled {
+            app.performance.network_virtual_expanded = !expanded;
+        }
     }
+
+    if let Some(luid) = clicked {
+        // Clicking the row that is already graphed goes back to the
+        // machine total, so the way out is the way in. Without it the
+        // only route back would be a control that exists solely to
+        // undo one click.
+        app.performance.network_selected = if selected == Some(luid) {
+            None
+        } else {
+            Some(luid)
+        };
+    }
+}
+
+/// The height of one adapter row.
+///
+/// Two lines of text — the name, and the kind and hardware under it —
+/// plus the module's own spacing above and below. The old card was 108
+/// points tall and carried the same information.
+const ADAPTER_ROW: f32 = 46.0;
+
+/// The width an adapter row's sparkline gets.
+///
+/// Shorter than the picker's, because this one only has to answer "has
+/// this been doing anything" rather than carry a readable shape — the
+/// readable shape is what clicking the row is for.
+const ADAPTER_SPARK: f32 = 84.0;
+
+/// The width reserved at an adapter row's right edge for its two
+/// readouts: the rate, and the link speed under it.
+const ADAPTER_READOUT: f32 = 96.0;
+
+/// The narrowest the name column may get before the row drops its
+/// sparkline to give the space back.
+///
+/// A name clipped to forty points is a name nobody can read, and a
+/// sparkline is the least load-bearing thing in the row — it is the
+/// first thing to go when the window is narrow.
+const ADAPTER_NAME_MINIMUM: f32 = 140.0;
+
+/// The radius of the status dot at an adapter row's left edge.
+const STATUS_DOT: f32 = 4.0;
+
+/// One adapter's row. Returns whether it was clicked.
+fn adapter_row(
+    app: &App,
+    ui: &mut Ui,
+    theme: &Palette,
+    adapter: &crate::model::AdapterSample,
+    selected: bool,
+) -> bool {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), ADAPTER_ROW), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+
+    // Keyed on the adapter, not on the row's position in the list. An id
+    // built from the loop index animates the *slot*, so an adapter
+    // appearing above another one hands its hover state to whatever now
+    // sits where it did.
+    let id = ui.id().with(("adapter", adapter.luid));
+    let fill = if selected {
+        theme::rgb(theme.selection)
+    } else {
+        widgets::hover_fill(ui, id, response.hovered(), theme.raised, theme.hover)
+    };
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(theme::RADIUS), fill);
+    if selected {
+        let bar = Rect::from_min_size(
+            rect.left_top() + Vec2::new(0.0, SPACE_XS),
+            Vec2::new(theme::SELECTION_BAR, rect.height() - SPACE_XS * 2.0),
+        );
+        ui.painter()
+            .rect_filled(bar, egui::CornerRadius::same(2), theme::rgb(theme.accent));
+    }
+
+    let online = adapter.state.is_online();
+    ui.painter().circle_filled(
+        rect.left_center() + Vec2::new(SPACE_MD + STATUS_DOT, 0.0),
+        STATUS_DOT,
+        theme::rgb(state_color(theme, adapter.state)),
+    );
+
+    let name_left = rect.left() + SPACE_MD + STATUS_DOT * 2.0 + SPACE_SM;
+    let readout_right = rect.right() - SPACE_MD;
+    let spark_right = readout_right - ADAPTER_READOUT - SPACE_MD;
+    // The sparkline is drawn only if the name still has room to be read
+    // after it: on a narrow window the name is the part that identifies
+    // the row and the sparkline is decoration.
+    let roomy = spark_right - ADAPTER_SPARK - SPACE_MD - name_left >= ADAPTER_NAME_MINIMUM;
+    let name_width = if roomy {
+        spark_right - ADAPTER_SPARK - SPACE_MD - name_left
+    } else {
+        (readout_right - ADAPTER_READOUT - SPACE_MD - name_left).max(0.0)
+    };
+
+    // Only for an adapter that could be carrying traffic. A sparkline
+    // over a series of zeroes is a flat rule at the foot of the row,
+    // which reads as a stray divider rather than as "nothing happened" —
+    // and the row already says why nothing happened, in words, on the
+    // right.
+    if roomy && online {
+        if let Some(series) = app.performance.adapters.get(&adapter.luid) {
+            let spark = Rect::from_min_max(
+                egui::pos2(spark_right - ADAPTER_SPARK, rect.top() + SPACE_SM),
+                egui::pos2(spark_right, rect.bottom() - SPACE_SM),
+            );
+            graph::sparkline(ui, spark, series, theme.series(3, 5), 0.0);
+        }
+    }
+
+    // An adapter that is not passing packets is drawn in the muted text
+    // colour rather than removed or greyed to invisibility: it is still
+    // a fact about the machine, and someone looking for the adapter that
+    // *stopped* working needs to be able to find it.
+    let name_color = if online { theme.text } else { theme.text_muted };
+    ui.painter().galley(
+        egui::pos2(name_left, rect.top() + SPACE_SM),
+        clipped(
+            ui,
+            &adapter.name,
+            egui::TextStyle::Body.resolve(ui.style()),
+            name_color,
+            name_width,
+        ),
+        theme::rgb(name_color),
+    );
+
+    // The description is what tells "Ethernet" and "Ethernet 2" apart,
+    // and the kind is what says which of them is the Wi-Fi. Neither is
+    // worth a line of its own.
+    let subtitle = if adapter.description.is_empty() {
+        adapter.kind.label().to_string()
+    } else {
+        format!("{} · {}", adapter.kind.label(), adapter.description)
+    };
+    ui.painter().galley(
+        egui::pos2(name_left, rect.bottom() - SPACE_SM - small_height(ui)),
+        clipped(
+            ui,
+            &subtitle,
+            egui::TextStyle::Small.resolve(ui.style()),
+            theme.text_faint,
+            name_width,
+        ),
+        theme::rgb(theme.text_faint),
+    );
+
+    // The rate when there is one to show, and the reason there is not
+    // when there is not. A row reading "0 B/s" for a disabled adapter
+    // says the adapter is idle, which is a different and wrong answer.
+    let (headline, headline_color) = if online {
+        (crate::format::rate(adapter.total_rate()), theme.text)
+    } else {
+        (adapter.state.label().to_string(), theme.text_muted)
+    };
+    ui.painter().text(
+        egui::pos2(readout_right, rect.top() + SPACE_SM),
+        egui::Align2::RIGHT_TOP,
+        headline,
+        if online {
+            egui::TextStyle::Monospace.resolve(ui.style())
+        } else {
+            egui::TextStyle::Small.resolve(ui.style())
+        },
+        theme::rgb(headline_color),
+    );
+    // Only when there is a speed to state. An adapter that is down
+    // reports none, and the em dash the formatter returns would sit
+    // directly under the word explaining why — two ways of saying
+    // "nothing here", stacked.
+    if adapter.link_speed > 0 {
+        ui.painter().text(
+            egui::pos2(readout_right, rect.bottom() - SPACE_SM),
+            egui::Align2::RIGHT_BOTTOM,
+            crate::format::link_speed(adapter.link_speed),
+            egui::TextStyle::Small.resolve(ui.style()),
+            theme::rgb(theme.text_faint),
+        );
+    }
+
+    // Everything the row had to leave out, on hover. The row is a
+    // summary by design — four facts, in a fixed place, scannable down a
+    // column — and this is where the rest of them live rather than in a
+    // fifth column nobody has room for.
+    let response = response.on_hover_text(format!(
+        "{}\n{}\n{} · {}\nLink speed {}\nReceive {} · Send {}\nTotal in {} · out {}",
+        adapter.name,
+        adapter.description,
+        adapter.kind.label(),
+        adapter.state.label(),
+        crate::format::link_speed(adapter.link_speed),
+        crate::format::rate(adapter.receive_rate),
+        crate::format::rate(adapter.send_rate),
+        crate::format::bytes(adapter.received_total),
+        crate::format::bytes(adapter.sent_total),
+    ));
+    response.clicked()
+}
+
+/// The colour of an adapter's status dot.
+///
+/// Three readings, not six: working, not working but could be, and not
+/// there. The state's own word is beside it — see
+/// [`crate::model::AdapterState::label`] — so the colour does not have
+/// to carry the whole distinction, which is what stops the row being
+/// unreadable to someone who cannot separate the first two hues.
+fn state_color(theme: &Palette, state: crate::model::AdapterState) -> crate::color::Rgb {
+    match state {
+        crate::model::AdapterState::Up => theme.success,
+        crate::model::AdapterState::Dormant
+        | crate::model::AdapterState::Disconnected
+        | crate::model::AdapterState::LowerLayerDown => theme.warning,
+        crate::model::AdapterState::Disabled | crate::model::AdapterState::NotPresent => {
+            theme.text_faint
+        }
+    }
+}
+
+/// Lays a single line of text out, truncated with an ellipsis if it does
+/// not fit.
+///
+/// `Painter::text` neither wraps nor truncates — it draws the whole
+/// string wherever it is told to, so a long adapter description runs
+/// straight through the sparkline and the readouts beside it. Clipping
+/// the painter would hide the overflow but leave a word cut mid-glyph,
+/// which reads as a rendering fault rather than as elision.
+fn clipped(
+    ui: &Ui,
+    text: &str,
+    font: egui::FontId,
+    color: crate::color::Rgb,
+    width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_string(),
+        egui::TextFormat::simple(font, theme::rgb(color)),
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.0));
+    ui.painter().layout_job(job)
+}
+
+/// The height of one line of the small text style.
+///
+/// Read from the style rather than assumed, because a row that places
+/// its second line by a guessed height puts it somewhere else the moment
+/// the font scale changes.
+fn small_height(ui: &Ui) -> f32 {
+    ui.text_style_height(&egui::TextStyle::Small)
 }
 
 /// Sorts items busiest-first by a caller-supplied figure, breaking a tie
@@ -708,89 +1181,6 @@ fn sort_busiest_first<T>(items: &mut [T], rate: impl Fn(&T) -> f64, name: impl F
             .partial_cmp(&rate(a))
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| name(a).cmp(name(b)))
-    });
-}
-
-/// Sorts adapters busiest-first and splits them at the last one carrying
-/// at least a byte a second of traffic — the same floor
-/// [`crate::format::rate`] rounds to `"0 B/s"` at, so a card never reads
-/// as active while showing two zeroes.
-fn split_by_activity(
-    mut adapters: Vec<crate::model::AdapterSample>,
-) -> (
-    Vec<crate::model::AdapterSample>,
-    Vec<crate::model::AdapterSample>,
-) {
-    sort_busiest_first(
-        &mut adapters,
-        crate::model::AdapterSample::total_rate,
-        |adapter| adapter.name.as_str(),
-    );
-    let split = adapters.partition_point(|adapter| adapter.total_rate() >= 1.0);
-    let idle = adapters.split_off(split);
-    (adapters, idle)
-}
-
-/// The idle adapters, collapsed behind a disclosure by default.
-///
-/// One line per adapter rather than a card: a card's three stat columns
-/// exist to hold live numbers, and an idle adapter has none — a card
-/// that draws a name and nothing else is the same box that started this,
-/// just smaller.
-fn idle_adapters(
-    app: &mut App,
-    ui: &mut Ui,
-    theme: &Palette,
-    idle: &[crate::model::AdapterSample],
-) {
-    let expanded = app.performance.network_idle_expanded;
-    chrome::panel_card(ui, theme, |ui| {
-        let header = ui.horizontal(|ui| {
-            widgets::disclosure(ui, theme, expanded, "network-idle");
-            ui.add_space(SPACE_XS);
-            ui.label(
-                egui::RichText::new(format!(
-                    "{} inactive adapter{}",
-                    idle.len(),
-                    if idle.len() == 1 { "" } else { "s" }
-                ))
-                .color(theme::rgb(theme.text_muted))
-                .text_style(egui::TextStyle::Small),
-            );
-        });
-        // Sensed across the whole line rather than only the chevron's own
-        // small hit box — see `widgets::sortable_header` on why a control
-        // meant to be clicked casually should not require aiming at it.
-        let row = ui
-            .interact(
-                header.response.rect,
-                ui.id().with("network-idle-row"),
-                Sense::click(),
-            )
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
-        if row.clicked() {
-            app.performance.network_idle_expanded = !expanded;
-        }
-
-        if expanded {
-            ui.add_space(SPACE_XS);
-            for adapter in idle {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(&adapter.name)
-                            .color(theme::rgb(theme.text_muted))
-                            .text_style(egui::TextStyle::Small),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{} Mbps", adapter.link_speed / 1_000_000))
-                                .color(theme::rgb(theme.text_faint))
-                                .text_style(egui::TextStyle::Small),
-                        );
-                    });
-                });
-            }
-        }
     });
 }
 
@@ -1156,7 +1546,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut widths = Vec::new();
         let mut output = ctx.run_ui(Default::default(), |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_top(|ui| {
                 let width = stat_column_width(ui.available_width());
                 // Deliberately mismatched caption and value lengths —
                 // the exact shape that exposed the bug.
@@ -1227,37 +1617,98 @@ mod tests {
     }
 
     #[test]
-    fn adapters_split_busiest_first_with_idle_ties_alphabetical() {
-        let adapters = vec![
+    fn an_adapter_row_never_reaches_past_the_space_it_was_given() {
+        // The row is painted rather than laid out — a name, a subtitle,
+        // a sparkline and two readouts placed by arithmetic off the
+        // allocated rect — so nothing in egui stops one of them being
+        // computed past the row's own right edge. The name and the
+        // subtitle are the two that can, because their width is what is
+        // left after everything else has taken its share.
+        let name_left = SPACE_MD + STATUS_DOT * 2.0 + SPACE_SM;
+        for width in [320.0f32, 480.0, 640.0, 1024.0, 1920.0] {
+            let readout_right = width - SPACE_MD;
+            let spark_right = readout_right - ADAPTER_READOUT - SPACE_MD;
+            let roomy = spark_right - ADAPTER_SPARK - SPACE_MD - name_left >= ADAPTER_NAME_MINIMUM;
+            let name_width = if roomy {
+                spark_right - ADAPTER_SPARK - SPACE_MD - name_left
+            } else {
+                (readout_right - ADAPTER_READOUT - SPACE_MD - name_left).max(0.0)
+            };
+            assert!(
+                name_width >= 0.0,
+                "a {width}-wide row gave the name a negative column"
+            );
+            assert!(
+                name_left + name_width <= readout_right,
+                "at {width} wide the name column runs to {} but the \
+                 readouts start at {readout_right}",
+                name_left + name_width
+            );
+            if roomy {
+                assert!(
+                    name_width >= ADAPTER_NAME_MINIMUM,
+                    "at {width} wide the row kept its sparkline but left \
+                     the name only {name_width}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_adapter_list_does_not_reorder_when_the_traffic_changes() {
+        // The regression this exists for, and the one the screenshot
+        // that started this was of: the list used to be sorted
+        // busiest-first and split into "active" and "idle" groups at a
+        // 1 B/s threshold, so an adapter with intermittent traffic
+        // crossed between the two groups — and moved within its group —
+        // on every one-second sample. Rows appeared, vanished and
+        // swapped places under the pointer.
+        //
+        // Asserted by sorting the same adapters twice with completely
+        // different rates: `model::adapter_order` reads no rate at all,
+        // so the two orders must be identical.
+        let make = |name: &str, hardware: bool, kind: crate::model::AdapterKind, rate: f64| {
             crate::model::AdapterSample {
-                name: "Idle B".to_string(),
-                receive_rate: 0.0,
-                send_rate: 0.0,
-                link_speed: 1_000_000_000,
-            },
-            crate::model::AdapterSample {
-                name: "Busy".to_string(),
-                receive_rate: 500.0,
-                send_rate: 200.0,
-                link_speed: 1_000_000_000,
-            },
-            crate::model::AdapterSample {
-                name: "Idle A".to_string(),
-                receive_rate: 0.0,
-                send_rate: 0.4,
-                link_speed: 1_000_000_000,
-            },
+                luid: name.len() as u64,
+                name: name.to_string(),
+                kind,
+                hardware,
+                receive_rate: rate,
+                ..crate::model::AdapterSample::default()
+            }
+        };
+        let quiet = vec![
+            make(
+                "vEthernet (WSL)",
+                false,
+                crate::model::AdapterKind::Virtual,
+                0.0,
+            ),
+            make("Wi-Fi", true, crate::model::AdapterKind::WiFi, 0.0),
+            make("Ethernet", true, crate::model::AdapterKind::Ethernet, 0.0),
         ];
-        let (active, idle) = split_by_activity(adapters);
+        let busy = vec![
+            make(
+                "vEthernet (WSL)",
+                false,
+                crate::model::AdapterKind::Virtual,
+                9_000_000.0,
+            ),
+            make("Wi-Fi", true, crate::model::AdapterKind::WiFi, 4_000.0),
+            make("Ethernet", true, crate::model::AdapterKind::Ethernet, 1.0),
+        ];
+
+        let order = |mut adapters: Vec<crate::model::AdapterSample>| {
+            adapters.sort_by_key(crate::model::adapter_order);
+            adapters
+                .into_iter()
+                .map(|adapter| adapter.name)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            active.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            vec!["Busy"],
-            "only the adapter clearing 1 B/s counts as active"
-        );
-        assert_eq!(
-            idle.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            vec!["Idle A", "Idle B"],
-            "idle adapters tie at zero and should break alphabetically"
+            order(quiet),
+            order(busy),
+            "the adapter list's order changed because the traffic did"
         );
     }
 

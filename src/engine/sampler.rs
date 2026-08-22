@@ -125,8 +125,8 @@ pub struct Sampler {
     previous_cores: Vec<win::nt::cpu::CoreTimes>,
     /// Previous per-disk counters, keyed by drive number.
     previous_disks: HashMap<u32, win::disk::DiskCounters>,
-    /// Previous per-adapter counters, keyed by adapter name.
-    previous_adapters: HashMap<String, win::net::AdapterCounters>,
+    /// Previous per-adapter counters, keyed by interface LUID.
+    previous_adapters: HashMap<u64, win::net::AdapterCounters>,
     /// Resolved identities.
     identity: win::identity::Cache,
     /// The GPU counter session, held open across passes because these are
@@ -401,34 +401,43 @@ impl Sampler {
         let current = win::net::adapters();
         let mut samples = Vec::with_capacity(current.len());
         for adapter in &current {
-            // Keyed by name: an adapter's index can change across a
-            // driver reload, but its friendly name does not.
-            let previous = self.previous_adapters.get(&adapter.name);
-            let sample = match previous {
-                Some(previous) => crate::model::AdapterSample {
-                    name: adapter.name.clone(),
-                    receive_rate: crate::model::rates::per_second(
-                        crate::model::rates::advance(previous.received, adapter.received),
-                        elapsed,
-                    ),
-                    send_rate: crate::model::rates::per_second(
-                        crate::model::rates::advance(previous.sent, adapter.sent),
-                        elapsed,
-                    ),
-                    link_speed: adapter.link_speed,
-                },
-                None => crate::model::AdapterSample {
-                    name: adapter.name.clone(),
-                    link_speed: adapter.link_speed,
-                    ..crate::model::AdapterSample::default()
-                },
+            // Keyed by LUID, which is what an adapter *is*. The name was
+            // the key here before, and a name is a label someone can
+            // change: rename a connection in Network Connections and the
+            // next sample finds no previous entry, so the adapter reads
+            // zero for one tick and its history ring starts again. The
+            // interface index is no better — Windows documents it as
+            // changing when an adapter is disabled and re-enabled. This
+            // is the same rule as `ProcessKey`, one layer down.
+            let previous = self.previous_adapters.get(&adapter.luid);
+            let mut sample = crate::model::AdapterSample {
+                luid: adapter.luid,
+                name: adapter.name.clone(),
+                description: adapter.description.clone(),
+                kind: adapter.kind,
+                state: adapter.state,
+                hardware: adapter.hardware,
+                received_total: adapter.received,
+                sent_total: adapter.sent,
+                link_speed: adapter.link_speed,
+                ..crate::model::AdapterSample::default()
             };
+            if let Some(previous) = previous {
+                sample.receive_rate = crate::model::rates::per_second(
+                    crate::model::rates::advance(previous.received, adapter.received),
+                    elapsed,
+                );
+                sample.send_rate = crate::model::rates::per_second(
+                    crate::model::rates::advance(previous.sent, adapter.sent),
+                    elapsed,
+                );
+            }
             samples.push(sample);
         }
 
         self.previous_adapters = current
             .into_iter()
-            .map(|adapter| (adapter.name.clone(), adapter))
+            .map(|adapter| (adapter.luid, adapter))
             .collect();
         samples
     }

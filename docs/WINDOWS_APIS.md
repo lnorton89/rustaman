@@ -157,8 +157,43 @@ than shown as zero.
 ### Network
 
 `src/win/net.rs`. `GetIfTable2` for per-adapter octets in and out; rates
-are deltas as everywhere else. Loopback and tunnel adapters are excluded
-by `IfType`, not by name.
+are deltas as everywhere else.
+
+**A filter module gets its own row, and it is not an adapter.**
+`GetIfTable2` returns a row per NDIS filter module bound to an interface
+as well as one for the interface. A machine with Npcap, the QoS packet
+scheduler and the two WFP lightweight filters installed reports five rows
+for one network card — `Ethernet 2`, then `Ethernet 2-Npcap Packet Driver
+(NPCAP)-0000`, `Ethernet 2-QoS Packet Scheduler-0000`, and so on — each
+carrying **the same octet counters**, because they are the same bytes
+seen at different layers of one stack. Listing them duplicates the card;
+summing them reports five times the machine's real throughput. The
+`FilterInterface` bit of `InterfaceAndOperStatusFlags` is what names
+them.
+
+That field is a C bitfield of eight `BOOLEAN : 1` members and
+`windows-sys` exposes it as one opaque `u8`, so the bits are unpacked by
+hand in `win::net::flags`. MSVC packs from the least significant bit up
+in declaration order: `HardwareInterface` is bit 0, `FilterInterface`
+bit 1. Getting that order wrong does not fail — it files every physical
+adapter under "virtual" and drops it out of the throughput total.
+
+**The list is not filtered by state.** Loopback is excluded by `IfType`;
+everything else is reported whatever condition it is in, with the reason
+in `AdapterState`. Filtering on `OperStatus` made rows appear and vanish
+as the machine changed, which answers "what is connected right now" when
+the question is "what does this machine have".
+
+**Identity is the LUID.** `InterfaceIndex` is documented as changing when
+an adapter is disabled and re-enabled, and the alias is a label a user
+can edit — so both were wrong to key the rate delta on. `NET_LUID_LH` is
+a union; the `Value` arm is the opaque 64-bit identifier.
+
+**Summing the adapter list is not the machine's throughput.** Windows
+counts a byte once per interface it crosses, and on a box with Hyper-V,
+WSL or a VPN a packet crosses the virtual switch, the tunnel adapter and
+the physical card. `model::SystemSample::network_rate` sums hardware
+interfaces only, falling back to everything on a guest VM that has none.
 
 Per-process connection *counts* come from `GetExtendedTcpTable` and
 `GetExtendedUdpTable` with `TCP_TABLE_OWNER_PID_ALL`, which is the only

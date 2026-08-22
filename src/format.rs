@@ -198,6 +198,49 @@ pub fn count(value: u64) -> String {
     out
 }
 
+/// Decimal bit-rate units, ascending — for a link speed, which is the
+/// one quantity in this app that is not counted in binary units.
+const BIT_UNITS: [&str; 4] = ["bps", "Kbps", "Mbps", "Gbps"];
+
+/// The divisor between adjacent entries of [`BIT_UNITS`].
+///
+/// A thousand, not 1024. Network link speeds are decimal by every
+/// convention that names them: a "gigabit" adapter negotiates
+/// 1,000,000,000 bits per second, and dividing that by 1024 three times
+/// gives "0.93 Gbps" for a link the adapter, the switch, the driver and
+/// the box it came in all call 1 Gbps. This is the opposite call from
+/// [`bytes`] and it is deliberate — the two quantities are counted
+/// differently by the people who make them.
+const BIT_STEP: f64 = 1000.0;
+
+/// Formats a link speed in bits per second: `"1 Gbps"`, `"2.5 Gbps"`,
+/// `"100 Mbps"`. Zero — which is what an adapter that is down reports —
+/// renders as an em dash.
+///
+/// Not [`rate`]: that formats *bytes* per second in binary units, and a
+/// gigabit adapter run through it reads "119 MB/s", which is arithmetically
+/// right and reads as a mistake.
+#[must_use]
+pub fn link_speed(bits_per_second: u64) -> String {
+    if bits_per_second == 0 {
+        return DASH.to_string();
+    }
+    if bits_per_second < BIT_STEP as u64 {
+        return format!("{bits_per_second} {}", BIT_UNITS[0]);
+    }
+    let (scaled, unit) = scale(bits_per_second as f64, BIT_STEP, &BIT_UNITS);
+    // Whole speeds are written whole. Every common link speed is a round
+    // number in its own unit — 100 Mbps, 1 Gbps, 2.5 Gbps, 10 Gbps — and
+    // `significant` would render the first of those "100" and the second
+    // "1.00", so a machine with both would show one padded to a
+    // precision the other does not have.
+    if (scaled.fract()).abs() < 0.05 {
+        format!("{} {unit}", scaled.round())
+    } else {
+        format!("{}{unit}", significant(scaled))
+    }
+}
+
 /// The em dash standing in for "no value here".
 ///
 /// A `pub const` rather than a literal at each call site because the
@@ -319,6 +362,25 @@ mod tests {
             rate_or_dash(2048.0),
             "2.00 KB/s",
             "a real rate is shown by both variants alike"
+        );
+    }
+
+    #[test]
+    fn a_link_speed_is_decimal_and_written_the_way_the_box_writes_it() {
+        // The regression: the Network panel used to print
+        // `link_speed / 1_000_000` with "Mbps" glued on, so a 2.5GbE
+        // adapter read "2500 Mbps" and a 100 Mbps one read "100 Mbps"
+        // in the same column — and running the figure through `rate`
+        // instead would have made a gigabit link read "119 MB/s".
+        assert_eq!(link_speed(1_000_000_000), "1 Gbps");
+        assert_eq!(link_speed(2_500_000_000), "2.50 Gbps");
+        assert_eq!(link_speed(100_000_000), "100 Mbps");
+        assert_eq!(link_speed(10_000_000_000), "10 Gbps");
+        assert_eq!(
+            link_speed(0),
+            DASH,
+            "an adapter that is down reports no speed, and a zero there \
+             would read as a link running at nothing"
         );
     }
 
