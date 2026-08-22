@@ -201,8 +201,17 @@ pub fn core_grid(ui: &mut Ui, theme: &Palette, rect: Rect, cores: &[Series]) {
                 unit: Unit::Percent,
             },
         );
+        // A tile is an unlabelled square, and on a sixteen-or-more-core
+        // machine there is no other way to tell which one is core seven —
+        // Task Manager's own grid has the same tooltip for the same
+        // reason. Keyed on the core's index rather than a position within
+        // some larger id, since that index *is* the core's identity here.
+        ui.interact(cell_rect, ui.id().with("core").with(index), Sense::hover())
+            .on_hover_text(format!(
+                "Core {index} — {}",
+                crate::format::percent(f64::from(series.latest()))
+            ));
     }
-    ui.allocate_rect(rect, Sense::hover());
 }
 
 /// Turns a series into screen points, right-aligned in `rect`.
