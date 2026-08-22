@@ -69,7 +69,21 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
             picker(app, ui, &theme, &snapshot);
         });
 
-    ui.add_space(SPACE_MD);
+    // A second, empty docked panel, purely to reserve a horizontal
+    // gutter — not `ui.add_space(SPACE_LG)`, which reads as the right
+    // call and does nothing at all here. `add_space` advances the
+    // cursor along the *current layout's* axis, and the layout `ui`
+    // carries past a docked `Panel::left` is still the page's own
+    // top-down one; the panel changes what area remains, not which
+    // direction spacing moves in. So the two columns had no gap between
+    // them beyond how each rounded off its own edge, however each of
+    // those was written — which is what made this so easy to miss: both
+    // sides could be independently correct and the seam still read as
+    // touching.
+    egui::Panel::left("performance-picker-gap")
+        .exact_size(SPACE_LG)
+        .frame(egui::Frame::new())
+        .show(ui, |_| {});
     detail(app, ui, &theme, &snapshot);
 }
 
@@ -272,7 +286,13 @@ fn floor_for(focus: PerformanceFocus) -> f32 {
 }
 
 /// The selected resource, drawn large.
-fn detail(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) {
+///
+/// Returns the drawn content's own bounding rect — not used by [`draw`],
+/// which discards it, but by the tests, which need to measure the seam
+/// with the picker column against what `detail()` actually drew rather
+/// than against the outer `Ui`'s own bounds, which would also include
+/// the picker panel drawn into the same `Ui` earlier.
+fn detail(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) -> Rect {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -297,7 +317,9 @@ fn detail(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) {
             // too, so the content never reads as clipped by the pane
             // rather than simply ending.
             ui.add_space(chrome::SECTION_GAP);
-        });
+            ui.min_rect()
+        })
+        .inner
 }
 
 /// The CPU panel.
@@ -1019,6 +1041,66 @@ mod tests {
     }
 
     #[test]
+    fn the_gap_between_the_picker_and_the_detail_column_is_a_real_gap() -> anyhow::Result<()> {
+        // The picker's own content and the detail column's own content
+        // can each have correct internal margins and the seam between
+        // them still read as touching, because that seam is a *third*,
+        // separate gap — `draw()`'s own `add_space` between the two —
+        // and nothing checks it just because the two columns either
+        // side of it are individually fine.
+        //
+        // Replicates `draw()`'s own structure (the picker panel, the
+        // gap, `detail()`) rather than calling `draw()` itself: `draw()`
+        // returns nothing, and the picker panel and `detail()` both
+        // draw into the same outer `Ui`, so a plain `ui.min_rect()`
+        // after both have run would report their *union* — extending
+        // back to the picker panel's own left edge — not the gap
+        // between them specifically. Both functions returning their own
+        // content rect (see their docs) is what makes that gap
+        // measurable at all.
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1024.0, 768.0));
+        let mut app = App::new(crate::config::Config::default());
+        let theme = app.theme.clone();
+        let snapshot = Snapshot::default();
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(window),
+            ..Default::default()
+        };
+
+        let mut picker_rect = None;
+        let mut detail_rect = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default()
+                .frame(theme::content(&theme))
+                .show(ui, |ui| {
+                    egui::Panel::left("performance-picker")
+                        .exact_size(PICKER_WIDTH)
+                        .frame(egui::Frame::new().inner_margin(theme::margin_xy(0.0, 0.0)))
+                        .show(ui, |ui| {
+                            picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
+                        });
+                    egui::Panel::left("performance-picker-gap")
+                        .exact_size(SPACE_LG)
+                        .frame(egui::Frame::new())
+                        .show(ui, |_| {});
+                    detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
+                });
+        });
+        output.textures_delta.clear();
+
+        let picker_rect = picker_rect.ok_or_else(|| anyhow::anyhow!("picker() drew nothing"))?;
+        let detail_rect = detail_rect.ok_or_else(|| anyhow::anyhow!("detail() drew nothing"))?;
+        let gap = detail_rect.left() - picker_rect.right();
+        assert!(
+            gap >= SPACE_LG,
+            "the seam between the picker and the detail column is only \
+             {gap} wide, wanted at least {SPACE_LG}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn no_performance_panel_lets_its_content_reach_the_window_edge() -> anyhow::Result<()> {
         // The general form of the regression above: every resource in
         // the picker draws through the same `detail()` wrapper, and any
@@ -1101,8 +1183,7 @@ mod tests {
                 egui::CentralPanel::default()
                     .frame(theme::content(&theme))
                     .show(ui, |ui| {
-                        detail(&mut app, ui, &theme, &snapshot);
-                        min_rect = Some(ui.min_rect());
+                        min_rect = Some(detail(&mut app, ui, &theme, &snapshot));
                     });
             });
             output.textures_delta.clear();
