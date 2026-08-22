@@ -56,8 +56,39 @@ pub const BAR_WIDTH: f32 = 0.14;
 /// The gap between adjacent bars, as a fraction of the mark's width.
 pub const BAR_GAP: f32 = 0.05;
 
-/// Clear space at each edge of the mark, as a fraction of its width.
+/// Clear space at the left and right edges, as a fraction of the mark's
+/// width.
+///
+/// Horizontal only, because it is the term in the layout equation
+/// `5w + 4g + 2m = 1` — see [`BAR_WIDTH`]. The vertical inset is
+/// [`BASELINE`] and is deliberately a separate number, so that changing
+/// how much room the bars have above and below does not force the
+/// horizontal layout to be re-solved.
 pub const MARK_MARGIN: f32 = 0.05;
+
+/// Clear space above and below the bars, as a fraction of the mark's
+/// height.
+///
+/// Larger than [`MARK_MARGIN`] on purpose. The plate's corners are
+/// rounded by [`PLATE_RADIUS`], so a bar that reached the bottom edge
+/// would be clipped by the curve at the left and right ends of the row —
+/// the two outer bars come back visibly shorter than the rest, and at
+/// 16px that reads as a rendering fault rather than as a design.
+pub const BASELINE: f32 = 0.11;
+
+/// The vertical inset has to exceed the horizontal one, or the plate's
+/// corner curve cuts into the two end bars.
+///
+/// A `const` block rather than a test: this is a relationship between two
+/// literals, so it is decidable at compile time, and clippy's
+/// `assertions_on_constants` rejects the test form for exactly that
+/// reason. A build that gets this wrong should not produce a binary to
+/// run the test against.
+const _: () = assert!(
+    BASELINE > MARK_MARGIN,
+    "the vertical inset must exceed the horizontal one, or the plate's \
+     corner curve cuts the end bars"
+);
 
 /// The corner radius of each bar, as a fraction of the mark's width.
 ///
@@ -109,6 +140,33 @@ pub const PLATE: Rgb = Rgb::new(0x11, 0x14, 0x1c);
 /// The plate's corner radius, as a fraction of the mark's width.
 pub const PLATE_RADIUS: f32 = 0.22;
 
+/// One bar's rectangle at a given size, as `(x, y, width, height)`.
+///
+/// The single source of the mark's geometry. Three renderers consume it —
+/// `gui::icons::paint_brand` for the title bar, `gui::icons::app_icon`
+/// for the window icon, and `examples/brand_assets` for the files on
+/// disk — and each of them computing the rectangle itself is three
+/// chances for the mark to come out subtly different in one place.
+///
+/// [`Bar::height`] is a fraction of the *usable* height, which is the
+/// mark less [`BASELINE`] top and bottom. So the tallest bar clears the
+/// plate's corner radius rather than running into it.
+#[must_use]
+pub fn bar_rect(bar: &Bar, size: f32) -> (f32, f32, f32, f32) {
+    let margin = BASELINE * size;
+    let usable = size - margin * 2.0;
+    let height = bar.height * usable;
+    (
+        bar.x * size,
+        // Measured down from the top, as every raster and every UI
+        // toolkit does: the baseline is the bottom margin, and the bar
+        // rises from it.
+        size - margin - height,
+        BAR_WIDTH * size,
+        height,
+    )
+}
+
 /// The product name, as it appears in the title bar and the about page.
 pub const NAME: &str = "Rustaman";
 
@@ -129,6 +187,41 @@ mod tests {
             (total - 1.0).abs() < 1e-5,
             "the bar layout covers {total} of the mark's width, not 1.0"
         );
+    }
+
+    #[test]
+    fn the_bars_clear_the_plates_rounded_corners() {
+        // The relationship between the two insets is checked at compile
+        // time, next to the constants themselves; what is left for a
+        // test is that every bar actually lands inside them.
+        for (index, bar) in BARS.iter().enumerate() {
+            let (_, y, _, height) = bar_rect(bar, 100.0);
+            assert!(
+                y >= BASELINE * 100.0 - 0.01,
+                "bar {index} starts at {y}, above the top inset"
+            );
+            assert!(
+                y + height <= 100.0 - BASELINE * 100.0 + 0.01,
+                "bar {index} ends at {}, below the bottom inset",
+                y + height
+            );
+        }
+    }
+
+    #[test]
+    fn the_geometry_scales_linearly() {
+        // Three renderers consume `bar_rect` at three sizes; a
+        // non-linear scale would make the mark a different shape in the
+        // title bar than in the taskbar.
+        let Some(bar) = BARS.first() else {
+            return;
+        };
+        let (x1, y1, w1, h1) = bar_rect(bar, 100.0);
+        let (x2, y2, w2, h2) = bar_rect(bar, 200.0);
+        assert!((x2 - x1 * 2.0).abs() < 1e-3);
+        assert!((y2 - y1 * 2.0).abs() < 1e-3);
+        assert!((w2 - w1 * 2.0).abs() < 1e-3);
+        assert!((h2 - h1 * 2.0).abs() < 1e-3);
     }
 
     #[test]

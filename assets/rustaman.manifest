@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  The side-by-side manifest, embedded by build.rs.
+
+  Every element here corrects something Windows otherwise gets wrong for
+  an unmanifested application. See build.rs for the reasoning; the short
+  version is below each block.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+      type="win32"
+      name="Rustaman"
+      version="1.0.0.0"/>
+
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <!--
+          asInvoker, deliberately. A task manager that demanded elevation
+          would prompt on every launch, and most of what this one does
+          needs none: the process list, the graphs, the service list and
+          the startup list all work unprivileged. Elevation buys the
+          identity columns for other users' processes, and that is the
+          user's choice to make by running it as administrator.
+        -->
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <!--
+        Per-monitor DPI awareness. Without this Windows reports a
+        virtualised resolution and bitmap-scales the window, which on a
+        150% display is a blurry app and on a two-monitor machine with
+        different scalings is a window that goes blurry when dragged
+        between them. Every label in a task manager is small, so it is
+        not subtle.
+
+        Both keys are present on purpose: the first is honoured by
+        Windows 10 1703 and later, the second by 8.1 through 1607. A
+        machine that understands only the older one still gets system
+        awareness rather than none.
+      -->
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor, System</dpiAwareness>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">True/PM</dpiAware>
+
+      <!--
+        UTF-8 as the process code page, so the ANSI-flavoured calls in
+        any dependency handle non-ASCII paths correctly. This crate calls
+        the wide variants throughout, but a dependency may not, and a
+        user whose name is not ASCII should not be the one who finds out.
+        Windows 10 1903 and later; ignored elsewhere.
+      -->
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compat.v1">
+    <application>
+      <!--
+        Declaring supported-OS is what stops GetVersionEx reporting
+        Windows 8 forever. Windows 10 and 11 share a GUID; the older ones
+        are listed because declaring only the newest makes the app opt
+        out of compatibility shims it may still want on an older build.
+      -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/><!-- 10 / 11 -->
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/><!-- 8.1 -->
+      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"/><!-- 8 -->
+      <supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"/><!-- 7 -->
+    </application>
+  </compatibility>
+
+  <dependency>
+    <dependentAssembly>
+      <!--
+        Version 6 of the common controls, which is what gives the
+        MessageBox in `report` (src/main.rs) the modern visual style
+        rather than the Windows 95 one. That dialog is the only native
+        control this app shows, and it is shown at exactly the moment
+        something has gone wrong — a 1995-era dialog then reads as the
+        app itself being broken.
+      -->
+      <assemblyIdentity
+          type="win32"
+          name="Microsoft.Windows.Common-Controls"
+          version="6.0.0.0"
+          processorArchitecture="*"
+          publicKeyToken="6595b64144ccf1df"
+          language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>

@@ -45,13 +45,10 @@ pub fn paint_brand(ui: &mut Ui, size: f32) {
     let painter = ui.painter();
     let radius = CornerRadius::same(scaled_radius(brand::BAR_RADIUS, size));
 
-    for bar in brand::BARS {
-        let width = size * brand::BAR_WIDTH;
-        let height = size * bar.height;
-        let bar_rect = Rect::from_min_size(
-            rect.left_bottom() + Vec2::new(size * bar.x, -height),
-            Vec2::new(width, height),
-        );
+    for bar in &brand::BARS {
+        let (x, y, width, height) = brand::bar_rect(bar, size);
+        let bar_rect =
+            Rect::from_min_size(rect.left_top() + Vec2::new(x, y), Vec2::new(width, height));
         painter.rect_filled(bar_rect, radius, theme::rgb(bar.color));
     }
 }
@@ -113,10 +110,7 @@ fn sample(point: (f32, f32), edge: f32, plate_radius: f32) -> Option<(u8, u8, u8
     // Iterated in reverse so a later bar — which is drawn on top — is
     // found first, though the geometry guarantees they do not overlap.
     for bar in brand::BARS.iter().rev() {
-        let left = bar.x * edge;
-        let width = brand::BAR_WIDTH * edge;
-        let height = bar.height * edge;
-        let top = edge - height;
+        let (left, top, width, height) = brand::bar_rect(bar, edge);
         let radius = brand::BAR_RADIUS * edge;
         if inside_rounded(x, y, left, top, width, height, radius) {
             return Some((bar.color.r, bar.color.g, bar.color.b));
