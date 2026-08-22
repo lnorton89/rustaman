@@ -1,0 +1,85 @@
+# An issue *form*, which is why this is .yml and not .md. GitHub renders a
+# .md template as prose with optional YAML front matter; the schema below
+# — `body:` with typed fields — is only understood in a .yml file. Named
+# wrongly it silently degrades into a markdown blob showing the raw YAML.
+name: Bug report
+description: Something is broken — the app crashed, hung, or did the wrong thing
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please search the [existing issues](https://github.com/lnorton89/rustaman/issues) first — it may already be known.
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Your Windows build and how you installed the binary. `winver` gives the build number.
+      placeholder: |
+        - Windows: (e.g. Windows 10 Pro 22H2, build 19045.6466)
+        - Install: release archive, or `cargo build --release`
+        - Version: rustaman 0.1.0, or the commit hash if you built from source
+        - Elevation: running as administrator, or not
+    validations:
+      required: true
+
+  - type: dropdown
+    id: view
+    attributes:
+      label: Which view?
+      description: Where the problem shows up. Pick more than one if it spans views.
+      multiple: true
+      options:
+        - Processes
+        - Performance
+        - Details
+        - Services
+        - Startup
+        - Settings
+        - The window itself (chrome, resizing, theming)
+        - Not view-specific
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: What you clicked, typed, or sorted by. If it involves a particular process or service, say which one.
+      placeholder: |
+        1. Open the Processes view
+        2. Sort by ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What happened instead? Include any error text the app showed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Error text, or a screenshot of the window. A screenshot is usually the fastest way to convey a layout or theming problem.
+      render: text
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that might help — how many processes are running, what else was loading the machine, whether it happens every time or once.

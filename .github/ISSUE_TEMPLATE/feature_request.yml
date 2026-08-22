@@ -1,0 +1,52 @@
+# See the note at the top of bug_report.yml: an issue form has to be .yml.
+name: Feature request
+description: Suggest an improvement — a new feature, or something that should work better
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Please search the [existing issues](https://github.com/lnorton89/rustaman/issues) first — it may already be proposed.
+
+        Worth reading before you write: [`README.md`](https://github.com/lnorton89/rustaman#what-it-deliberately-does-not-do) lists a few things this app does not do on purpose, and [`docs/WINDOWS_APIS.md`](https://github.com/lnorton89/rustaman/blob/main/docs/WINDOWS_APIS.md) records what no Windows API can actually tell us. Per-process network throughput is the usual one.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where does this belong?
+      description: Picking one helps scope the work.
+      multiple: true
+      options:
+        - Processes
+        - Performance
+        - Details
+        - Services
+        - Startup
+        - Theming
+        - The window itself (chrome, layout, keyboard)
+        - Something new
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Problem
+      description: What is this for? What does it let someone do that they cannot today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How you imagine it working — interaction, placement, defaults. Sketches or ASCII mockups welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Anything else you tried or thought of, and why it does not cover the need.

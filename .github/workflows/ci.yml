@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run's result irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to full SHAs: a mutable tag in a workflow is a supply-chain
+      # risk the moment the workflow holds a write-capable token. Update
+      # deliberately, with a diff of the new SHA, not silently on the next
+      # run. The versions are in the trailing comments.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # No version here: rust-toolchain.toml pins it, so CI and a local
+      # checkout run the same rustfmt and the same clippy. `@stable` would
+      # mean CI silently moving to each new release on its own —
+      # tests/toolchain_pin.rs fails the build if it ever goes back to it.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08
+        with:
+          toolchain: "1.98.0"
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    # The dependency surface does not vary by runner — `deny.toml` names
+    # the targets it resolves for — so one run suffices. Reads only: the
+    # action downloads the advisory database and scans the lockfile.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features
+
+  windows:
+    name: windows (the whole crate)
+    runs-on: windows-latest
+    # The authoritative job. Everything in src/win/, src/engine/, and
+    # src/gui/ is cfg(windows) and compiles to nothing anywhere else, so
+    # this is the only runner that sees roughly four fifths of the code —
+    # and the only one that can run its tests.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # fetch-depth: 0 for the changelog check below, which reads
+          # `git tag` and walks the whole history. The default checkout is
+          # shallow and fetches no tags at all, so every release would come
+          # back missing and the check would fail for a reason that has
+          # nothing to do with the changelog.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08
+        with:
+          toolchain: "1.98.0"
+          components: clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: windows
+
+      # `--all-targets` covers the examples too, so the brand-asset
+      # generator and the changelog generator cannot rot silently the way
+      # a script nobody runs would.
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # A GitHub runner is a VM with a few dozen processes and no GPU
+      # engines to speak of, which is exactly the sparse machine that
+      # finds the empty-collection paths. What it cannot exercise is a
+      # window: there is no interactive session, so the rendering tests
+      # drive an egui context directly rather than opening one.
+      - name: Test
+        run: cargo test --all-features
+
+      # CHANGELOG.md is generated from the git history by
+      # examples/changelog.rs, so a released section that disagrees with
+      # the tags is a mistake, not a style choice. Released sections only:
+      # `Unreleased` moves with every merge and a squash rewrites the very
+      # hashes it pins, so gating pull requests on it would fail all of
+      # them for no signal.
+      - name: Changelog
+        run: cargo run --example changelog -- --check
+
+      # Release is where `panic = "abort"`, LTO, and one codegen unit
+      # apply. Those change what compiles: a `catch_unwind` that builds in
+      # debug does not build under `panic = "abort"`, and this is the step
+      # that says so before a tag does.
+      - name: Build release binary
+        run: cargo build --release --bins
+
+  portable:
+    name: linux (the portable half)
+    runs-on: ubuntu-latest
+    # The model, the theming, the colour space, the formatting, the rate
+    # arithmetic and the config parser have no Windows in them, and this
+    # job is what keeps it that way. If a `use windows_sys::` leaks into
+    # one of them, it fails here rather than becoming load-bearing.
+    #
+    # It is not redundant with the Windows job even though that one runs
+    # a superset of these tests: the value is in the *failure*, which
+    # says a portable module stopped being portable. It is also the
+    # fastest signal on the board — no windowing stack is installed
+    # because none is needed, since eframe, egui and egui_extras are
+    # scoped to `cfg(windows)` in Cargo.toml.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08
+        with:
+          toolchain: "1.98.0"
+          components: clippy
+          # The Windows std, for the cross-check below. Adding the target
+          # costs a download; it does not install a linker, and does not
+          # need to.
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: linux
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features
+
+      # `clippy --target x86_64-pc-windows-msvc` type-checks the whole
+      # Win32 layer without linking anything, so a Linux runner can catch
+      # a broken `unsafe extern` block or a struct-layout assertion in
+      # about a minute. The Windows job above is still the authority —
+      # this one just fails first, and cheaply.
+      - name: Cross-check the Windows half
+        run: cargo clippy --all-targets --all-features --target x86_64-pc-windows-msvc -- -D warnings

@@ -1,0 +1,249 @@
+name: Release
+
+# Tagging is the trigger: `git tag -a v0.1.0 -m "rustaman v0.1.0" &&
+# git push origin v0.1.0`. The release is created as a draft, the archive
+# is attached to it, and it is only published once the build has
+# succeeded — so a failed build leaves an unpublished draft rather than a
+# half-populated public release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build a release from (e.g. v0.1.0)"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  draft:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    # This job and `publish` are the only ones holding a write-capable
+    # token; the build below runs third-party code and needs none.
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve tag
+        id: resolve
+        shell: bash
+        run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, reusing it."
+          else
+            gh release create "$TAG" \
+              --draft \
+              --title "rustaman $TAG" \
+              --generate-notes
+          fi
+
+  build:
+    name: ${{ matrix.target }}
+    needs: draft
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # One target, because there is one platform. x86_64 only: ARM64
+          # Windows is a real thing and the MSVC toolchain would
+          # cross-compile to it, but nothing here can *test* that binary,
+          # and shipping an untested archive of a program that ends other
+          # people's processes is not a trade worth making for the number
+          # of ARM64 Windows desktops in existence. The matrix stays a
+          # matrix so adding one later is an entry rather than a rewrite.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      # Pinned to full SHAs, as in ci.yml — a mutable action tag inside a
+      # workflow that once held a release-writing token is exactly the
+      # blast radius this pins away.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.draft.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08
+        with:
+          toolchain: "1.98.0"
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-${{ matrix.target }}
+
+      # The icon and the manifest are resources compiled into the .exe by
+      # build.rs, and a release binary missing either is wrong in a way
+      # nothing else in this workflow would notice: no icon in Explorer, or
+      # a blurry window on a scaled display. Regenerating the .ico here
+      # from src/brand.rs and failing on a diff is what catches a
+      # hand-edited or stale asset before it ships.
+      - name: Check the brand assets are current
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --example brand_assets
+          if ! git diff --quiet -- assets/brand; then
+            echo "assets/brand/ is out of date with src/brand.rs:"
+            git --no-pager diff --stat -- assets/brand
+            echo "Run \`cargo run --example brand_assets\` and commit the result."
+            exit 1
+          fi
+
+      - name: Build
+        run: cargo build --release --bins --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        env:
+          TAG: ${{ needs.draft.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          name="rustaman-${TAG}-${TARGET}"
+          staging="dist/${name}"
+          mkdir -p "$staging"
+
+          cp "target/${TARGET}/release/rustaman.exe" "$staging/"
+          cp README.md LICENSE "$staging/"
+          # The theme catalog travels with the binary. It is compiled in,
+          # so the app runs without it — but it is also the worked example
+          # anyone writing a theme starts from, and hunting for it in a
+          # source tree is a worse first step than opening the folder they
+          # just unzipped.
+          cp assets/themes.toml "$staging/"
+
+          cd dist
+          7z a -tzip "${name}.zip" "$name" >/dev/null
+
+      # A CycloneDX SBOM naming every crate in the build, so a consumer
+      # can audit what the binary contains without taking this workflow's
+      # word for it.
+      - name: Build the SBOM
+        shell: bash
+        env:
+          TAG: ${{ needs.draft.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # An exact version, not "latest": `--locked` alone pins this
+          # tool's *dependencies*, not the tool itself, so a re-run of
+          # this same workflow months later could emit a differently
+          # shaped SBOM. A version moves the way an action SHA does —
+          # deliberately, in a reviewed commit.
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --format json
+          cp rustaman.cdx.json "dist/rustaman-${TAG}-sbom.cdx.json"
+
+      # Checksums travel with the artifacts so a download can be verified
+      # without trusting the transfer — one step at the end rather than a
+      # line in each producing step, because every step is its own shell
+      # and the alternative is the same helper pasted twice.
+      #
+      # Git Bash on the Windows runner ships `sha256sum`; the `certutil`
+      # fallback is there because a runner image that dropped it would
+      # otherwise fail a release at the last step over a one-line file.
+      # `certutil` prints a label line, the hex digest, and a trailing
+      # blank, so the digest is line 2 with the CR stripped.
+      - name: Checksums
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          for file in *.zip *.cdx.json; do
+            if command -v sha256sum >/dev/null; then
+              sha256sum "$file" > "$file.sha256"
+            else
+              digest=$(certutil -hashfile "$file" SHA256 | sed -n 2p | tr -d '\r ')
+              printf '%s  %s\n' "$digest" "$file" > "$file.sha256"
+            fi
+          done
+
+      # One artifact per target: with upload-artifact@v4 and later, a
+      # second matrix job uploading to the same name fails outright, and
+      # even when it did not, a shared name is how one platform's files
+      # get mixed into another's release. Only the finished archive,
+      # checksums and SBOM are uploaded — the staging directory with the
+      # raw binary, README and LICENSE stays inside the build job where it
+      # belongs.
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-${{ matrix.target }}
+          path: |
+            dist/*.zip
+            dist/*.cdx.json
+            dist/*.sha256
+
+  publish:
+    name: Publish release
+    needs: [draft, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # For the provenance attestation below — the OIDC token that proves
+      # which workflow, at which commit, produced these bytes.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          # `pattern`, not `name`: `name` is an exact artifact name with no
+          # glob semantics, so `name: release-assets-*` would look for an
+          # artifact literally called that and fail the job.
+          pattern: release-assets-*
+          path: dist
+          merge-multiple: true
+
+      # Signed build provenance for the archive and the SBOM file —
+      # exactly those; the `.sha256` companions are not attested, because
+      # an attestation *is* a signed digest and a signed
+      # checksum-of-a-checksum adds nothing. Verifiable with
+      # `gh attestation verify <file> -R lnorton89/rustaman`.
+      #
+      # This is the supply-chain half a project without paid signing
+      # certificates can still provide. Authenticode needs a code-signing
+      # certificate that lives outside this repository, which is also why
+      # SmartScreen will warn on a fresh download — see the release notes.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.zip
+            dist/*.cdx.json
+
+      # And the SBOM again as a real SBOM attestation, so the CycloneDX
+      # document is cryptographically bound to the artifact it describes
+      # rather than merely uploaded beside it —
+      # `gh attestation verify <artifact> -R lnorton89/rustaman
+      #  --predicate-type https://cyclonedx.org/bom` retrieves it.
+      - name: Attest SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: dist/*.zip
+          sbom-path: dist/rustaman-${{ needs.draft.outputs.tag }}-sbom.cdx.json
+
+      - name: Upload and undraft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.draft.outputs.tag }}
+        run: |
+          cd dist
+          gh release upload "$TAG" $(find . -type f) --clobber
+          gh release edit "$TAG" --draft=false --latest

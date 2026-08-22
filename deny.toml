@@ -1,0 +1,92 @@
+# cargo-deny configuration. Enforced in CI by the `deny` job in
+# .github/workflows/ci.yml; `cargo install cargo-deny && cargo deny check
+# --all-features` locally gives the same answer before you push. The point
+# is that a bad advisory or a surprising licence shows up as a reviewable
+# event, not a release-day surprise.
+#
+# Dependabot is the other half of this: .github/dependabot.yml opens the
+# version-update PRs, and the `deny` job runs against each one.
+#
+# One thing to know before reading a result: `cargo deny` resolves the
+# dependency graph for *every* target unless told otherwise, and this
+# crate's graph is Windows-only for the half that matters. The `targets`
+# list below is what stops a Linux CI runner from failing this crate on a
+# wayland or X11 crate that no Windows build ever links.
+
+[graph]
+# The two targets this app is actually built for. Without this, the
+# resolver pulls in the Linux and macOS windowing stacks — which are real
+# dependencies of `eframe` on those platforms and no dependency at all
+# here — and their licences and advisories would gate a release of a
+# Windows binary that cannot contain them.
+targets = [
+    "x86_64-pc-windows-msvc",
+    # The portable half of the crate (model, theme, format, colour,
+    # config) is tested on Linux in CI, so its graph is checked too.
+    "x86_64-unknown-linux-gnu",
+]
+all-features = true
+
+[advisories]
+# A yanked crate is a warning rather than an error: yanking is often
+# administrative (a bad publish, a wrong version number) and blocking a
+# build on someone else's `cargo yank` is not a security posture.
+yanked = "warn"
+
+# Deliberately empty. Every advisory in this tree has a fix available, so
+# there is nothing here to grandfather in — and an ignore list that
+# starts empty is one where each future entry has to justify itself in a
+# reviewed commit rather than blending into a list of four.
+#
+# If you are about to add one: say which crate, which dependency pulls it
+# in, why there is no fix, and what would clear it. An entry without a way
+# out is a permanent exception, and this file should not accumulate those.
+ignore = []
+
+[licenses]
+# MIT/Apache-led, plus what the GUI stack brings with it: MPL-2.0
+# (option-ext, via `dirs`), OFL-1.1 and the Ubuntu Font Licence (egui's
+# bundled default fonts), and the LLVM exception on the Apache licence
+# that `rustix` and friends carry. Anything new must prove itself here
+# rather than being assumed fine — which is the whole point of listing
+# them rather than allowlisting "permissive".
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "0BSD",
+    "Unlicense",
+    "BSL-1.0",
+    "MPL-2.0",
+    "OFL-1.1",
+    "LicenseRef-UFL-1.0",
+]
+# A crate whose licence cannot be determined at all is a stop, not a
+# warning: "unknown" in a dependency audit is the answer you least want
+# to discover after shipping.
+confidence-threshold = 0.9
+
+[bans]
+# Two versions of one crate is normal in a graph this size (wgpu and
+# winit routinely disagree about `raw-window-handle`), so this is a
+# warning rather than a failure — but it is worth reading, because it is
+# also what a stale transitive pin looks like.
+multiple-versions = "warn"
+# Nothing is banned outright today. If something is added here, say what
+# it should be used instead of.
+deny = []
+
+[sources]
+# No git-dependency surprise: everything comes from crates.io. A git
+# dependency is a version that can change under a fixed lockfile entry
+# only by someone force-pushing, and that is not a supply chain this app
+# needs to be part of.
+unknown-registry = "deny"
+unknown-git = "deny"

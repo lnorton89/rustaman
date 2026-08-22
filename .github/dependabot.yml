@@ -1,0 +1,61 @@
+version: 2
+updates:
+  # Crate updates as reviewable PRs rather than the dependency tree
+  # drifting on its own.
+  #
+  # Only *patch* bumps are grouped. Dependabot classifies an update by the
+  # literal version segments, so eframe 0.36 -> 0.37 reaches it as
+  # `semver-minor` — but under cargo a 0.x minor bump is precisely the
+  # breaking one, and almost everything this crate depends on is still 0.x
+  # (eframe, egui, egui_extras, windows-sys, toml, crossbeam-channel,
+  # image, winresource). Grouping minors would hand us one PR that quietly
+  # carries breaking API changes for half a dozen crates. Patch releases
+  # are the churn worth batching; anything above patch arrives on its own
+  # so it can be read, built, and reverted by itself.
+  #
+  # Nothing is ignored. The egui stack is held at the current release
+  # rather than pinned behind one, and `windows-sys` is the crate this
+  # app's entire Win32 surface is written against — an update to either is
+  # a PR worth reading, not one worth suppressing. If an entry ever has to
+  # be ignored, record what would clear it, the way `deny.toml` asks of an
+  # ignored advisory.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      cargo-patch:
+        applies-to: version-updates
+        update-types:
+          - patch
+
+  # Actions are pinned to full commit SHAs (see .github/workflows), so a
+  # Dependabot PR is the deliberate, diff-visible way a pin moves — it
+  # rewrites the SHA and the trailing version comment together.
+  #
+  # Grouped into one PR: the actions move independently, but reading a
+  # batch of SHA pins against their release notes is one job rather than
+  # six. The exception is dtolnay/rust-toolchain, pinned to a master
+  # commit rather than a release tag — Dependabot cannot resolve a newer
+  # version for a SHA that belongs to no tag, so that one pin moves by
+  # hand, alongside `rust-toolchain.toml` (which Dependabot also cannot
+  # see) in its own commit.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      github-actions:
+        applies-to: version-updates
+        patterns:
+          - "*"
