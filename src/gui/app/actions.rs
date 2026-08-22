@@ -411,12 +411,18 @@ mod tests {
             started_at: 1,
         };
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        let mut output = ctx.run_ui(Default::default(), |ui| {
             app.dispatch(Action::Suspend(key), ui);
             assert!(app.pending.is_none());
             app.dispatch(Action::Resume(key), ui);
             assert!(app.pending.is_none());
         });
+        // Nothing in this test paints, so there is no renderer to hand
+        // these to. epaint's own `Drop` panics on an unhandled delta as a
+        // safety net against a real app that forgets to upload a new
+        // texture — clearing it here is the documented way to say "this
+        // one was never going anywhere" instead.
+        output.textures_delta.clear();
     }
 
     #[test]
@@ -488,7 +494,7 @@ mod tests {
             started_at: 1,
         };
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        let mut output = ctx.run_ui(Default::default(), |ui| {
             for action in [
                 Action::EndTask(key),
                 Action::EndTree(key),
@@ -504,5 +510,7 @@ mod tests {
                 app.dispatch(action, ui);
             }
         });
+        // See the matching comment in `suspending_and_resuming_never_ask`.
+        output.textures_delta.clear();
     }
 }
