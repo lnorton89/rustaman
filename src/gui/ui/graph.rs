@@ -168,10 +168,7 @@ pub fn core_grid(ui: &mut Ui, theme: &Palette, rect: Rect, cores: &[Series]) {
         return;
     }
     let count = cores.len();
-    // As square as the count allows, rounded so wide-and-short beats
-    // tall-and-narrow — a monitor is wider than it is tall.
-    let columns = (count as f32).sqrt().ceil().max(1.0) as usize;
-    let rows = count.div_ceil(columns);
+    let (columns, rows) = core_grid_layout(count);
 
     let cell = Vec2::new(
         (rect.width() - SPACE_XS * (columns.saturating_sub(1)) as f32) / columns as f32,
@@ -212,6 +209,20 @@ pub fn core_grid(ui: &mut Ui, theme: &Palette, rect: Rect, cores: &[Series]) {
                 crate::format::percent(f64::from(series.latest()))
             ));
     }
+}
+
+/// The column and row count for `count` cores, as square as it allows.
+///
+/// Rounded so wide-and-short beats tall-and-narrow — a monitor is wider
+/// than it is tall. `pub(crate)`, not private: [`super::performance`]
+/// has to reserve a rect tall enough for this grid *before* it is drawn,
+/// and calling this rather than keeping its own copy of the formula is
+/// what stops the reservation from silently drifting out of step with
+/// what the grid actually lays out.
+pub(crate) fn core_grid_layout(count: usize) -> (usize, usize) {
+    let columns = (count as f32).sqrt().ceil().max(1.0) as usize;
+    let rows = count.div_ceil(columns);
+    (columns, rows)
 }
 
 /// Turns a series into screen points, right-aligned in `rect`.
@@ -519,9 +530,12 @@ mod tests {
     #[test]
     fn the_core_grid_stays_roughly_square() {
         // A 64-core machine in one row gives each core four pixels.
+        // Calls the real `core_grid_layout` rather than reimplementing
+        // its formula — a copy here would keep passing after a change to
+        // the real one drifted the two apart, which is exactly the kind
+        // of test that looks like coverage and is not.
         for count in [1usize, 2, 4, 8, 12, 16, 32, 64, 128] {
-            let columns = (count as f32).sqrt().ceil().max(1.0) as usize;
-            let rows = count.div_ceil(columns);
+            let (columns, rows) = core_grid_layout(count);
             assert!(columns * rows >= count, "{count} cores do not fit");
             assert!(
                 columns.abs_diff(rows) <= 2,

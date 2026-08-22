@@ -203,14 +203,7 @@ pub fn card_grid(ui: &mut Ui, minimum: f32, count: usize, mut card: impl FnMut(&
     if count == 0 {
         return;
     }
-    let available = ui.available_width();
-    // How many `minimum`-wide cards fit, counting the gaps between them.
-    // At least one, so a pane narrower than a single card still draws it
-    // (clipped) rather than dividing by zero and drawing nothing.
-    let columns =
-        (((available + SPACE_MD) / (minimum + SPACE_MD)).floor() as usize).clamp(1, count);
-    let gaps = SPACE_MD * (columns.saturating_sub(1)) as f32;
-    let width = ((available - gaps) / columns as f32).max(1.0);
+    let (columns, width) = card_grid_layout(ui.available_width(), minimum, count);
 
     // Restored inside each card below. Zeroing it on the row is what
     // makes the gap between cards the explicit `add_space` and nothing
@@ -251,6 +244,28 @@ pub fn card_grid(ui: &mut Ui, minimum: f32, count: usize, mut card: impl FnMut(&
             ui.add_space(SPACE_MD);
         }
     }
+}
+
+/// How many `minimum`-wide columns fit across `available` width, and how
+/// wide each of those columns actually gets.
+///
+/// A free function rather than inline in [`card_grid`] so the arithmetic
+/// can be checked directly — a live `Ui` can show a grid looks wrong, but
+/// not *why*, and the two numbers here are exactly the ones that would
+/// have to disagree for a card to overflow its row or a grid to divide by
+/// zero.
+fn card_grid_layout(available: f32, minimum: f32, count: usize) -> (usize, f32) {
+    if count == 0 {
+        return (0, 0.0);
+    }
+    // At least one column, so a pane narrower than a single card still
+    // draws it (clipped) rather than dividing by zero and drawing
+    // nothing.
+    let columns =
+        (((available + SPACE_MD) / (minimum + SPACE_MD)).floor() as usize).clamp(1, count);
+    let gaps = SPACE_MD * (columns.saturating_sub(1)) as f32;
+    let width = ((available - gaps) / columns as f32).max(1.0);
+    (columns, width)
 }
 
 /// A small labelled pill — a status, a count, a category.
@@ -920,6 +935,69 @@ pub const fn pane_inset() -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use super::card_grid_layout;
+    use super::theme::SPACE_MD;
+
+    #[test]
+    fn no_cards_is_no_columns_rather_than_a_division_by_zero() {
+        let (columns, width) = card_grid_layout(400.0, 340.0, 0);
+        assert_eq!(columns, 0, "an empty grid has no columns to divide by");
+        assert!((width - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_pane_narrower_than_one_card_still_gets_a_single_column() {
+        // The comment this guards: a pane narrower than a single card
+        // should still draw it, clipped, rather than the column count
+        // rounding down to zero and drawing nothing at all.
+        let (columns, width) = card_grid_layout(100.0, 340.0, 3);
+        assert_eq!(columns, 1, "a too-narrow pane must still get one column");
+        assert!(width > 0.0, "the single column must have positive width");
+    }
+
+    #[test]
+    fn a_pane_with_no_room_at_all_still_gets_a_positive_width() {
+        // `width` floors at 1.0 rather than 0.0 or negative — a zero or
+        // negative width is not "small", it is a card that never
+        // allocates and a grid that draws nothing where a clipped card
+        // was wanted.
+        let (columns, width) = card_grid_layout(0.0, 340.0, 3);
+        assert_eq!(columns, 1);
+        assert!((width - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_column_count_never_exceeds_the_card_count() {
+        // Three cards across a stadium-wide pane should still be three
+        // columns, not padded out to however many `minimum`-wide slots
+        // fit — a fourth, empty column reads as a bug, not free space.
+        let (columns, _) = card_grid_layout(4000.0, 340.0, 3);
+        assert_eq!(columns, 3);
+    }
+
+    #[test]
+    fn the_columns_and_their_gaps_never_overflow_the_available_width() {
+        // The structural invariant `card_grid` depends on: whatever
+        // width this hands back, `columns` of them plus the gaps between
+        // them must fit in what was actually available, or every card in
+        // the row overflows together. Starts at 1.0, not 0.0 — below
+        // that the width floor in
+        // `a_pane_with_no_room_at_all_still_gets_a_positive_width`
+        // deliberately claims more than is available, on purpose.
+        for available in [1.0, 150.0, 339.0, 340.0, 341.0, 900.0, 4000.0] {
+            for count in [1_usize, 2, 3, 7] {
+                let (columns, width) = card_grid_layout(available, 340.0, count);
+                let gaps = SPACE_MD * (columns.saturating_sub(1)) as f32;
+                let claimed = columns as f32 * width + gaps;
+                assert!(
+                    claimed <= available + 0.01,
+                    "available={available}, count={count}: {columns} columns \
+                     of {width} plus gaps is {claimed}, which overflows"
+                );
+            }
+        }
+    }
+
     /// The curve's own properties — that it starts at rest, ends
     /// lifted, decelerates rather than running linearly, never goes
     /// backwards, and clamps nonsense — are pinned in

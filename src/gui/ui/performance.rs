@@ -69,7 +69,22 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
             picker(app, ui, &theme, &snapshot);
         });
 
-    ui.add_space(SPACE_MD);
+    // A second, empty docked panel, purely to reserve a horizontal
+    // gutter — not `ui.add_space(SPACE_LG)`, which reads as the right
+    // call and does nothing at all here. `add_space` advances the
+    // cursor along the *current layout's* axis, and the layout `ui`
+    // carries past a docked `Panel::left` is still the page's own
+    // top-down one; the panel changes what area remains, not which
+    // direction spacing moves in. So the two columns had no gap between
+    // them beyond how each rounded off its own edge, however each of
+    // those was written — which is what made this so easy to miss: both
+    // sides could be independently correct and the seam still read as
+    // touching.
+    egui::Panel::left("performance-picker-gap")
+        .exact_size(SPACE_LG)
+        .frame(egui::Frame::new())
+        .show_separator_line(false)
+        .show(ui, |_| {});
     detail(app, ui, &theme, &snapshot);
 }
 
@@ -276,7 +291,13 @@ fn floor_for(focus: PerformanceFocus) -> f32 {
 }
 
 /// The selected resource, drawn large.
-fn detail(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) {
+///
+/// Returns the drawn content's own bounding rect — not used by [`draw`],
+/// which discards it, but by the tests, which need to measure the seam
+/// with the picker column against what `detail()` actually drew rather
+/// than against the outer `Ui`'s own bounds, which would also include
+/// the picker panel drawn into the same `Ui` earlier.
+fn detail(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) -> Rect {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -301,7 +322,9 @@ fn detail(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) {
             // too, so the content never reads as clipped by the pane
             // rather than simply ending.
             ui.add_space(chrome::SECTION_GAP);
-        });
+            ui.min_rect()
+        })
+        .inner
 }
 
 /// The CPU panel.
@@ -403,9 +426,12 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         );
         // Height scaled to the core count so a 4-core machine does not
         // get a grid of four tall boxes and a 64-core one does not get a
-        // grid too short to see anything in.
-        let rows = (app.performance.cores.len() as f32).sqrt().ceil().max(1.0);
-        let height = (rows * 46.0).clamp(90.0, 320.0);
+        // grid too short to see anything in. `core_grid_layout` rather
+        // than a squareness formula of its own — see that function's
+        // docs on why keeping a separate copy here is the bug, not just
+        // duplication.
+        let (_, rows) = graph::core_grid_layout(app.performance.cores.len());
+        let height = (rows as f32 * 46.0).clamp(90.0, 320.0);
         let (rect, _) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
         graph::core_grid(ui, theme, rect, &app.performance.cores);
@@ -1397,6 +1423,144 @@ mod tests {
     }
 
     #[test]
+    fn the_gap_between_the_picker_and_the_detail_column_is_a_real_gap() -> anyhow::Result<()> {
+        // The picker's own content and the detail column's own content
+        // can each have correct internal margins and the seam between
+        // them still read as touching, because that seam is a *third*,
+        // separate gap — `draw()`'s own `add_space` between the two —
+        // and nothing checks it just because the two columns either
+        // side of it are individually fine.
+        //
+        // Replicates `draw()`'s own structure (the picker panel, the
+        // gap, `detail()`) rather than calling `draw()` itself: `draw()`
+        // returns nothing, and the picker panel and `detail()` both
+        // draw into the same outer `Ui`, so a plain `ui.min_rect()`
+        // after both have run would report their *union* — extending
+        // back to the picker panel's own left edge — not the gap
+        // between them specifically. Both functions returning their own
+        // content rect (see their docs) is what makes that gap
+        // measurable at all.
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1024.0, 768.0));
+        let mut app = App::new(crate::config::Config::default());
+        let theme = app.theme.clone();
+        let snapshot = Snapshot::default();
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(window),
+            ..Default::default()
+        };
+
+        let mut picker_rect = None;
+        let mut detail_rect = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default()
+                .frame(theme::content(&theme))
+                .show(ui, |ui| {
+                    egui::Panel::left("performance-picker")
+                        .exact_size(PICKER_WIDTH)
+                        .frame(egui::Frame::new().inner_margin(theme::margin_xy(0.0, 0.0)))
+                        .show(ui, |ui| {
+                            picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
+                        });
+                    egui::Panel::left("performance-picker-gap")
+                        .exact_size(SPACE_LG)
+                        .frame(egui::Frame::new())
+                        .show_separator_line(false)
+                        .show(ui, |_| {});
+                    detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
+                });
+        });
+        output.textures_delta.clear();
+
+        let picker_rect = picker_rect.ok_or_else(|| anyhow::anyhow!("picker() drew nothing"))?;
+        let detail_rect = detail_rect.ok_or_else(|| anyhow::anyhow!("detail() drew nothing"))?;
+        let gap = detail_rect.left() - picker_rect.right();
+        assert!(
+            gap >= SPACE_LG,
+            "the seam between the picker and the detail column is only \
+             {gap} wide, wanted at least {SPACE_LG}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_picker_detail_seam_draws_exactly_one_separator_line() -> anyhow::Result<()> {
+        // The spacer panel that carves out the seam's gap is itself a
+        // `Panel::left`, and a `Panel::left` draws its own separator
+        // line by default — right next to the picker panel's own,
+        // already-correct one. The two lines sit only a few pixels
+        // apart, which reads as a single doubled border hugging
+        // whichever column is on the near side, not as a gap. A rect
+        // check can't see this: neither panel's content rect moves, so
+        // the fix has to be verified against what actually gets
+        // painted at the seam.
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1024.0, 768.0));
+        let mut app = App::new(crate::config::Config::default());
+        let theme = app.theme.clone();
+        let snapshot = Snapshot::default();
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(window),
+            ..Default::default()
+        };
+
+        let mut picker_rect = None;
+        let mut detail_rect = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default()
+                .frame(theme::content(&theme))
+                .show(ui, |ui| {
+                    egui::Panel::left("performance-picker")
+                        .exact_size(PICKER_WIDTH)
+                        .frame(egui::Frame::new().inner_margin(theme::margin_xy(0.0, 0.0)))
+                        .show(ui, |ui| {
+                            picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
+                        });
+                    egui::Panel::left("performance-picker-gap")
+                        .exact_size(SPACE_LG)
+                        .frame(egui::Frame::new())
+                        .show_separator_line(false)
+                        .show(ui, |_| {});
+                    detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
+                });
+        });
+        output.textures_delta.clear();
+
+        let picker_rect = picker_rect.ok_or_else(|| anyhow::anyhow!("picker() drew nothing"))?;
+        let detail_rect = detail_rect.ok_or_else(|| anyhow::anyhow!("detail() drew nothing"))?;
+
+        let seam_lines = output
+            .shapes
+            .iter()
+            .filter(|clipped| match &clipped.shape {
+                egui::Shape::LineSegment { points, .. } => {
+                    let is_vertical = (points[0].x - points[1].x).abs() < 0.01;
+                    let in_seam = points[0].x >= picker_rect.right() - 1.0
+                        && points[0].x <= detail_rect.left() + 1.0;
+                    is_vertical && in_seam
+                }
+                egui::Shape::Noop
+                | egui::Shape::Vec(_)
+                | egui::Shape::Circle(_)
+                | egui::Shape::Ellipse(_)
+                | egui::Shape::Path(_)
+                | egui::Shape::Rect(_)
+                | egui::Shape::Text(_)
+                | egui::Shape::Mesh(_)
+                | egui::Shape::QuadraticBezier(_)
+                | egui::Shape::CubicBezier(_)
+                | egui::Shape::Callback(_) => false,
+            })
+            .count();
+
+        assert_eq!(
+            seam_lines, 1,
+            "expected exactly one separator line at the picker/detail seam, found {seam_lines}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn no_performance_panel_lets_its_content_reach_the_window_edge() -> anyhow::Result<()> {
         // The general form of the regression above: every resource in
         // the picker draws through the same `detail()` wrapper, and any
@@ -1479,8 +1643,7 @@ mod tests {
                 egui::CentralPanel::default()
                     .frame(theme::content(&theme))
                     .show(ui, |ui| {
-                        detail(&mut app, ui, &theme, &snapshot);
-                        min_rect = Some(ui.min_rect());
+                        min_rect = Some(detail(&mut app, ui, &theme, &snapshot));
                     });
             });
             output.textures_delta.clear();
@@ -1495,6 +1658,99 @@ mod tests {
                  wanted at least {SPACE_MD}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn the_picker_and_detail_column_still_fit_at_the_window_s_minimum_size() -> anyhow::Result<()> {
+        // Every other layout test in this file uses a comfortable
+        // 1024x768 window. The app can be dragged down to
+        // `gui::MIN_SIZE` — 780x480 — and nothing here has ever been
+        // measured at that size: the picker's fixed 200 points, the
+        // gap's fixed 20, and the nav rail's fixed 168 are all width the
+        // detail column does not get to negotiate away, and a window
+        // this narrow is exactly where a margin that looks fine at
+        // 1024 quietly turns negative.
+        //
+        // Drives the real nav rail and the real `CentralPanel` too, not
+        // just the picker and detail column in isolation — the rail's
+        // width is exactly the kind of thing that is correct on its own
+        // and only breaks its neighbour once both are drawn together.
+        let window = Rect::from_min_size(
+            egui::Pos2::ZERO,
+            Vec2::new(crate::gui::MIN_SIZE[0], crate::gui::MIN_SIZE[1]),
+        );
+        let theme = App::new(crate::config::Config::default()).theme;
+
+        // A populated snapshot, not `Snapshot::default()`: an empty one
+        // draws almost nothing in `detail()`, so the trailing-margin
+        // check below would pass whether or not the trim that earns it
+        // is even present. Sixteen cores is what makes the CPU panel's
+        // core grid actually draw — the same reason
+        // `no_performance_panel_lets_its_content_reach_the_window_edge`
+        // above builds one.
+        let snapshot = Snapshot {
+            system: SystemSample {
+                cpu: crate::model::CpuSample {
+                    logical_cores: 16,
+                    physical_cores: 8,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut app = App::new(crate::config::Config::default());
+        app.theme = theme.clone();
+        app.performance.cores = vec![crate::model::history::Series::new(60); 16];
+
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(window),
+            ..Default::default()
+        };
+
+        let mut picker_rect = None;
+        let mut detail_rect = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            chrome::nav_rail(&mut app, ui);
+            egui::CentralPanel::default()
+                .frame(theme::content(&theme))
+                .show(ui, |ui| {
+                    egui::Panel::left("performance-picker")
+                        .exact_size(PICKER_WIDTH)
+                        .frame(egui::Frame::new().inner_margin(theme::margin_xy(0.0, 0.0)))
+                        .show(ui, |ui| {
+                            picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
+                        });
+                    egui::Panel::left("performance-picker-gap")
+                        .exact_size(SPACE_LG)
+                        .frame(egui::Frame::new())
+                        .show_separator_line(false)
+                        .show(ui, |_| {});
+                    detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
+                });
+        });
+        output.textures_delta.clear();
+
+        let picker_rect = picker_rect.ok_or_else(|| anyhow::anyhow!("picker() drew nothing"))?;
+        let detail_rect = detail_rect.ok_or_else(|| anyhow::anyhow!("detail() drew nothing"))?;
+
+        let gap = detail_rect.left() - picker_rect.right();
+        assert!(
+            gap >= SPACE_LG,
+            "at the window's minimum size the picker/detail seam is only \
+             {gap} wide, wanted at least {SPACE_LG}"
+        );
+
+        let trailing_margin = window.right() - detail_rect.right();
+        assert!(
+            trailing_margin >= SPACE_MD,
+            "at the window's minimum size the detail column left only \
+             {trailing_margin} from the window's right edge, wanted at \
+             least {SPACE_MD}"
+        );
         Ok(())
     }
 

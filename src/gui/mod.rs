@@ -48,7 +48,7 @@ const DEFAULT_SIZE: [f32; 2] = [1180.0, 760.0];
 /// fitting side by side, and the window becomes a thing you can resize
 /// into uselessness. It is deliberately not smaller: a window that can be
 /// made unusable will be, by accident, once.
-const MIN_SIZE: [f32; 2] = [780.0, 480.0];
+pub(crate) const MIN_SIZE: [f32; 2] = [780.0, 480.0];
 
 // Relations between constants, checked when the crate is compiled.
 const _: () = {

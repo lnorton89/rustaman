@@ -83,3 +83,44 @@ pub fn settled(ctx: &Context, id: Id, target: f32, seconds: f32) -> f32 {
     let target = if target.is_finite() { target } else { 0.0 };
     ctx.animate_value_with_time(id, target, seconds)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_non_finite_target_settles_at_zero_rather_than_getting_stuck() {
+        // The claim `settled`'s docs make: a NaN or infinite target would
+        // otherwise be stored and compared against forever, since every
+        // comparison against NaN is false — so the control it drives
+        // would never converge and the window would repaint forever for
+        // a change nobody could see.
+        let ctx = Context::default();
+        let id = Id::new("nonsense-target");
+        let result = settled(&ctx, id, f32::NAN, SETTLE);
+        assert!(
+            result.is_finite(),
+            "a NaN target produced a non-finite animated value: {result}"
+        );
+
+        let result = settled(&ctx, id, f32::INFINITY, SETTLE);
+        assert!(
+            result.is_finite(),
+            "an infinite target produced a non-finite animated value: {result}"
+        );
+    }
+
+    #[test]
+    fn a_settled_value_arrives_at_its_finite_target() {
+        let ctx = Context::default();
+        let id = Id::new("real-target");
+        // The first observation of an id returns the target rather than
+        // the start — see `value`'s docs — so one call already lands on
+        // it rather than needing frames to advance.
+        let result = settled(&ctx, id, 42.0, SETTLE);
+        assert!(
+            (result - 42.0).abs() < f32::EPSILON,
+            "expected the first observation to return the target, got {result}"
+        );
+    }
+}
