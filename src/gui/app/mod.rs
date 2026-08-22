@@ -33,6 +33,7 @@
 //! to that key, or the table will quietly stop responding to it.
 
 pub mod actions;
+pub mod background;
 pub mod rows;
 
 use crate::config::Config;
@@ -305,6 +306,11 @@ pub struct ServicesView {
     pub sort: ServiceSortKey,
     /// Whether that sort is descending.
     pub descending: bool,
+    /// A background read of the service list, if one is in flight.
+    ///
+    /// `EnumServicesStatusExW` is a real syscall and must not run on the
+    /// paint thread — see [`background::BackgroundRead`].
+    pub pending: Option<background::BackgroundRead<Vec<crate::win::services::Service>>>,
 }
 
 /// A column the Services table can sort by.
@@ -398,6 +404,9 @@ pub struct StartupView {
     pub descending: bool,
     /// When the list was last read.
     pub refreshed: Option<std::time::Instant>,
+    /// A background read of the startup list, if one is in flight. See
+    /// [`ServicesView::pending`].
+    pub pending: Option<background::BackgroundRead<Vec<crate::win::startup::StartupEntry>>>,
 }
 
 /// A column the Startup table can sort by.

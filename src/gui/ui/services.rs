@@ -46,6 +46,16 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     let theme = app.theme.clone();
     refresh(app);
 
+    if app.services.refreshed.is_none() {
+        // The first read is in flight; showing the empty state here
+        // instead would claim there are no services on the machine,
+        // which is a different thing and one worth telling apart from
+        // "still finding out" — see the module docs on why an empty
+        // result is ambiguous enough to need its own wording already.
+        widgets::empty_state(ui, &theme, "Reading services…");
+        return;
+    }
+
     ui.horizontal(|ui| {
         let _ = chrome::search_box(ui, &theme, &mut app.services.search, "Search services");
         chrome::toolbar_dot(ui, &theme);
@@ -106,16 +116,30 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
 }
 
 /// Re-reads the service list if it is missing or stale.
+///
+/// `EnumServicesStatusExW` is a real syscall against the service control
+/// manager, so it runs on a background thread rather than here — see
+/// [`crate::gui::app::background`]. This only starts the read and drains
+/// whichever one is already in flight; neither half blocks.
 fn refresh(app: &mut App) {
+    if let Some(pending) = &app.services.pending {
+        if let Some(services) = pending.poll() {
+            app.services.services = services;
+            app.services.refreshed = Some(Instant::now());
+            app.services.pending = None;
+        }
+    }
+
     let stale = app
         .services
         .refreshed
         .is_none_or(|at| at.elapsed() > STALE_AFTER);
-    if !stale {
-        return;
+    if stale && app.services.pending.is_none() {
+        app.services.pending = Some(crate::gui::app::background::BackgroundRead::spawn(
+            "rustaman-services",
+            crate::win::services::enumerate,
+        ));
     }
-    app.services.services = crate::win::services::enumerate();
-    app.services.refreshed = Some(Instant::now());
 }
 
 /// The services table.
@@ -348,6 +372,11 @@ pub fn draw_startup(app: &mut App, ui: &mut Ui) {
     let theme = app.theme.clone();
     refresh_startup(app);
 
+    if app.startup.refreshed.is_none() {
+        widgets::empty_state(ui, &theme, "Reading startup entries…");
+        return;
+    }
+
     ui.horizontal(|ui| {
         let _ = chrome::search_box(
             ui,
@@ -389,16 +418,29 @@ pub fn draw_startup(app: &mut App, ui: &mut Ui) {
 }
 
 /// Re-reads the startup list if it is missing or stale.
+///
+/// The registry and startup-folder walk behind this is a real read
+/// against disk, so it runs on a background thread — see
+/// [`crate::gui::app::background`] and [`refresh`]'s matching comment.
 fn refresh_startup(app: &mut App) {
+    if let Some(pending) = &app.startup.pending {
+        if let Some(entries) = pending.poll() {
+            app.startup.entries = entries;
+            app.startup.refreshed = Some(Instant::now());
+            app.startup.pending = None;
+        }
+    }
+
     let stale = app
         .startup
         .refreshed
         .is_none_or(|at| at.elapsed() > STALE_AFTER);
-    if !stale {
-        return;
+    if stale && app.startup.pending.is_none() {
+        app.startup.pending = Some(crate::gui::app::background::BackgroundRead::spawn(
+            "rustaman-startup",
+            crate::win::startup::enumerate,
+        ));
     }
-    app.startup.entries = crate::win::startup::enumerate();
-    app.startup.refreshed = Some(Instant::now());
 }
 
 /// The startup table.
