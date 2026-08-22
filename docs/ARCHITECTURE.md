@@ -175,6 +175,14 @@ rows are drawn means adding it to `RowKey`. This is the same discipline
 as hand invalidation, except that forgetting it makes the UI stale rather
 than making it wrong in a way nobody notices for a month.
 
+`gui/app/background.rs` holds `BackgroundRead`, the sampler's lighter
+sibling for state that a view reads on demand rather than every sample —
+Services and Startup's own lists. It spawns a one-shot thread and hands
+back a receiver the view polls without blocking, so the win-layer call
+behind it still never runs on the paint thread even though it is not
+part of the snapshot. See [`PERFORMANCE.md`](PERFORMANCE.md) for why that
+distinction exists rather than putting everything through the sampler.
+
 ### Colour goes one way
 
 `theme::Palette` is portable and knows nothing about egui.
@@ -194,7 +202,8 @@ view heading and every table share one column of left edges.
 | You want to… | Start in |
 |---|---|
 | Add a column | `model/sort.rs` for the key, then the view in `gui/ui/` |
-| Read something new from Windows | a new module in `win/`, then `engine/sampler.rs` |
+| Read something new from Windows, every sample | a new module in `win/`, then `engine/sampler.rs` |
+| Read something new from Windows, on demand instead | a new module in `win/`, then `gui/app/background.rs` |
 | Change what a number means | `model/rates.rs` or `model/history.rs` |
 | Add a theme | `assets/themes.toml` — thirteen colours, nothing else |
 | Add a *derived* colour | `theme::Palette::derive`, once, not every theme |

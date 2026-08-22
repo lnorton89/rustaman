@@ -38,6 +38,29 @@ If you need something the snapshot does not carry, the answer is to add
 it to the snapshot — in `engine/sampler.rs`, on the sampler thread —
 rather than to fetch it where it is needed.
 
+### Read-on-demand state gets its own background read, not a place in the snapshot
+
+Services and startup entries are the exception the rule above does not
+cover: they are read when their view is shown and every ten seconds
+after, not every sample, because enumerating four hundred services a
+second to redraw a list nobody is looking at is its own kind of load.
+That means they cannot go through the sampler's snapshot — putting them
+there would sample them continuously, which is exactly what "read on
+demand" exists to avoid — but the underlying calls
+(`EnumServicesStatusExW`, a registry and startup-folder walk) are just as
+real and just as capable of blocking as anything the sampler reads.
+
+`gui::app::background::BackgroundRead` is the sampler's lighter sibling
+for exactly this: it spawns the read on its own thread once and hands
+back a receiver the view polls without blocking, rather than a
+persistent thread with a channel it drains on an interval. There is
+nothing to join on drop — the thread exits the moment it sends, whether
+or not anyone is still listening. `gui/ui/services.rs`'s `refresh` and
+`refresh_startup` are the call sites; a third view with the same shape
+of "read on demand, not every sample" state should reach for this rather
+than either calling `crate::win` inline (the bug this section exists to
+prevent) or inventing a second sampler.
+
 ### The channel drops, and that is the feature
 
 `engine` sends snapshots over a bounded channel with a non-blocking send.
