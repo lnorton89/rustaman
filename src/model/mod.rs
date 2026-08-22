@@ -38,6 +38,7 @@
 
 pub mod filter;
 pub mod history;
+pub mod rates;
 pub mod sort;
 pub mod tree;
 
