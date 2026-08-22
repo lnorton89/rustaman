@@ -1281,6 +1281,99 @@ mod tests {
     }
 
     #[test]
+    fn the_picker_and_detail_column_still_fit_at_the_window_s_minimum_size() -> anyhow::Result<()> {
+        // Every other layout test in this file uses a comfortable
+        // 1024x768 window. The app can be dragged down to
+        // `gui::MIN_SIZE` — 780x480 — and nothing here has ever been
+        // measured at that size: the picker's fixed 200 points, the
+        // gap's fixed 20, and the nav rail's fixed 168 are all width the
+        // detail column does not get to negotiate away, and a window
+        // this narrow is exactly where a margin that looks fine at
+        // 1024 quietly turns negative.
+        //
+        // Drives the real nav rail and the real `CentralPanel` too, not
+        // just the picker and detail column in isolation — the rail's
+        // width is exactly the kind of thing that is correct on its own
+        // and only breaks its neighbour once both are drawn together.
+        let window = Rect::from_min_size(
+            egui::Pos2::ZERO,
+            Vec2::new(crate::gui::MIN_SIZE[0], crate::gui::MIN_SIZE[1]),
+        );
+        let theme = App::new(crate::config::Config::default()).theme;
+
+        // A populated snapshot, not `Snapshot::default()`: an empty one
+        // draws almost nothing in `detail()`, so the trailing-margin
+        // check below would pass whether or not the trim that earns it
+        // is even present. Sixteen cores is what makes the CPU panel's
+        // core grid actually draw — the same reason
+        // `no_performance_panel_lets_its_content_reach_the_window_edge`
+        // above builds one.
+        let snapshot = Snapshot {
+            system: SystemSample {
+                cpu: crate::model::CpuSample {
+                    logical_cores: 16,
+                    physical_cores: 8,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut app = App::new(crate::config::Config::default());
+        app.theme = theme.clone();
+        app.performance.cores = vec![crate::model::history::Series::new(60); 16];
+
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(window),
+            ..Default::default()
+        };
+
+        let mut picker_rect = None;
+        let mut detail_rect = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            chrome::nav_rail(&mut app, ui);
+            egui::CentralPanel::default()
+                .frame(theme::content(&theme))
+                .show(ui, |ui| {
+                    egui::Panel::left("performance-picker")
+                        .exact_size(PICKER_WIDTH)
+                        .frame(egui::Frame::new().inner_margin(theme::margin_xy(0.0, 0.0)))
+                        .show(ui, |ui| {
+                            picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
+                        });
+                    egui::Panel::left("performance-picker-gap")
+                        .exact_size(SPACE_LG)
+                        .frame(egui::Frame::new())
+                        .show_separator_line(false)
+                        .show(ui, |_| {});
+                    detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
+                });
+        });
+        output.textures_delta.clear();
+
+        let picker_rect = picker_rect.ok_or_else(|| anyhow::anyhow!("picker() drew nothing"))?;
+        let detail_rect = detail_rect.ok_or_else(|| anyhow::anyhow!("detail() drew nothing"))?;
+
+        let gap = detail_rect.left() - picker_rect.right();
+        assert!(
+            gap >= SPACE_LG,
+            "at the window's minimum size the picker/detail seam is only \
+             {gap} wide, wanted at least {SPACE_LG}"
+        );
+
+        let trailing_margin = window.right() - detail_rect.right();
+        assert!(
+            trailing_margin >= SPACE_MD,
+            "at the window's minimum size the detail column left only \
+             {trailing_margin} from the window's right edge, wanted at \
+             least {SPACE_MD}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn stat_column_width_leaves_room_for_the_three_gaps_between_four_columns() {
         // A fixed unit, not a quarter of however many columns this
         // particular row has — see the function's own docs on why a
