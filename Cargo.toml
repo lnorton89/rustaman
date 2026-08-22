@@ -117,6 +117,9 @@ windows-sys = { version = "0.61", features = [
 # gives it the Windows 8 behaviour for every version check.
 winresource = "0.1"
 
+[target.'cfg(windows)'.dev-dependencies]
+egui_kittest = { version = "0.36.1", features = ["wgpu", "snapshot"] }
+
 [dev-dependencies]
 # The brand-asset generator (`cargo run --example brand_assets`) writes
 # the PNGs and the .ico that `build.rs` embeds.

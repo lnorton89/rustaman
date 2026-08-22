@@ -24,6 +24,7 @@ cargo run --release                             # the app
 cargo run --example brand_assets                # regenerate assets/brand/
 cargo run --example changelog                   # regenerate CHANGELOG.md
 cargo run --example changelog -- --check        # what CI runs
+cargo run --example screenshot -- --list        # see the UI, without a window
 ```
 
 All of these are clean on `main` and enforced by CI
@@ -55,6 +56,33 @@ It cannot run a test, and it cannot tell you the window looks right.
 **Anything visual, and anything that reads a real machine, needs a
 Windows run and a screenshot.** CI runs both halves; see the `windows`
 and `portable` jobs.
+
+### Getting that screenshot without driving the app
+
+```bash
+cargo run --example screenshot -- --list
+cargo run --example screenshot -- --scene network
+cargo run --example screenshot -- --all
+cargo run --example screenshot -- --scene live-network
+```
+
+`examples/screenshot.rs` runs the real `gui::ui::draw` against an
+offscreen wgpu target and writes a PNG to `target/screenshots/`. No
+window, no event loop, no clicking through the app to find the panel —
+which is what makes it usable over a remote session and from a terminal.
+
+The point is not only convenience. A **scene** is a machine as well as a
+view: the fabricated one has twenty-one network adapters of which three
+are hardware and one is unplugged, sixteen cores, and two disks of very
+different sizes. Those are the configurations the layout has to survive,
+and the machine you are sitting at has exactly one of them, permanently.
+`--size` re-renders any scene at another window size, which is how the
+responsive behaviour gets checked at all.
+
+The `live-*` scenes drive the real sampler instead, which is the other
+half: a fabricated snapshot cannot tell you what `src/win/` decided to
+report about this machine. Use one to check a change to the Windows
+layer; use the fabricated ones to check the drawing.
 
 ## Commit only what you changed
 

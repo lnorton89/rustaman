@@ -149,6 +149,32 @@ which is also what the window icon and the title-bar mark are drawn from.
 The release workflow regenerates the assets and fails on a diff, so a
 hand-edited icon does not ship.
 
+## Seeing a change you have made to the UI
+
+```powershell
+cargo run --example screenshot -- --list
+cargo run --example screenshot -- --scene network
+cargo run --example screenshot -- --scene network --size 900x720 --theme light
+cargo run --example screenshot -- --scene live-network
+```
+
+`examples/screenshot.rs` draws any view of the app to a PNG in
+`target/screenshots/` — no window, no event loop, no clicking through the
+app to find the panel. It runs the same `gui::ui::draw` the app does,
+against an offscreen wgpu target.
+
+Each **scene** names a view *and* a machine. The fabricated machine is
+chosen to be awkward — twenty-one network adapters, one of them
+unplugged, sixteen cores, a GPU with four engines — because those are the
+configurations the layout has to survive and the machine in front of you
+has only one of them. The `live-*` scenes drive the real sampler instead,
+for checking a change to `src/win/`.
+
+Attach the PNG to any pull request that changes what the window looks
+like. A reviewer cannot see a layout change in a diff, and none of the
+tests can either — they check that a rect fits inside another rect, not
+that a panel is readable.
+
 ## Changelog
 
 `CHANGELOG.md` is rebuilt from the git history: every entry is a
