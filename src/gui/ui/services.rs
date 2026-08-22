@@ -26,9 +26,10 @@
 use super::theme::{self, HEADER_HEIGHT, ROW_HEIGHT, SPACE_MD, SPACE_SM, SPACE_XS};
 use super::{chrome, widgets};
 use crate::gui::app::actions::Action;
-use crate::gui::app::App;
+use crate::gui::app::{service_label, App, ServiceSortKey, StartupSortKey};
 use crate::theme::Palette;
 use crate::win::services::{Service, ServiceState};
+use crate::win::startup::StartupEntry;
 use egui::{Sense, Ui};
 use egui_extras::{Column, TableBuilder};
 use std::time::{Duration, Instant};
@@ -120,7 +121,7 @@ fn refresh(app: &mut App) {
 /// The services table.
 fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     let query = app.services.search.to_lowercase();
-    let visible: Vec<Service> = app
+    let mut visible: Vec<Service> = app
         .services
         .services
         .iter()
@@ -132,8 +133,12 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
         widgets::empty_state(ui, theme, "No services match that search");
         return;
     }
+    let sort = app.services.sort;
+    let descending = app.services.descending;
+    visible.sort_by(|a, b| sort.compare_directed(a, b, descending));
 
     let mut clicked: Option<String> = None;
+    let mut sort_clicked: Option<ServiceSortKey> = None;
     let mut action: Option<Action> = None;
 
     // Captured before the builder borrows the `Ui`; see
@@ -155,17 +160,30 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
         .column(Column::initial(90.0).at_least(70.0).resizable(true))
         .column(Column::initial(70.0).at_least(56.0).resizable(true))
         .header(HEADER_HEIGHT, |mut header| {
-            for (index, label) in ["Name", "Service", "Status", "PID"].into_iter().enumerate() {
+            for (index, key) in [
+                ServiceSortKey::Name,
+                ServiceSortKey::ShortName,
+                ServiceSortKey::Status,
+                ServiceSortKey::Pid,
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 header.col(|ui| {
-                    let _ = widgets::sortable_header(
+                    let sorted = (app.services.sort == key).then_some(app.services.descending);
+                    if widgets::sortable_header(
                         ui,
                         theme,
-                        label,
-                        None,
+                        key.label(),
+                        sorted,
                         index == 0,
                         index == 3,
                         false,
-                    );
+                    )
+                    .clicked()
+                    {
+                        sort_clicked = Some(key);
+                    }
                 });
             }
         })
@@ -192,12 +210,7 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                     // recognises. The short name is the next column,
                     // because it is what `sc` and `net` take.
                     ui.label(
-                        egui::RichText::new(if service.display_name.is_empty() {
-                            &service.name
-                        } else {
-                            &service.display_name
-                        })
-                        .color(theme::rgb(theme.text)),
+                        egui::RichText::new(service_label(service)).color(theme::rgb(theme.text)),
                     );
                 });
                 row.col(|ui| {
@@ -248,6 +261,14 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
             });
         });
 
+    if let Some(key) = sort_clicked {
+        if app.services.sort == key {
+            app.services.descending = !app.services.descending;
+        } else {
+            app.services.sort = key;
+            app.services.descending = key.defaults_descending();
+        }
+    }
     if let Some(name) = clicked {
         app.services.selected = Some(name);
     }
@@ -271,6 +292,22 @@ pub fn matches(service: &Service, lowercase_query: &str) -> bool {
             .display_name
             .to_lowercase()
             .contains(lowercase_query)
+}
+
+/// Whether a startup entry matches the search text.
+///
+/// Both the registered name and the command are searched: a person
+/// looking for "onedrive" and one looking for the path it launches from
+/// are both trying to find the same entry, and a machine can register
+/// dozens of these across per-user and all-users locations with no other
+/// way to narrow the list.
+#[must_use]
+pub fn startup_matches(entry: &StartupEntry, lowercase_query: &str) -> bool {
+    if lowercase_query.is_empty() {
+        return true;
+    }
+    entry.name.to_lowercase().contains(lowercase_query)
+        || entry.command.to_lowercase().contains(lowercase_query)
 }
 
 /// Switches to the Processes view with a PID selected.
@@ -312,6 +349,14 @@ pub fn draw_startup(app: &mut App, ui: &mut Ui) {
     refresh_startup(app);
 
     ui.horizontal(|ui| {
+        let _ = chrome::search_box(
+            ui,
+            &theme,
+            &mut app.startup.search,
+            "Search startup entries",
+        );
+        chrome::toolbar_dot(ui, &theme);
+
         let enabled = app
             .startup
             .entries
@@ -358,8 +403,25 @@ fn refresh_startup(app: &mut App) {
 
 /// The startup table.
 fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
-    let entries = app.startup.entries.clone();
+    let query = app.startup.search.to_lowercase();
+    let mut entries: Vec<StartupEntry> = app
+        .startup
+        .entries
+        .iter()
+        .filter(|entry| startup_matches(entry, &query))
+        .cloned()
+        .collect();
+
+    if entries.is_empty() {
+        widgets::empty_state(ui, theme, "No startup entries match that search");
+        return;
+    }
+    let sort = app.startup.sort;
+    let descending = app.startup.descending;
+    entries.sort_by(|a, b| sort.compare_directed(a, b, descending));
+
     let mut clicked: Option<String> = None;
+    let mut sort_clicked: Option<StartupSortKey> = None;
     let mut reveal: Option<std::path::PathBuf> = None;
 
     // Captured before the builder borrows the `Ui`; see
@@ -380,10 +442,29 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                 .clip(true),
         )
         .header(HEADER_HEIGHT, |mut header| {
-            for (index, label) in ["Name", "Status", "Location"].into_iter().enumerate() {
+            for (index, key) in [
+                StartupSortKey::Name,
+                StartupSortKey::Status,
+                StartupSortKey::Location,
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 header.col(|ui| {
-                    let _ =
-                        widgets::sortable_header(ui, theme, label, None, index == 0, false, false);
+                    let sorted = (app.startup.sort == key).then_some(app.startup.descending);
+                    if widgets::sortable_header(
+                        ui,
+                        theme,
+                        key.label(),
+                        sorted,
+                        index == 0,
+                        false,
+                        false,
+                    )
+                    .clicked()
+                    {
+                        sort_clicked = Some(key);
+                    }
                 });
             }
         })
@@ -448,6 +529,14 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
             });
         });
 
+    if let Some(key) = sort_clicked {
+        if app.startup.sort == key {
+            app.startup.descending = !app.startup.descending;
+        } else {
+            app.startup.sort = key;
+            app.startup.descending = key.defaults_descending();
+        }
+    }
     if let Some(name) = clicked {
         app.startup.selected = Some(name);
     }
@@ -491,6 +580,32 @@ mod tests {
     fn an_empty_search_matches_everything() {
         let spooler = service("Spooler", "Print Spooler", ServiceState::Running);
         assert!(matches(&spooler, ""));
+    }
+
+    fn startup_entry(name: &str, command: &str) -> StartupEntry {
+        StartupEntry {
+            name: name.to_string(),
+            command: command.to_string(),
+            location: "HKCU Run",
+            all_users: false,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn a_startup_search_matches_the_name_or_the_command() {
+        // A person searching "onedrive" and one searching the path it
+        // launches from are both looking for the same entry.
+        let onedrive = startup_entry("OneDrive", "C:\\OneDrive\\OneDrive.exe /background");
+        assert!(startup_matches(&onedrive, "onedrive"));
+        assert!(startup_matches(&onedrive, "background"));
+        assert!(!startup_matches(&onedrive, "defender"));
+    }
+
+    #[test]
+    fn an_empty_startup_search_matches_everything() {
+        let onedrive = startup_entry("OneDrive", "C:\\OneDrive\\OneDrive.exe");
+        assert!(startup_matches(&onedrive, ""));
     }
 
     #[test]

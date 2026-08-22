@@ -41,7 +41,7 @@ use crate::icon::Icon;
 use crate::model::columns::ColumnOrder;
 use crate::model::filter::Query;
 use crate::model::history::Series;
-use crate::model::sort::SortKey;
+use crate::model::sort::{compare_text, SortKey};
 use crate::model::tree::Entry;
 use crate::model::{ProcessKey, ProcessKind, Snapshot};
 use crate::theme::{Catalog, Palette};
@@ -301,6 +301,86 @@ pub struct ServicesView {
     /// — see [`crate::engine::sampler`] — so the view refreshes them on
     /// its own schedule.
     pub refreshed: Option<std::time::Instant>,
+    /// The column being sorted on.
+    pub sort: ServiceSortKey,
+    /// Whether that sort is descending.
+    pub descending: bool,
+}
+
+/// A column the Services table can sort by.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ServiceSortKey {
+    /// The display name, falling back to the short name — what the Name
+    /// column actually shows.
+    #[default]
+    Name,
+    /// The short name — what `sc` and `net` take.
+    ShortName,
+    /// Running, stopped, or a transition between them.
+    Status,
+    /// The hosting process's PID.
+    Pid,
+}
+
+impl ServiceSortKey {
+    /// The column heading.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::ShortName => "Service",
+            Self::Status => "Status",
+            Self::Pid => "PID",
+        }
+    }
+
+    /// Which way this column sorts when it is first clicked.
+    ///
+    /// None of these is a magnitude worth finding the biggest of, unlike
+    /// the process table's CPU or memory — so every column opens
+    /// ascending, the same as [`crate::model::sort::SortKey`]'s own
+    /// non-magnitude columns.
+    #[must_use]
+    pub const fn defaults_descending(self) -> bool {
+        false
+    }
+
+    /// Compares two services by this column, breaking a tie on the short
+    /// name — the one field the SCM guarantees is unique, so the table
+    /// has a determined order rather than reshuffling on every refresh.
+    /// See [`crate::model::sort::SortKey::compare`] for why a tie-break
+    /// matters at all.
+    #[must_use]
+    pub fn compare_directed(
+        self,
+        a: &crate::win::services::Service,
+        b: &crate::win::services::Service,
+        descending: bool,
+    ) -> std::cmp::Ordering {
+        let primary = match self {
+            Self::Name => compare_text(service_label(a), service_label(b)),
+            Self::ShortName => compare_text(&a.name, &b.name),
+            Self::Status => a.state.cmp(&b.state),
+            Self::Pid => a.pid.cmp(&b.pid),
+        };
+        let primary = if descending {
+            primary.reverse()
+        } else {
+            primary
+        };
+        primary.then_with(|| compare_text(&a.name, &b.name))
+    }
+}
+
+/// A service's Name-column text: the display name, falling back to the
+/// short one for the services that do not register a friendly name.
+#[must_use]
+pub fn service_label(service: &crate::win::services::Service) -> &str {
+    if service.display_name.is_empty() {
+        &service.name
+    } else {
+        &service.display_name
+    }
 }
 
 /// The Startup view's own state.
@@ -308,10 +388,76 @@ pub struct ServicesView {
 pub struct StartupView {
     /// The entries read at the last refresh.
     pub entries: Vec<crate::win::startup::StartupEntry>,
+    /// The search box's text.
+    pub search: String,
     /// The selected entry's name.
     pub selected: Option<String>,
+    /// The column being sorted on.
+    pub sort: StartupSortKey,
+    /// Whether that sort is descending.
+    pub descending: bool,
     /// When the list was last read.
     pub refreshed: Option<std::time::Instant>,
+}
+
+/// A column the Startup table can sort by.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum StartupSortKey {
+    /// The registered name.
+    #[default]
+    Name,
+    /// Enabled or disabled.
+    Status,
+    /// Which registry location or startup folder it came from.
+    Location,
+}
+
+impl StartupSortKey {
+    /// The column heading.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::Status => "Status",
+            Self::Location => "Location",
+        }
+    }
+
+    /// Which way this column sorts when it is first clicked.
+    ///
+    /// See [`ServiceSortKey::defaults_descending`] — the same reasoning
+    /// applies: nothing here is a magnitude.
+    #[must_use]
+    pub const fn defaults_descending(self) -> bool {
+        false
+    }
+
+    /// Compares two entries by this column.
+    ///
+    /// The tie-break is `(name, location)` rather than the name alone: an
+    /// entry can legitimately be registered under the same name in more
+    /// than one location — a per-user copy and an all-users one — so the
+    /// name by itself is not always unique.
+    #[must_use]
+    pub fn compare_directed(
+        self,
+        a: &crate::win::startup::StartupEntry,
+        b: &crate::win::startup::StartupEntry,
+        descending: bool,
+    ) -> std::cmp::Ordering {
+        let primary = match self {
+            Self::Name => compare_text(&a.name, &b.name),
+            Self::Status => a.enabled.cmp(&b.enabled),
+            Self::Location => a.location.cmp(b.location),
+        };
+        let primary = if descending {
+            primary.reverse()
+        } else {
+            primary
+        };
+        primary
+            .then_with(|| compare_text(&a.name, &b.name).then_with(|| a.location.cmp(b.location)))
+    }
 }
 
 /// A message shown in the status bar for a few seconds.
@@ -704,6 +850,67 @@ mod tests {
         // exists should cost the view, not the config.
         assert_eq!(View::from_id("no-such-view"), View::default());
         assert_eq!(View::from_id(""), View::default());
+    }
+
+    #[test]
+    fn service_label_falls_back_to_the_short_name() {
+        let named = crate::win::services::Service {
+            name: "Spooler".to_string(),
+            display_name: "Print Spooler".to_string(),
+            ..Default::default()
+        };
+        let unnamed = crate::win::services::Service {
+            name: "Spooler".to_string(),
+            display_name: String::new(),
+            ..Default::default()
+        };
+        assert_eq!(service_label(&named), "Print Spooler");
+        assert_eq!(
+            service_label(&unnamed),
+            "Spooler",
+            "a service with no display name should fall back to the short one"
+        );
+    }
+
+    #[test]
+    fn services_tied_on_the_sorted_column_break_on_the_short_name() {
+        // Two stopped services tie on Status; the SCM's short name is the
+        // one field guaranteed unique, so it has to be what settles the
+        // order, or the table's order would depend on enumeration order.
+        let a = crate::win::services::Service {
+            name: "b".to_string(),
+            ..Default::default()
+        };
+        let b = crate::win::services::Service {
+            name: "a".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            ServiceSortKey::Status.compare_directed(&a, &b, false),
+            std::cmp::Ordering::Greater,
+            "tied on status, the short name should place \"a\" before \"b\""
+        );
+    }
+
+    #[test]
+    fn startup_entries_tied_on_name_break_on_location() {
+        // A machine can register the same name under both a per-user and
+        // an all-users location, so the name alone is not always unique.
+        let a = crate::win::startup::StartupEntry {
+            name: "X".to_string(),
+            location: "HKCU Run",
+            ..Default::default()
+        };
+        let b = crate::win::startup::StartupEntry {
+            name: "X".to_string(),
+            location: "HKLM Run",
+            ..Default::default()
+        };
+        assert_eq!(
+            StartupSortKey::Status.compare_directed(&a, &b, false),
+            std::cmp::Ordering::Less,
+            "tied on name and status, the location should break the tie"
+        );
     }
 
     #[test]

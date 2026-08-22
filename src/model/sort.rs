@@ -231,7 +231,11 @@ fn tie_break(a: &ProcessRow, b: &ProcessRow) -> Ordering {
 /// folding: full Unicode case folding needs a table this crate has no
 /// other use for, and process names that differ only in the case of a
 /// non-ASCII letter do not occur in practice.
-fn compare_text(a: &str, b: &str) -> Ordering {
+///
+/// `pub(crate)` rather than private: the Services and Startup views sort
+/// their own short lists by the same rule and would otherwise carry a
+/// second copy of it.
+pub(crate) fn compare_text(a: &str, b: &str) -> Ordering {
     let folded = a
         .chars()
         .map(|c| c.to_ascii_lowercase())
