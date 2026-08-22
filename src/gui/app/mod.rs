@@ -37,6 +37,7 @@ pub mod rows;
 
 use crate::config::Config;
 use crate::engine::Engine;
+use crate::icon::Icon;
 use crate::model::filter::Query;
 use crate::model::history::Series;
 use crate::model::sort::SortKey;
@@ -97,19 +98,20 @@ impl View {
 
     /// The rail's icon.
     ///
-    /// Unicode glyphs from egui's bundled fonts rather than an icon
-    /// font: shipping a second font for six glyphs is a megabyte of
-    /// binary and a licence to track, and these render identically on
-    /// every Windows 10 install.
+    /// These were Unicode glyphs — `U+25A4`, `U+2699` and so on — on the
+    /// reasoning that egui's bundled fonts made them free. They are not
+    /// in those fonts: the whole rail shipped as a column of empty boxes
+    /// beside its labels. See [`crate::icon`] for what replaced them and
+    /// why an icon font was not the answer either.
     #[must_use]
-    pub fn icon(self) -> &'static str {
+    pub fn icon(self) -> Icon {
         match self {
-            Self::Processes => "▤",
-            Self::Performance => "◔",
-            Self::Details => "☰",
-            Self::Services => "⚙",
-            Self::Startup => "⏻",
-            Self::Settings => "✎",
+            Self::Processes => Icon::Processes,
+            Self::Performance => Icon::Performance,
+            Self::Details => Icon::Details,
+            Self::Services => Icon::Services,
+            Self::Startup => Icon::Startup,
+            Self::Settings => Icon::Settings,
         }
     }
 
@@ -641,10 +643,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_view_has_a_label_an_icon_and_a_stable_id() {
+    fn every_view_has_a_label_and_a_stable_id() {
         for view in View::ALL {
             assert!(!view.label().is_empty(), "{view:?}");
-            assert!(!view.icon().is_empty(), "{view:?}");
             assert!(!view.id().is_empty(), "{view:?}");
             assert!(
                 view.id().chars().all(|c| c.is_ascii_lowercase()),

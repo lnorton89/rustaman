@@ -16,15 +16,22 @@
 //! ## Every hover fades; nothing switches
 //!
 //! Hoverable surfaces route their highlight through [`hover_fill`], which
-//! is one eased ramp over [`theme::HOVER_SECONDS`] for the whole window.
-//! One control that snaps beside one that fades is most of what reads as
-//! unfinished, and it is very hard to notice deliberately — you only
-//! register that the app feels cheap.
+//! is one eased ramp over [`crate::motion::INSTANT`] for the whole
+//! window. One control that snaps beside one that fades is most of what
+//! reads as unfinished, and it is very hard to notice deliberately — you
+//! only register that the app feels cheap.
 //!
 //! Note that the *first* observation of an egui animation returns its
 //! target rather than its start, which is what stops a control that
 //! appears already-selected from sliding into place on the frame it first
 //! draws.
+//!
+//! ## Icons are geometry
+//!
+//! Nothing here sets an icon in a font. Every one is drawn from
+//! [`crate::icon`], because the characters that would do the job —
+//! chevrons, a gear, the window-control marks — are not in egui's bundled
+//! fonts and rendered as empty boxes in the shipped window.
 //!
 //! ## Measure, then allocate, then paint
 //!
@@ -36,8 +43,11 @@
 //! [`egui::Ui::allocate_exact_size`] — which is what a wrapped layout
 //! wraps on — and paints into the rect it gets back.
 
+use super::icon as icons;
+use super::motion;
 use super::theme::{self, PAD, RADIUS, SELECTION_BAR, SPACE_MD, SPACE_SM, SPACE_XS};
 use crate::color::Rgb;
+use crate::icon::Icon;
 use crate::theme::Palette;
 use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Rect, Response, Sense, Stroke, StrokeKind,
@@ -46,30 +56,15 @@ use egui::{
 
 /// How far a hover animation has progressed, 0..=1, eased.
 ///
-/// `cubic_out` rather than linear: a linear fade reads as mechanical
-/// because it decelerates nowhere, and the eye is unusually good at
-/// noticing that on a highlight it is looking straight at.
+/// A thin alias for [`motion::hover`], kept because "hover_t" is what the
+/// call sites read as. The curve and the duration live in
+/// [`crate::motion`] with every other animation in the app — this module
+/// used to own its own copy of an ease-out cubic and its own
+/// `HOVER_SECONDS`, which is exactly how an app ends up with two easing
+/// curves that are nearly the same.
 #[must_use]
 pub fn hover_t(ui: &Ui, id: egui::Id, hovered: bool) -> f32 {
-    let raw = ui
-        .ctx()
-        .animate_bool_with_time(id, hovered, theme::HOVER_SECONDS);
-    cubic_out(raw)
-}
-
-// Under ~60ms a hover reads as a switch rather than a fade; over ~200ms
-// it reads as lag on a control the pointer has already left. A relation
-// between constants, so checked at compile time.
-const _: () = assert!(
-    theme::HOVER_SECONDS >= 0.06 && theme::HOVER_SECONDS <= 0.2,
-    "HOVER_SECONDS is outside the range that reads as a fade"
-);
-
-/// An ease-out cubic.
-#[must_use]
-pub fn cubic_out(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    1.0 - (1.0 - t).powi(3)
+    motion::hover(ui, id, hovered)
 }
 
 /// The fill for a hoverable surface, part-way through its ramp.
@@ -84,14 +79,14 @@ pub fn hover_fill(ui: &Ui, id: egui::Id, hovered: bool, rest: Rgb, lifted: Rgb) 
 /// The bar rather than a filled background because the rail is narrow and
 /// a full-width fill at this size reads as a text field rather than a
 /// selected item.
-pub fn nav_item(ui: &mut Ui, theme: &Palette, icon: &str, label: &str, active: bool) -> Response {
+pub fn nav_item(ui: &mut Ui, theme: &Palette, icon: Icon, label: &str, active: bool) -> Response {
     /// The rail entry's height. Taller than a table row — this is a
     /// primary destination, not a list item.
     const HEIGHT: f32 = 36.0;
     /// The accent bar's width when the entry is active.
     const BAR: f32 = 3.0;
     /// The icon column's width, so every label starts on one column
-    /// however wide its icon glyph happens to be.
+    /// whatever shape the icon beside it draws.
     const ICON_COLUMN: f32 = 22.0;
 
     let width = ui.available_width();
@@ -118,27 +113,71 @@ pub fn nav_item(ui: &mut Ui, theme: &Palette, icon: &str, label: &str, active: b
     } else {
         theme::rgb(theme.text_muted)
     };
-    let font = TextStyle::Body.resolve(ui.style());
-    painter.text(
-        rect.left_center() + Vec2::new(SPACE_MD, 0.0),
-        Align2::LEFT_CENTER,
-        icon,
-        font.clone(),
-        if active {
-            theme::rgb(theme.accent)
-        } else {
-            text_color
-        },
+    let icon_colour = if active {
+        theme::rgb(theme.accent)
+    } else {
+        text_color
+    };
+    // Centred in a fixed icon column rather than laid out beside the
+    // label, so every label in the rail starts on one x however wide the
+    // icon beside it happens to draw.
+    let icon_box = Rect::from_center_size(
+        egui::pos2(rect.left() + SPACE_MD + ICON_COLUMN / 2.0, rect.center().y),
+        Vec2::splat(icons::NAV),
     );
+    icons::paint(painter, icon_box, icon, icon_colour);
+
     painter.text(
-        rect.left_center() + Vec2::new(SPACE_MD + ICON_COLUMN, 0.0),
+        rect.left_center() + Vec2::new(SPACE_MD + ICON_COLUMN + SPACE_XS, 0.0),
         Align2::LEFT_CENTER,
         label,
-        font,
+        TextStyle::Body.resolve(ui.style()),
         text_color,
     );
 
     response
+}
+
+/// A tree disclosure control: a chevron that turns as it opens.
+///
+/// Both the category headings and the process rows use this, so the two
+/// cannot end up with arrows at different sizes pointing different ways —
+/// which is what they were, because each drew its own.
+///
+/// It *rotates* rather than swapping between two chevrons. A control that
+/// turns reads as the same object opening; two shapes exchanged at the
+/// halfway point read as one being replaced by another, and the tree then
+/// feels like it reloads on every click rather than expanding.
+///
+/// `id_source` must identify the row, not its position — see
+/// [`super::motion`]. Keyed on a row index, collapsing one row makes
+/// every arrow below it spin.
+pub fn disclosure(
+    ui: &mut Ui,
+    theme: &Palette,
+    open: bool,
+    id_source: impl std::hash::Hash + std::fmt::Debug,
+) -> Response {
+    let id = ui.id().with("disclosure").with(id_source);
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(icons::DISCLOSURE + SPACE_XS, theme::ROW_HEIGHT),
+        Sense::click(),
+    );
+
+    let turn = motion::toggle(ui.ctx(), id, open, motion::QUICK);
+    // A quarter turn: right-pointing when closed, down-pointing when
+    // open. Clockwise, because the content appears below.
+    let colour = theme
+        .text_faint
+        .lerp(theme.text, hover_t(ui, response.id, response.hovered()));
+    icons::paint_rotated(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), Vec2::splat(icons::DISCLOSURE)),
+        Icon::ChevronRight,
+        theme::rgb(colour),
+        turn * 0.25,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A small labelled pill — a status, a count, a category.
@@ -186,21 +225,21 @@ pub fn sortable_header(
     } else {
         theme.text_muted
     };
-    // The arrow is part of the laid-out text rather than a separate
-    // painted glyph, so the heading's width accounts for it and a column
-    // does not jump when its sort direction changes.
-    let text = match sorted {
-        Some(true) => format!("{label} ▾"),
-        Some(false) => format!("{label} ▴"),
-        None => label.to_string(),
-    };
-    let galley = ui.painter().layout_no_wrap(text, font, theme::rgb(color));
+    // The arrow occupies a reserved column whether or not this heading
+    // is the sorted one, so a column does not jump sideways when the
+    // sort moves onto it. It is drawn rather than set: the triangles
+    // that would do this in one string are not in egui's bundled fonts
+    // (see `crate::icon`).
+    let arrow_column = icons::DISCLOSURE + SPACE_XS;
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font, theme::rgb(color));
 
     let cell = ui.available_rect_before_wrap();
     let wanted = if claims_width {
         Vec2::new(cell.width(), galley.size().y + SPACE_XS)
     } else {
-        galley.size() + Vec2::new(SPACE_SM, SPACE_XS)
+        galley.size() + Vec2::new(SPACE_SM + arrow_column, SPACE_XS)
     };
     let (rect, response) = ui.allocate_exact_size(wanted, Sense::click());
 
@@ -209,15 +248,53 @@ pub fn sortable_header(
     // would pin the column's minimum width.
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
-    let position = if right_aligned {
-        egui::pos2(
-            rect.right() - galley.size().x,
-            rect.center().y - galley.size().y / 2.0,
+    // The arrow sits on the outside of the label — past its right edge
+    // in a left-aligned heading, before its left edge in a right-aligned
+    // one — so it is always on the column's own margin rather than
+    // between the heading and its neighbour.
+    let text_width = galley.size().x;
+    let (text_left, arrow_centre) = if right_aligned {
+        (
+            rect.right() - text_width,
+            rect.right() - text_width - SPACE_XS - icons::DISCLOSURE / 2.0,
         )
     } else {
-        egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0)
+        (
+            rect.left(),
+            rect.left() + text_width + SPACE_XS + icons::DISCLOSURE / 2.0,
+        )
     };
-    ui.painter().galley(position, galley, theme::rgb(color));
+    ui.painter().galley(
+        egui::pos2(text_left, rect.center().y - galley.size().y / 2.0),
+        galley,
+        theme::rgb(color),
+    );
+
+    if let Some(descending) = sorted {
+        // The arrow rotates between the two directions rather than being
+        // swapped, so a click on an already-sorted heading reads as
+        // "this reversed" rather than as the heading being redrawn.
+        let flip = motion::toggle(
+            ui.ctx(),
+            response.id.with("sort"),
+            descending,
+            motion::QUICK,
+        );
+        let icon = if flip > 0.5 {
+            Icon::ArrowDown
+        } else {
+            Icon::ArrowUp
+        };
+        icons::paint(
+            ui.painter(),
+            Rect::from_center_size(
+                egui::pos2(arrow_centre, rect.center().y),
+                Vec2::splat(icons::DISCLOSURE),
+            ),
+            icon,
+            theme::rgb(theme.accent),
+        );
+    }
     response
 }
 
@@ -393,7 +470,7 @@ pub fn number(ui: &mut Ui, theme: &Palette, text: &str, muted: bool) {
 }
 
 /// A borderless icon button, for the title bar and toolbars.
-pub fn icon_button(ui: &mut Ui, theme: &Palette, glyph: &str, tooltip: &str) -> Response {
+pub fn icon_button(ui: &mut Ui, theme: &Palette, icon: Icon, tooltip: &str) -> Response {
     /// The button's square size. Matches the title bar's own height less
     /// its padding, so the window controls fill the bar's full height and
     /// are hittable by throwing the pointer at the corner.
@@ -403,11 +480,10 @@ pub fn icon_button(ui: &mut Ui, theme: &Palette, glyph: &str, tooltip: &str) -> 
     let fill = hover_fill(ui, response.id, response.hovered(), theme.app, theme.hover);
     ui.painter()
         .rect_filled(rect, CornerRadius::same(RADIUS), fill);
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        glyph,
-        TextStyle::Body.resolve(ui.style()),
+    icons::paint(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), Vec2::splat(icons::INLINE)),
+        icon,
         theme::rgb(theme.text),
     );
     response.on_hover_text(tooltip)
@@ -425,16 +501,15 @@ pub fn close_button(ui: &mut Ui, theme: &Palette) -> Response {
     let fill = hover_fill(ui, response.id, response.hovered(), theme.app, theme.danger);
     ui.painter()
         .rect_filled(rect, CornerRadius::same(RADIUS), fill);
-    // The glyph flips to the on-accent colour as the danger fill comes
+    // The mark flips to the on-accent colour as the danger fill comes
     // up, or it goes unreadable against it at the end of the ramp.
     let t = hover_t(ui, response.id, response.hovered());
-    let glyph = theme.text.lerp(theme.text_on_accent, t);
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        "✕",
-        TextStyle::Body.resolve(ui.style()),
-        theme::rgb(glyph),
+    let mark = theme.text.lerp(theme.text_on_accent, t);
+    icons::paint(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), Vec2::splat(icons::INLINE)),
+        Icon::Close,
+        theme::rgb(mark),
     );
     response.on_hover_text("Close")
 }
@@ -568,46 +643,23 @@ pub const fn pane_inset() -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
+    /// The curve's own properties — that it starts at rest, ends
+    /// lifted, decelerates rather than running linearly, never goes
+    /// backwards, and clamps nonsense — are pinned in
+    /// [`crate::motion`]'s tests, which run on every platform rather
+    /// than only on the Windows CI job. This module used to carry its
+    /// own copy of all four, against its own private `cubic_out`.
+    ///
+    /// What is worth checking *here* is the thing that could drift once
+    /// they were merged: that the hover helper still reaches for the
+    /// app's hover duration rather than acquiring one of its own.
     #[test]
-    fn the_hover_ramp_starts_at_rest_and_ends_lifted() {
-        assert_eq!(cubic_out(0.0), 0.0);
-        assert_eq!(cubic_out(1.0), 1.0);
-    }
-
-    #[test]
-    fn the_hover_ramp_decelerates_rather_than_running_linearly() {
-        // A linear fade reads as mechanical, and the eye is unusually
-        // good at noticing that on a highlight it is looking straight at.
-        // Ease-out means the first half covers more than half the
-        // distance.
+    fn the_hover_ramp_uses_the_apps_own_hover_duration() {
+        let source = include_str!("widgets.rs");
         assert!(
-            cubic_out(0.5) > 0.5,
-            "an ease-out curve is above the diagonal at its midpoint, got {}",
-            cubic_out(0.5)
+            source.contains("motion::hover(ui, id, hovered)"),
+            "hover_t no longer delegates to motion::hover, so the hover \
+             ramp has picked up a duration of its own"
         );
-        assert!(
-            cubic_out(0.25) > 0.25,
-            "and above it at a quarter, got {}",
-            cubic_out(0.25)
-        );
-    }
-
-    #[test]
-    fn the_hover_ramp_is_monotonic() {
-        // A highlight that went backwards partway would read as a flicker.
-        let mut previous = 0.0;
-        for step in 0..=100 {
-            let t = cubic_out(step as f32 / 100.0);
-            assert!(t >= previous, "the ramp went backwards at {step}");
-            previous = t;
-        }
-    }
-
-    #[test]
-    fn the_hover_ramp_clamps_an_out_of_range_input() {
-        assert_eq!(cubic_out(-1.0), 0.0);
-        assert_eq!(cubic_out(2.0), 1.0);
     }
 }

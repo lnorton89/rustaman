@@ -123,12 +123,11 @@ pub const NAV_WIDTH: f32 = 168.0;
 /// row unmistakable from across the window.
 pub const SELECTION_BAR: f32 = 3.0;
 
-/// How long a hover highlight takes to reach full strength.
-///
-/// Every hoverable surface fades over this, through
-/// [`super::widgets::hover_fill`]. One control that snaps beside one that
-/// fades is most of what reads as unfinished.
-pub const HOVER_SECONDS: f32 = 0.12;
+// The hover duration used to live here, beside the spacing scale. It
+// moved to `crate::motion::INSTANT` with the other three durations: this
+// module owns colour and spacing, and a lone timing constant filed next
+// to them was how the app came to have two easing curves that were
+// nearly the same. See `crate::motion` on why there are exactly four.
 
 thread_local! {
     /// The palette in force for this frame.

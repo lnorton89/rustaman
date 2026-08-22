@@ -52,7 +52,9 @@ pub mod brand;
 pub mod color;
 pub mod config;
 pub mod format;
+pub mod icon;
 pub mod model;
+pub mod motion;
 pub mod theme;
 
 #[cfg(windows)]

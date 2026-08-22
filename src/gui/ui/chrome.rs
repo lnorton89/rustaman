@@ -41,6 +41,7 @@ use super::theme::{
 };
 use super::widgets;
 use crate::gui::app::{App, View, TOAST_SECONDS};
+use crate::icon::Icon;
 use crate::theme::Palette;
 use egui::{Align, CornerRadius, Layout, Rect, ResizeDirection, Sense, Ui, Vec2, ViewportCommand};
 
@@ -98,13 +99,18 @@ pub fn title_bar(app: &mut App, ui: &mut Ui) -> bool {
                     if widgets::close_button(ui, &theme).clicked() {
                         closing = true;
                     }
-                    let maximise = if app.maximised { "🗗" } else { "🗖" };
-                    if widgets::icon_button(ui, &theme, maximise, "Maximise").clicked() {
+                    let (maximise, tooltip) = if app.maximised {
+                        (Icon::WindowRestore, "Restore")
+                    } else {
+                        (Icon::WindowMaximise, "Maximise")
+                    };
+                    if widgets::icon_button(ui, &theme, maximise, tooltip).clicked() {
                         app.maximised = !app.maximised;
                         ui.ctx()
                             .send_viewport_cmd(ViewportCommand::Maximized(app.maximised));
                     }
-                    if widgets::icon_button(ui, &theme, "🗕", "Minimise").clicked() {
+                    if widgets::icon_button(ui, &theme, Icon::WindowMinimise, "Minimise").clicked()
+                    {
                         ui.ctx().send_viewport_cmd(ViewportCommand::Minimized(true));
                     }
 

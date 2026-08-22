@@ -39,7 +39,9 @@
 pub mod chrome;
 pub mod details;
 pub mod graph;
+pub mod icon;
 pub mod modal;
+pub mod motion;
 pub mod performance;
 pub mod processes;
 pub mod services;
@@ -234,6 +236,135 @@ mod tests {
         assert_eq!(keys.len(), count, "two shortcuts share a key");
     }
 
+    /// Every module that paints, and its source.
+    ///
+    /// One list rather than one per rule: the rules below all ask the
+    /// same question of the same files, and three separate lists is how a
+    /// module added later ends up covered by two of them. `theme.rs`,
+    /// `icon.rs` and `motion.rs` are deliberately absent — they are where
+    /// colours, shapes and durations are *made*, so a rule forbidding
+    /// those things would forbid the definitions themselves.
+    const DRAWING_MODULES: [(&str, &str); 9] = [
+        ("chrome.rs", include_str!("chrome.rs")),
+        ("details.rs", include_str!("details.rs")),
+        ("graph.rs", include_str!("graph.rs")),
+        ("modal.rs", include_str!("modal.rs")),
+        ("performance.rs", include_str!("performance.rs")),
+        ("processes.rs", include_str!("processes.rs")),
+        ("services.rs", include_str!("services.rs")),
+        ("settings.rs", include_str!("settings.rs")),
+        ("widgets.rs", include_str!("widgets.rs")),
+    ];
+
+    /// The lines a source scan should not read: comments explain the
+    /// rules, and doc comments quote them.
+    fn is_prose(line: &str) -> bool {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("//") || trimmed.starts_with("*")
+    }
+
+    #[test]
+    fn no_drawing_module_sets_an_icon_in_a_font() {
+        // egui's bundled fonts cover Latin, Greek, Cyrillic and an emoji
+        // subset — and almost nothing in the Geometric Shapes,
+        // Miscellaneous Symbols or Dingbats blocks, which is where every
+        // icon-shaped character lives. A glyph the font lacks renders as
+        // an empty box, so the nav rail shipped as a column of squares
+        // beside its labels.
+        //
+        // Every icon is geometry now (`crate::icon`), and this is what
+        // stops the convenient one-character version coming back.
+        //
+        // Typographic punctuation is fine and used throughout the prose:
+        // an em dash, a middle dot, an ellipsis and curly quotes are all
+        // in the bundled fonts. The rule is about *pictographs*.
+        for (name, source) in DRAWING_MODULES {
+            for (number, line) in source.lines().enumerate() {
+                if is_prose(line) {
+                    continue;
+                }
+                for character in line.chars() {
+                    let code = character as u32;
+                    let pictographic = matches!(
+                        code,
+                        // Arrows, Miscellaneous Technical, Geometric
+                        // Shapes, Miscellaneous Symbols, Dingbats.
+                        0x2190..=0x2BFF
+                        // Everything above the Basic Multilingual Plane
+                        // that this app could plausibly reach for:
+                        // emoji, and the symbols-and-pictographs block
+                        // the window-control glyphs live in.
+                        | 0x1F000..=0x1FAFF
+                    );
+                    assert!(
+                        !pictographic,
+                        "{name}:{} sets an icon in a font: U+{code:04X}. \
+                         egui's bundled fonts do not carry it, so it \
+                         renders as an empty box — use crate::icon::Icon",
+                        number + 1
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_drawing_module_animates_by_hand() {
+        // Every animation goes through `gui::ui::motion`, which is what
+        // makes the app's four durations four decisions rather than
+        // thirty call sites that each picked a number. A direct
+        // `ctx.animate_bool_with_time(id, on, 0.25)` is invisible in
+        // review and is how a hover that fades over 0.1s ends up beside a
+        // panel that slides over 0.25s.
+        for (name, source) in DRAWING_MODULES {
+            for (number, line) in source.lines().enumerate() {
+                if is_prose(line) {
+                    continue;
+                }
+                assert!(
+                    !line.contains(".animate_bool")
+                        && !line.contains(".animate_value")
+                        && !line.contains(".animate_"),
+                    "{name}:{} animates by hand: {}. Use gui::ui::motion, \
+                     which owns the durations",
+                    number + 1,
+                    line.trim()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_drawing_module_holds_a_bare_duration() {
+        // The other half of the rule above: a duration reaching `motion`
+        // from a call site is the same drift with one more step in it.
+        // The four constants are the whole vocabulary.
+        for (name, source) in DRAWING_MODULES {
+            for (number, line) in source.lines().enumerate() {
+                if is_prose(line) || !line.contains("motion::") {
+                    continue;
+                }
+                // A literal float argument to a motion helper. The
+                // durations are named constants, so a `0.` in one of
+                // these calls is someone's own number.
+                let suspicious = line.contains("motion::toggle(")
+                    || line.contains("motion::transition(")
+                    || line.contains("motion::settled(");
+                if !suspicious {
+                    continue;
+                }
+                let arguments = line.split("motion::").nth(1).unwrap_or("");
+                assert!(
+                    !arguments.contains("0."),
+                    "{name}:{} passes a bare duration: {}. Use INSTANT, \
+                     QUICK, SETTLE or ENTER",
+                    number + 1,
+                    line.trim()
+                );
+            }
+        }
+    }
+
     #[test]
     fn no_drawing_module_holds_a_colour_literal() {
         // Every colour comes from the theme. A single hard-coded grey is
@@ -242,18 +373,7 @@ mod tests {
         // The exceptions are stated rather than assumed: `theme.rs` is
         // where colours are made, and alpha-only constructors are
         // lighting rather than theme colours.
-        let files = [
-            ("chrome.rs", include_str!("chrome.rs")),
-            ("details.rs", include_str!("details.rs")),
-            ("graph.rs", include_str!("graph.rs")),
-            ("modal.rs", include_str!("modal.rs")),
-            ("performance.rs", include_str!("performance.rs")),
-            ("processes.rs", include_str!("processes.rs")),
-            ("services.rs", include_str!("services.rs")),
-            ("settings.rs", include_str!("settings.rs")),
-            ("widgets.rs", include_str!("widgets.rs")),
-        ];
-        for (name, source) in files {
+        for (name, source) in DRAWING_MODULES {
             for (number, line) in source.lines().enumerate() {
                 let trimmed = line.trim_start();
                 // Comments describe the rule; they do not break it.
@@ -283,16 +403,7 @@ mod tests {
         // Every margin, inset, and gap is one of the five scale values.
         // A `add_space(7.0)` is how a window ends up with four different
         // gaps that are each nearly the same.
-        let files = [
-            ("chrome.rs", include_str!("chrome.rs")),
-            ("details.rs", include_str!("details.rs")),
-            ("modal.rs", include_str!("modal.rs")),
-            ("performance.rs", include_str!("performance.rs")),
-            ("processes.rs", include_str!("processes.rs")),
-            ("services.rs", include_str!("services.rs")),
-            ("settings.rs", include_str!("settings.rs")),
-        ];
-        for (name, source) in files {
+        for (name, source) in DRAWING_MODULES {
             for (number, line) in source.lines().enumerate() {
                 let trimmed = line.trim_start();
                 if trimmed.starts_with("//") {

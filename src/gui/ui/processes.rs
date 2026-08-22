@@ -407,12 +407,7 @@ fn group_heading(
 
     ui.horizontal_centered(|ui| {
         ui.add_space(SPACE_XS);
-        let arrow = if collapsed { "▸" } else { "▾" };
-        ui.label(
-            egui::RichText::new(arrow)
-                .color(theme::rgb(theme.text_muted))
-                .text_style(egui::TextStyle::Small),
-        );
+        widgets::disclosure(ui, theme, !collapsed, kind);
         ui.add_space(SPACE_XS);
         ui.label(
             egui::RichText::new(kind.label())
@@ -464,17 +459,11 @@ fn name_cell(
         ui.add_space(SPACE_XS + f32::from(depth) * INDENT);
 
         if children > 0 {
-            let arrow = if expanded { "▾" } else { "▸" };
-            let (rect, response) =
-                ui.allocate_exact_size(Vec2::new(INDENT, ROW_HEIGHT), Sense::click());
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                arrow,
-                egui::TextStyle::Small.resolve(ui.style()),
-                theme::rgb(theme.text_muted),
-            );
-            hit = response.clicked();
+            // Keyed on the process, not the row index: the table is
+            // re-sorted constantly, and an arrow keyed on position would
+            // inherit the animation state of whatever used to be there —
+            // so a sort would set every arrow in the table spinning.
+            hit = widgets::disclosure(ui, theme, expanded, process.key()).clicked();
         } else {
             ui.add_space(INDENT);
         }
