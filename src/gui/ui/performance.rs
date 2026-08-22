@@ -74,10 +74,29 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
 }
 
 /// The resource list down the left.
-fn picker(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) {
+///
+/// Returns the rows' own bounding rect — not used by [`draw`], which
+/// discards it, but by the tests, which need the content's real extent
+/// rather than the picker panel's: the panel is a fixed
+/// [`PICKER_WIDTH`] regardless of what is drawn inside it, so measuring
+/// *it* can never reveal whether the content left a margin before its
+/// edge.
+fn picker(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) -> Rect {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // The picker panel's own frame carries zero margin — see its
+            // construction in `draw` — so a row that fills exactly
+            // `ui.available_width()` reaches the panel's true right edge
+            // with nothing but the gap before the detail column for
+            // separation. That gap is real, but it is the *only* thing
+            // standing between the sparkline and the seam, which is the
+            // same "one gap doing all the work" shape the detail column
+            // had — trimmed by the same step, for the same reason: the
+            // sparkline's own margin should not depend on what is drawn
+            // on the other side of the seam.
+            let width = (ui.available_width() - SPACE_MD).max(0.0);
+            ui.set_max_width(width);
             let entries = [
                 (
                     PerformanceFocus::Cpu,
@@ -143,7 +162,9 @@ fn picker(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) {
                 }
                 ui.add_space(SPACE_XS);
             }
-        });
+            ui.min_rect()
+        })
+        .inner
 }
 
 /// One entry of the resource picker. Returns whether it was clicked.
@@ -951,6 +972,48 @@ mod tests {
             margin >= SPACE_MD,
             "a full-width rect inside the detail column left only {margin} \
              from the window edge, wanted at least {SPACE_MD}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_picker_leaves_a_real_margin_before_the_detail_column() -> anyhow::Result<()> {
+        // The picker panel's own frame carries zero margin by design —
+        // its rows are meant to fill it edge to edge on three sides —
+        // but the fourth side, the seam with the detail column, needs
+        // its own margin rather than leaning entirely on the gap
+        // `draw()` adds after the panel.
+        //
+        // Calls the real `picker()` directly on a `Ui` sized to the real
+        // `PICKER_WIDTH`, using its own return value for the content's
+        // extent: a `Panel::left` built with `.exact_size(PICKER_WIDTH)`
+        // is exactly that size regardless of what is drawn inside it, so
+        // `min_rect()` read from *outside* the panel reports the panel's
+        // fixed shape rather than its content's, and would pass even
+        // with the bug this guards against.
+        let window =
+            Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(PICKER_WIDTH, PICKER_ROW * 6.0));
+        let mut app = App::new(crate::config::Config::default());
+        let theme = app.theme.clone();
+        let snapshot = Snapshot::default();
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(window),
+            ..Default::default()
+        };
+        let mut content_rect = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            content_rect = Some(picker(&mut app, ui, &theme, &snapshot));
+        });
+        output.textures_delta.clear();
+
+        let min_rect = content_rect.ok_or_else(|| anyhow::anyhow!("picker() drew nothing"))?;
+        let margin = window.right() - min_rect.right();
+        assert!(
+            margin >= SPACE_MD,
+            "the picker's own content left only {margin} from the panel's \
+             right edge (the seam with the detail column), wanted at \
+             least {SPACE_MD}"
         );
         Ok(())
     }
