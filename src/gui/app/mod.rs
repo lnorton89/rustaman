@@ -241,6 +241,13 @@ pub struct PerformanceView {
     pub gpu: Series,
     /// Which sub-panel the Performance view has selected.
     pub focus: PerformanceFocus,
+    /// Whether the Network panel's idle-adapter list is expanded.
+    ///
+    /// Collapsed by default: a dev machine running Hyper-V, WSL or a VPN
+    /// client reports a couple of dozen throughput-less adapters, and
+    /// opening the page to all of them drawn out is the thing this field
+    /// exists to avoid.
+    pub network_idle_expanded: bool,
 }
 
 impl Default for PerformanceView {
@@ -260,6 +267,7 @@ impl Default for PerformanceView {
             network: Series::new(HISTORY),
             gpu: Series::new(HISTORY),
             focus: PerformanceFocus::default(),
+            network_idle_expanded: false,
         }
     }
 }

@@ -534,7 +534,7 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
 }
 
 /// The network panel.
-fn network(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
+fn network(app: &mut App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     widgets::section(ui, theme, "Network");
 
     let (rect, _) = ui.allocate_exact_size(
@@ -558,37 +558,143 @@ fn network(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         widgets::empty_state(ui, theme, "No connected adapters");
         return;
     }
-    let adapters = system.adapters.clone();
-    widgets::card_grid(ui, DEVICE_CARD_WIDTH, adapters.len(), |ui, index| {
-        let Some(adapter) = adapters.get(index) else {
-            return;
-        };
-        chrome::panel_card(ui, theme, |ui| {
-            ui.label(
-                egui::RichText::new(&adapter.name)
-                    .color(theme::rgb(theme.text))
-                    .strong(),
-            );
-            ui.add_space(SPACE_XS);
-            ui.horizontal(|ui| {
-                stat_column(
-                    ui,
-                    theme,
-                    "Receive",
-                    &crate::format::rate(adapter.receive_rate),
+
+    // Busiest first, and split at the last one carrying any traffic. A
+    // machine running Hyper-V, WSL or a VPN client reports a real,
+    // throughput-less adapter for every virtual switch and filter driver
+    // bound to the physical one — two dozen is routine — and a grid that
+    // draws every one of them as a full card is a wall of near-identical
+    // boxes with the two that matter lost somewhere in it.
+    let (active, idle) = split_by_activity(system.adapters.clone());
+
+    if active.is_empty() {
+        widgets::empty_state(ui, theme, "No adapters are currently active");
+    } else {
+        widgets::card_grid(ui, DEVICE_CARD_WIDTH, active.len(), |ui, index| {
+            let Some(adapter) = active.get(index) else {
+                return;
+            };
+            chrome::panel_card(ui, theme, |ui| {
+                ui.label(
+                    egui::RichText::new(&adapter.name)
+                        .color(theme::rgb(theme.text))
+                        .strong(),
                 );
-                stat_column(ui, theme, "Send", &crate::format::rate(adapter.send_rate));
-                stat_column(
-                    ui,
-                    theme,
-                    "Link speed",
-                    // Link speed is in bits per second; the byte
-                    // formatter would report a gigabit adapter as
-                    // "119 MB/s", which is right and reads as wrong.
-                    &format!("{} Mbps", adapter.link_speed / 1_000_000),
-                );
+                ui.add_space(SPACE_XS);
+                ui.horizontal(|ui| {
+                    stat_column(
+                        ui,
+                        theme,
+                        "Receive",
+                        &crate::format::rate(adapter.receive_rate),
+                    );
+                    stat_column(ui, theme, "Send", &crate::format::rate(adapter.send_rate));
+                    stat_column(
+                        ui,
+                        theme,
+                        "Link speed",
+                        // Link speed is in bits per second; the byte
+                        // formatter would report a gigabit adapter as
+                        // "119 MB/s", which is right and reads as wrong.
+                        &format!("{} Mbps", adapter.link_speed / 1_000_000),
+                    );
+                });
             });
         });
+    }
+
+    if !idle.is_empty() {
+        ui.add_space(SPACE_MD);
+        idle_adapters(app, ui, theme, &idle);
+    }
+}
+
+/// Sorts adapters busiest-first and splits them at the last one carrying
+/// at least a byte a second of traffic — the same floor
+/// [`crate::format::rate`] rounds to `"0 B/s"` at, so a card never reads
+/// as active while showing two zeroes.
+///
+/// Ties break alphabetically. Without it, two adapters both reporting
+/// zero would order however `GetIfTable2` happened to enumerate them
+/// that sample, and the idle list would reshuffle on every frame for no
+/// reason a person watching it could see.
+fn split_by_activity(
+    mut adapters: Vec<crate::model::AdapterSample>,
+) -> (
+    Vec<crate::model::AdapterSample>,
+    Vec<crate::model::AdapterSample>,
+) {
+    adapters.sort_by(|a, b| {
+        b.total_rate()
+            .partial_cmp(&a.total_rate())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let split = adapters.partition_point(|adapter| adapter.total_rate() >= 1.0);
+    let idle = adapters.split_off(split);
+    (adapters, idle)
+}
+
+/// The idle adapters, collapsed behind a disclosure by default.
+///
+/// One line per adapter rather than a card: a card's three stat columns
+/// exist to hold live numbers, and an idle adapter has none — a card
+/// that draws a name and nothing else is the same box that started this,
+/// just smaller.
+fn idle_adapters(
+    app: &mut App,
+    ui: &mut Ui,
+    theme: &Palette,
+    idle: &[crate::model::AdapterSample],
+) {
+    let expanded = app.performance.network_idle_expanded;
+    chrome::panel_card(ui, theme, |ui| {
+        let header = ui.horizontal(|ui| {
+            widgets::disclosure(ui, theme, expanded, "network-idle");
+            ui.add_space(SPACE_XS);
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} inactive adapter{}",
+                    idle.len(),
+                    if idle.len() == 1 { "" } else { "s" }
+                ))
+                .color(theme::rgb(theme.text_muted))
+                .text_style(egui::TextStyle::Small),
+            );
+        });
+        // Sensed across the whole line rather than only the chevron's own
+        // small hit box — see `widgets::sortable_header` on why a control
+        // meant to be clicked casually should not require aiming at it.
+        let row = ui
+            .interact(
+                header.response.rect,
+                ui.id().with("network-idle-row"),
+                Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if row.clicked() {
+            app.performance.network_idle_expanded = !expanded;
+        }
+
+        if expanded {
+            ui.add_space(SPACE_XS);
+            for adapter in idle {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(&adapter.name)
+                            .color(theme::rgb(theme.text_muted))
+                            .text_style(egui::TextStyle::Small),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{} Mbps", adapter.link_speed / 1_000_000))
+                                .color(theme::rgb(theme.text_faint))
+                                .text_style(egui::TextStyle::Small),
+                        );
+                    });
+                });
+            }
+        }
     });
 }
 
@@ -714,6 +820,41 @@ mod tests {
                 "{focus:?} has no series, so its sparkline would be blank"
             );
         }
+    }
+
+    #[test]
+    fn adapters_split_busiest_first_with_idle_ties_alphabetical() {
+        let adapters = vec![
+            crate::model::AdapterSample {
+                name: "Idle B".to_string(),
+                receive_rate: 0.0,
+                send_rate: 0.0,
+                link_speed: 1_000_000_000,
+            },
+            crate::model::AdapterSample {
+                name: "Busy".to_string(),
+                receive_rate: 500.0,
+                send_rate: 200.0,
+                link_speed: 1_000_000_000,
+            },
+            crate::model::AdapterSample {
+                name: "Idle A".to_string(),
+                receive_rate: 0.0,
+                send_rate: 0.4,
+                link_speed: 1_000_000_000,
+            },
+        ];
+        let (active, idle) = split_by_activity(adapters);
+        assert_eq!(
+            active.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            vec!["Busy"],
+            "only the adapter clearing 1 B/s counts as active"
+        );
+        assert_eq!(
+            idle.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            vec!["Idle A", "Idle B"],
+            "idle adapters tie at zero and should break alphabetically"
+        );
     }
 
     #[test]
