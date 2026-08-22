@@ -142,24 +142,45 @@ fn refresh(app: &mut App) {
     }
 }
 
-/// The services table.
-fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
-    let query = app.services.search.to_lowercase();
+/// Rebuilds the filtered, sorted service list if the search text, the
+/// sort, or the underlying list itself has changed since the last frame.
+///
+/// A few hundred services filtered by substring and sorted with a
+/// case-folded comparator is not the process-tree-sized cost
+/// `rows::Cache` exists to avoid, but it is still real work with no
+/// reason to repeat sixty times a second when nothing that would change
+/// its answer has.
+fn refresh_visible_services(app: &mut App) {
+    let key = (
+        app.services.search.to_lowercase(),
+        app.services.sort,
+        app.services.descending,
+        app.services.refreshed,
+    );
+    if app.services.visible_key.as_ref() == Some(&key) {
+        return;
+    }
     let mut visible: Vec<Service> = app
         .services
         .services
         .iter()
-        .filter(|service| matches(service, &query))
+        .filter(|service| matches(service, &key.0))
         .cloned()
         .collect();
+    visible.sort_by(|a, b| key.1.compare_directed(a, b, key.2));
+    app.services.visible = visible;
+    app.services.visible_key = Some(key);
+}
+
+/// The services table.
+fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
+    refresh_visible_services(app);
+    let visible = app.services.visible.clone();
 
     if visible.is_empty() {
         widgets::empty_state(ui, theme, "No services match that search");
         return;
     }
-    let sort = app.services.sort;
-    let descending = app.services.descending;
-    visible.sort_by(|a, b| sort.compare_directed(a, b, descending));
 
     let mut clicked: Option<String> = None;
     let mut sort_clicked: Option<ServiceSortKey> = None;
@@ -443,24 +464,39 @@ fn refresh_startup(app: &mut App) {
     }
 }
 
-/// The startup table.
-fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
-    let query = app.startup.search.to_lowercase();
-    let mut entries: Vec<StartupEntry> = app
+/// See [`refresh_visible_services`] — the same cache, for the startup
+/// list.
+fn refresh_visible_startup(app: &mut App) {
+    let key = (
+        app.startup.search.to_lowercase(),
+        app.startup.sort,
+        app.startup.descending,
+        app.startup.refreshed,
+    );
+    if app.startup.visible_key.as_ref() == Some(&key) {
+        return;
+    }
+    let mut visible: Vec<StartupEntry> = app
         .startup
         .entries
         .iter()
-        .filter(|entry| startup_matches(entry, &query))
+        .filter(|entry| startup_matches(entry, &key.0))
         .cloned()
         .collect();
+    visible.sort_by(|a, b| key.1.compare_directed(a, b, key.2));
+    app.startup.visible = visible;
+    app.startup.visible_key = Some(key);
+}
+
+/// The startup table.
+fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
+    refresh_visible_startup(app);
+    let entries = app.startup.visible.clone();
 
     if entries.is_empty() {
         widgets::empty_state(ui, theme, "No startup entries match that search");
         return;
     }
-    let sort = app.startup.sort;
-    let descending = app.startup.descending;
-    entries.sort_by(|a, b| sort.compare_directed(a, b, descending));
 
     let mut clicked: Option<String> = None;
     let mut sort_clicked: Option<StartupSortKey> = None;

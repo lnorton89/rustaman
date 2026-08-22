@@ -311,6 +311,12 @@ pub struct ServicesView {
     /// `EnumServicesStatusExW` is a real syscall and must not run on the
     /// paint thread — see [`background::BackgroundRead`].
     pub pending: Option<background::BackgroundRead<Vec<crate::win::services::Service>>>,
+    /// The search text, sort and read this filtered, sorted list was
+    /// built from — recomputed only when one of those actually changes,
+    /// the same reasoning `rows::Cache` applies to the process table.
+    pub visible_key: Option<(String, ServiceSortKey, bool, Option<std::time::Instant>)>,
+    /// The filtered, sorted list [`Self::visible_key`] was built for.
+    pub visible: Vec<crate::win::services::Service>,
 }
 
 /// A column the Services table can sort by.
@@ -407,6 +413,10 @@ pub struct StartupView {
     /// A background read of the startup list, if one is in flight. See
     /// [`ServicesView::pending`].
     pub pending: Option<background::BackgroundRead<Vec<crate::win::startup::StartupEntry>>>,
+    /// See [`ServicesView::visible_key`].
+    pub visible_key: Option<(String, StartupSortKey, bool, Option<std::time::Instant>)>,
+    /// See [`ServicesView::visible`].
+    pub visible: Vec<crate::win::startup::StartupEntry>,
 }
 
 /// A column the Startup table can sort by.
