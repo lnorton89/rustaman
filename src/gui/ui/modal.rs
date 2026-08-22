@@ -34,6 +34,7 @@
 //! button only where the action is the expected one — see
 //! [`Confirmation::default_is_confirm`].
 
+use super::motion;
 use super::theme::{self, SPACE_LG, SPACE_MD, SPACE_SM};
 use super::widgets;
 use crate::gui::app::{App, Pending};
@@ -123,11 +124,26 @@ impl Confirmation {
     }
 }
 
+/// How far the card rises as it arrives.
+///
+/// Small, and shared with [`super::enter_view`]'s own `RISE`: this is the
+/// one other surface that fades and rises into place rather than
+/// switching, and a card that used a different distance or a different
+/// curve would read as a second animation style living in the same app.
+const RISE: f32 = 6.0;
+
 /// Draws the modal, if one is pending. Returns the answer, if given.
 pub fn draw(app: &mut App, ui: &mut Ui) -> Option<bool> {
     let pending = app.pending.as_ref()?;
     let question = Confirmation::of(pending);
     let theme = app.theme.clone();
+
+    // Keyed on a fixed id rather than the question's own content: only
+    // one modal is ever open at a time, and the point is that opening a
+    // *different* confirmation while one is already up — Stop, then
+    // immediately End task on the row behind it — does not restart the
+    // fade from zero.
+    let progress = motion::transition(ui.ctx(), egui::Id::new("modal-card"), true, motion::QUICK);
 
     let screen = ui.ctx().content_rect();
     // Painted on a foreground layer so it covers every panel, including
@@ -136,10 +152,11 @@ pub fn draw(app: &mut App, ui: &mut Ui) -> Option<bool> {
         egui::Order::Foreground,
         egui::Id::new("modal"),
     ));
+    let scrim_alpha = (f32::from(SCRIM_ALPHA) * progress) as u8;
     painter.rect_filled(
         screen,
         CornerRadius::ZERO,
-        theme::translucent(theme.app, SCRIM_ALPHA),
+        theme::translucent(theme.app, scrim_alpha),
     );
 
     let mut answer = None;
@@ -148,8 +165,12 @@ pub fn draw(app: &mut App, ui: &mut Ui) -> Option<bool> {
     // See the module docs.
     egui::Area::new(egui::Id::new("modal-card"))
         .order(egui::Order::Foreground)
-        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .anchor(
+            Align2::CENTER_CENTER,
+            Vec2::new(0.0, RISE * (1.0 - progress)),
+        )
         .show(ui.ctx(), |ui| {
+            ui.set_opacity(progress);
             egui::Frame::new()
                 .fill(theme::rgb(theme.raised))
                 .stroke(egui::Stroke::new(1.0, theme::rgb(theme.border)))
