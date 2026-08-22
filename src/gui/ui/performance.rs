@@ -482,7 +482,18 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     // three full-width cards holding three short numbers each, which on
     // a wide window is a column of near-empty bars with the bottom two
     // thirds of the view blank.
-    let disks = system.disks.clone();
+    //
+    // Busiest first, same as the network adapters: the disk someone
+    // opened this panel to check is the one doing something, and a
+    // laptop's NVMe boot disk sorting ahead of an idle external drive is
+    // more useful than whatever order Windows happened to enumerate them
+    // in.
+    let mut disks = system.disks.clone();
+    sort_busiest_first(
+        &mut disks,
+        |disk| disk.active_percent,
+        |disk| disk.name.as_str(),
+    );
     widgets::card_grid(ui, DEVICE_CARD_WIDTH, disks.len(), |ui, index| {
         let Some(disk) = disks.get(index) else {
             return;
@@ -609,27 +620,39 @@ fn network(app: &mut App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     }
 }
 
+/// Sorts items busiest-first by a caller-supplied figure, breaking a tie
+/// alphabetically by name.
+///
+/// Shared by every device grid in this view — network adapters, disks,
+/// GPUs — because "descending, alphabetical on a tie" is the same rule
+/// three times over. The tie-break is what stops two devices tied at
+/// zero from reordering between one frame and the next depending on how
+/// the kernel happened to enumerate them that sample; see
+/// `model::sort::SortKey`'s own tie-break for the general case of this.
+fn sort_busiest_first<T>(items: &mut [T], rate: impl Fn(&T) -> f64, name: impl Fn(&T) -> &str) {
+    items.sort_by(|a, b| {
+        rate(b)
+            .partial_cmp(&rate(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| name(a).cmp(name(b)))
+    });
+}
+
 /// Sorts adapters busiest-first and splits them at the last one carrying
 /// at least a byte a second of traffic — the same floor
 /// [`crate::format::rate`] rounds to `"0 B/s"` at, so a card never reads
 /// as active while showing two zeroes.
-///
-/// Ties break alphabetically. Without it, two adapters both reporting
-/// zero would order however `GetIfTable2` happened to enumerate them
-/// that sample, and the idle list would reshuffle on every frame for no
-/// reason a person watching it could see.
 fn split_by_activity(
     mut adapters: Vec<crate::model::AdapterSample>,
 ) -> (
     Vec<crate::model::AdapterSample>,
     Vec<crate::model::AdapterSample>,
 ) {
-    adapters.sort_by(|a, b| {
-        b.total_rate()
-            .partial_cmp(&a.total_rate())
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    sort_busiest_first(
+        &mut adapters,
+        crate::model::AdapterSample::total_rate,
+        |adapter| adapter.name.as_str(),
+    );
     let split = adapters.partition_point(|adapter| adapter.total_rate() >= 1.0);
     let idle = adapters.split_off(split);
     (adapters, idle)
@@ -727,7 +750,12 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         );
         return;
     }
-    let gpus = system.gpus.clone();
+    // Busiest first, same reasoning as the disk grid above: on a hybrid-
+    // graphics laptop the integrated adapter usually sits idle and the
+    // discrete one is doing the work, and the panel should lead with
+    // whichever one that is rather than the enumeration order.
+    let mut gpus = system.gpus.clone();
+    sort_busiest_first(&mut gpus, |gpu| gpu.utilisation, |gpu| gpu.name.as_str());
     widgets::card_grid(ui, DEVICE_CARD_WIDTH, gpus.len(), |ui, card| {
         let Some(adapter) = gpus.get(card) else {
             return;
@@ -820,6 +848,18 @@ mod tests {
                 "{focus:?} has no series, so its sparkline would be blank"
             );
         }
+    }
+
+    #[test]
+    fn sort_busiest_first_orders_descending_with_an_alphabetical_tie_break() {
+        let mut items = vec![("c", 0.0), ("a", 5.0), ("b", 0.0)];
+        sort_busiest_first(&mut items, |item| item.1, |item| item.0);
+        assert_eq!(
+            items.iter().map(|item| item.0).collect::<Vec<_>>(),
+            vec!["a", "b", "c"],
+            "the busy item leads, and the two tied at zero fall back to \
+             alphabetical order rather than staying in their input order"
+        );
     }
 
     #[test]
