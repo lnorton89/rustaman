@@ -360,7 +360,7 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     ui.add_space(chrome::SECTION_GAP);
 
     ui.horizontal_top(|ui| {
-        let width = stat_column_width(ui.available_width());
+        let width = stat_column_width(ui.available_width(), 4);
         stat_column(
             ui,
             theme,
@@ -449,7 +449,7 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     ui.add_space(SPACE_MD);
 
     ui.horizontal_top(|ui| {
-        let width = stat_column_width(ui.available_width());
+        let width = stat_column_width(ui.available_width(), 4);
         stat_column(
             ui,
             theme,
@@ -487,7 +487,7 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
 
     widgets::section(ui, theme, "Kernel memory");
     ui.horizontal_top(|ui| {
-        let width = stat_column_width(ui.available_width());
+        let width = stat_column_width(ui.available_width(), 4);
         stat_column(
             ui,
             theme,
@@ -581,7 +581,7 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             );
             ui.add_space(SPACE_SM);
             ui.horizontal_top(|ui| {
-                let width = stat_column_width(ui.available_width());
+                let width = stat_column_width(ui.available_width(), 3);
                 stat_column(
                     ui,
                     theme,
@@ -779,7 +779,7 @@ fn network_graph(
     );
 
     ui.horizontal_top(|ui| {
-        let width = stat_column_width(ui.available_width());
+        let width = stat_column_width(ui.available_width(), 4);
         stat_column(ui, theme, width, "Receive", &crate::format::rate(receive));
         stat_column(ui, theme, width, "Send", &crate::format::rate(send));
         // The peak over the window the graph draws, which is the context
@@ -1225,7 +1225,7 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
                 stat_column(
                     ui,
                     theme,
-                    stat_column_width(ui.available_width()),
+                    stat_column_width(ui.available_width(), 1),
                     "Dedicated memory in use",
                     &crate::format::bytes(adapter.memory_used),
                 );
@@ -1236,30 +1236,41 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
 
 /// The width [`stat_column`] gives each of a row's columns.
 ///
-/// A fixed quarter of the row, not a quarter of however many columns
-/// happen to be in it — that is what lines a three-column row up with a
-/// four-column one above it, at the cost of a three-column row not
-/// stretching to fill the last quarter.
+/// `columns` is how many the *row* divides into, which is not always how
+/// many it draws. The five Performance panels' own full-width rows all
+/// pass four whatever they hold, because that is what lines a
+/// three-column row up with the four-column one above it — the panel is
+/// one grid and a row that filled its own width would put its second
+/// caption where the row above put its third.
+///
+/// A **card's** internal row is a different grid. It has no neighbour
+/// above to line up with and about a quarter of the width, so dividing
+/// its three columns by four gave each of them 120 points for a pair
+/// like `"97.1 GB / 932 GB"` that needs 150 — and the pair wrapped onto
+/// a second line, which is the one thing the card's width was chosen to
+/// prevent.
 ///
 /// Callers must measure `available` **once**, before the row's first
 /// [`stat_column`] call, and pass the same value to every column in that
 /// row. Reading `ui.available_width()` freshly inside `stat_column`
 /// itself was the bug this exists to prevent: `ui.horizontal`'s own
 /// available width shrinks as each sibling is allocated, so a column
-/// computed after its neighbours already claimed space is a quarter of
-/// what was left rather than a quarter of the row — four calls in a row
+/// computed after its neighbours already claimed space is a share of
+/// what was left rather than a share of the row — four calls in a row
 /// then produce four different widths, shrinking geometrically instead
 /// of matching.
 #[must_use]
-fn stat_column_width(available: f32) -> f32 {
-    // Four columns is three gaps between them, and `theme::apply` sets
+fn stat_column_width(available: f32, columns: usize) -> f32 {
+    // `n` columns is `n - 1` gaps between them, and `theme::apply` sets
     // `ui.horizontal`'s own `item_spacing.x` to `SPACE_SM` — so claiming
-    // a plain quarter for each of the four, via `set_min_width` below,
-    // asks the row for `4 * quarter + 3 * SPACE_SM`, which is
-    // `3 * SPACE_SM` more than the row actually has. Left in, that
-    // overshoot is exactly what pushed the CPU panel's own drawn content
-    // past the window's real edge two levels up the call stack.
-    ((available - 3.0 * SPACE_SM) / 4.0).max(0.0)
+    // a plain share for each, via `set_min_width` below, asks the row for
+    // `n * share + (n - 1) * SPACE_SM`, which is more than the row
+    // actually has. Left in, that overshoot is exactly what pushed the
+    // CPU panel's own drawn content past the window's real edge two
+    // levels up the call stack.
+    let columns = columns.max(1);
+    let gaps = SPACE_SM * (columns - 1) as f32;
+    ((available - gaps) / columns as f32).max(0.0)
 }
 
 /// One readout in a row of them.
@@ -1498,14 +1509,19 @@ mod tests {
         // `available`, the row would overflow it — which is the
         // regression this guards.
         let available = 400.0;
-        let width = stat_column_width(available);
-        let claimed = 4.0 * width + 3.0 * SPACE_SM;
+        for columns in 1..=4usize {
+            let width = stat_column_width(available, columns);
+            let claimed = columns as f32 * width + (columns - 1) as f32 * SPACE_SM;
+            assert!(
+                claimed <= available,
+                "{columns} columns of {width} plus their {SPACE_SM}-wide                  gaps is {claimed}, which overflows the {available} available"
+            );
+        }
+        assert!((stat_column_width(0.0, 4) - 0.0).abs() < f32::EPSILON);
         assert!(
-            claimed <= available,
-            "four columns of {width} plus three {SPACE_SM}-wide gaps is \
-             {claimed}, which overflows the {available} available"
+            stat_column_width(available, 3) > stat_column_width(available, 4),
+            "a card's own three-column row must give each column more than              a panel's four-column row does"
         );
-        assert!((stat_column_width(0.0) - 0.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1524,7 +1540,7 @@ mod tests {
         let mut widths = Vec::new();
         let mut output = ctx.run_ui(Default::default(), |ui| {
             ui.horizontal_top(|ui| {
-                let width = stat_column_width(ui.available_width());
+                let width = stat_column_width(ui.available_width(), 4);
                 // Deliberately mismatched caption and value lengths —
                 // the exact shape that exposed the bug.
                 for (caption, value) in [

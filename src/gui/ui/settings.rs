@@ -52,37 +52,33 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
 fn appearance(app: &mut App, ui: &mut Ui, theme: &Palette) {
     widgets::section(ui, theme, "Appearance");
 
+    // A gallery, not a list. As full-width rows, a theme's name sat at
+    // the left edge of the window and its swatches at the right — eleven
+    // hundred points apart on the window the app opens at, which is
+    // further than the eye pairs two things across. Eight of them also
+    // cost four hundred points of vertical space to show eight words.
+    //
+    // A theme picker is a set of *previews* being compared with each
+    // other, which is what a grid is for: the swatch strip sits under
+    // its own name, and every strip is beside the next one.
     let themes: Vec<Palette> = app.catalog.themes().to_vec();
     let mut chosen: Option<Palette> = None;
-    for candidate in &themes {
-        if theme_row(ui, theme, candidate, candidate.id == theme.id) {
+    widgets::card_grid(ui, THEME_CARD_WIDTH, themes.len(), |ui, index| {
+        let Some(candidate) = themes.get(index) else {
+            return;
+        };
+        if theme_card(ui, theme, candidate, candidate.id == theme.id) {
             chosen = Some(candidate.clone());
         }
-        ui.add_space(SPACE_XS);
-    }
+    });
     if let Some(chosen) = chosen {
         app.theme = chosen;
     }
 
-    ui.add_space(SPACE_MD);
-    let mut custom = app.custom_chrome;
-    if ui
-        .checkbox(&mut custom, "Draw the window's own title bar")
-        .on_hover_text(
-            "Windows 10's system caption is a light grey bar that no theme \
-             can reach. Turning this off uses it anyway, and takes effect \
-             the next time Rustaman starts.",
-        )
-        .changed()
-    {
-        app.custom_chrome = custom;
-        app.notify("The title bar changes the next time Rustaman starts", false);
-    }
-
-    // The theme directory, so a user who wants to add one knows where to
-    // put it without reading the docs.
+    // The theme directory, under the themes it is about rather than
+    // under the title-bar switch below them.
     if let Some(dir) = crate::theme::user_theme_dir() {
-        ui.add_space(SPACE_XS);
+        ui.add_space(SPACE_SM);
         ui.label(
             egui::RichText::new(format!(
                 "Drop a .toml theme into {} to add your own.",
@@ -103,41 +99,69 @@ fn appearance(app: &mut App, ui: &mut Ui, theme: &Palette) {
                 .text_style(egui::TextStyle::Small),
         );
     }
+
+    ui.add_space(chrome::SECTION_GAP);
+    let mut custom = app.custom_chrome;
+    if ui
+        .checkbox(&mut custom, "Draw the window's own title bar")
+        .on_hover_text(
+            "Windows 10's system caption is a light grey bar that no theme \
+             can reach. Turning this off uses it anyway, and takes effect \
+             the next time Rustaman starts.",
+        )
+        .changed()
+    {
+        app.custom_chrome = custom;
+        app.notify("The title bar changes the next time Rustaman starts", false);
+    }
 }
 
-/// One theme's row in the picker. Returns whether it was clicked.
-fn theme_row(ui: &mut Ui, active: &Palette, candidate: &Palette, selected: bool) -> bool {
-    /// The row's height. Tall enough for a name and a swatch strip.
-    const HEIGHT: f32 = 44.0;
+/// The narrowest a theme card may be before the grid drops a column.
+///
+/// Set by the widest thing a card holds: the swatch strip, which is
+/// eight [`SWATCH`]-wide cells, plus the card's own inset. A name longer
+/// than that truncates; a strip narrower than that stops being a
+/// preview.
+const THEME_CARD_WIDTH: f32 = 200.0;
+
+/// One theme's card in the gallery. Returns whether it was clicked.
+fn theme_card(ui: &mut Ui, active: &Palette, candidate: &Palette, selected: bool) -> bool {
+    /// The card's height: a name, the module's own spacing, and a swatch
+    /// strip under it.
+    const HEIGHT: f32 = 56.0;
 
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), HEIGHT), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
+    // Keyed on the theme rather than on its position in the gallery, so
+    // adding a theme does not hand its hover state to whichever card now
+    // sits where another one did.
+    let id = ui.id().with(("theme", &candidate.id));
     let fill = if selected {
         theme::rgb(active.selection)
     } else {
-        widgets::hover_fill(
-            ui,
-            response.id,
-            response.hovered(),
-            active.panel,
-            active.hover,
-        )
+        widgets::hover_fill(ui, id, response.hovered(), active.panel, active.hover)
     };
     ui.painter()
         .rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
-    if selected {
-        ui.painter().rect_stroke(
-            rect,
-            CornerRadius::same(theme::RADIUS),
-            egui::Stroke::new(1.0, theme::rgb(active.accent)),
-            egui::StrokeKind::Inside,
-        );
-    }
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(theme::RADIUS),
+        egui::Stroke::new(
+            1.0,
+            theme::rgb(if selected {
+                active.accent
+            } else {
+                active.border
+            }),
+        ),
+        egui::StrokeKind::Inside,
+    );
 
     ui.painter().text(
-        rect.left_center() + Vec2::new(SPACE_MD, 0.0),
-        egui::Align2::LEFT_CENTER,
+        rect.left_top() + Vec2::new(SPACE_MD, SPACE_SM),
+        egui::Align2::LEFT_TOP,
         &candidate.name,
         egui::TextStyle::Body.resolve(ui.style()),
         theme::rgb(active.text),
@@ -157,11 +181,10 @@ fn theme_row(ui: &mut Ui, active: &Palette, candidate: &Palette, selected: bool)
         candidate.series(1, 3),
         candidate.series(2, 3),
     ];
-    let strip_width = SWATCH * swatches.len() as f32 + SPACE_XS;
-    let mut x = rect.right() - strip_width;
+    let mut x = rect.left() + SPACE_MD;
     for swatch in swatches {
         let cell = egui::Rect::from_min_size(
-            egui::pos2(x, rect.center().y - SWATCH / 2.0),
+            egui::pos2(x, rect.bottom() - SPACE_SM - SWATCH),
             Vec2::splat(SWATCH),
         );
         ui.painter()

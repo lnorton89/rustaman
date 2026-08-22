@@ -132,6 +132,8 @@ mod windows {
         size: Option<(f32, f32)>,
         /// Whether to draw this machine instead of the fabricated one.
         live: bool,
+        /// Whether to raise the end-task confirmation over the view.
+        modal: bool,
         /// Whether to select a row — the third of the app's three row
         /// states, after resting and hovered, and the one that opens the
         /// Details view's inspector.
@@ -139,7 +141,7 @@ mod windows {
     }
 
     /// Every scene, in the order `--list` prints them.
-    const SCENES: [Scene; 16] = [
+    const SCENES: [Scene; 17] = [
         Scene {
             name: "live-network",
             about: "Performance › Network on THIS machine, really sampled",
@@ -149,6 +151,7 @@ mod windows {
             size: Some((1280.0, 1500.0)),
             live: true,
             select: false,
+            modal: false,
         },
         Scene {
             name: "live-processes",
@@ -159,6 +162,7 @@ mod windows {
             size: None,
             live: true,
             select: false,
+            modal: false,
         },
         Scene {
             name: "network",
@@ -169,6 +173,7 @@ mod windows {
             size: None,
             live: false,
             select: false,
+            modal: false,
         },
         Scene {
             name: "network-open",
@@ -179,6 +184,7 @@ mod windows {
             size: None,
             live: false,
             select: false,
+            modal: false,
         },
         Scene {
             name: "network-narrow",
@@ -189,6 +195,7 @@ mod windows {
             size: Some((900.0, 720.0)),
             live: false,
             select: false,
+            modal: false,
         },
         Scene {
             name: "cpu",
@@ -199,6 +206,7 @@ mod windows {
             size: None,
             live: false,
             select: false,
+            modal: false,
         },
         Scene {
             name: "memory",
@@ -209,6 +217,7 @@ mod windows {
             size: None,
             live: false,
             select: false,
+            modal: false,
         },
         Scene {
             name: "disk",
@@ -219,6 +228,7 @@ mod windows {
             size: None,
             live: false,
             select: false,
+            modal: false,
         },
         Scene {
             name: "gpu",
@@ -229,6 +239,7 @@ mod windows {
             size: None,
             live: false,
             select: false,
+            modal: false,
         },
         Scene {
             name: "processes",
@@ -239,6 +250,7 @@ mod windows {
             size: None,
             live: false,
             select: false,
+            modal: false,
         },
         Scene {
             name: "details",
@@ -249,6 +261,7 @@ mod windows {
             size: None,
             live: false,
             select: false,
+            modal: false,
         },
         Scene {
             name: "services",
@@ -259,6 +272,7 @@ mod windows {
             size: None,
             live: false,
             select: false,
+            modal: false,
         },
         Scene {
             name: "startup",
@@ -269,6 +283,7 @@ mod windows {
             size: None,
             live: false,
             select: false,
+            modal: false,
         },
         Scene {
             name: "details-selected",
@@ -279,6 +294,7 @@ mod windows {
             size: None,
             live: false,
             select: true,
+            modal: false,
         },
         Scene {
             name: "processes-selected",
@@ -289,6 +305,18 @@ mod windows {
             size: None,
             live: false,
             select: true,
+            modal: false,
+        },
+        Scene {
+            name: "modal",
+            about: "The end-task confirmation over the process tree",
+            view: View::Processes,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: true,
+            modal: true,
         },
         Scene {
             name: "settings",
@@ -299,6 +327,7 @@ mod windows {
             size: None,
             live: false,
             select: false,
+            modal: false,
         },
     ];
 
@@ -419,6 +448,24 @@ mod windows {
             });
             app.processes.selected = chosen;
             app.details.selected = chosen;
+        }
+
+        if scene.modal {
+            // The one surface that draws over everything else, and the
+            // one nobody sees while they are looking for layout bugs
+            // because reaching it means picking a process and pressing
+            // Delete.
+            if let Some(process) = app
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.processes.iter().find(|p| p.pid == 7784))
+            {
+                app.pending = Some(rustaman::gui::app::Pending::EndTree(
+                    process.key(),
+                    process.display_name().to_string(),
+                    2,
+                ));
+            }
         }
 
         // Every branch open. A tree screenshotted collapsed is a

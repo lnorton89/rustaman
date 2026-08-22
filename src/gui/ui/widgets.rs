@@ -212,9 +212,18 @@ pub fn card_grid(ui: &mut Ui, minimum: f32, count: usize, mut card: impl FnMut(&
     let gaps = SPACE_MD * (columns.saturating_sub(1)) as f32;
     let width = ((available - gaps) / columns as f32).max(1.0);
 
+    // Restored inside each card below. Zeroing it on the row is what
+    // makes the gap between cards the explicit `add_space` and nothing
+    // else — `ui.horizontal_top` inserts its own `item_spacing.x`
+    // between siblings as well, so the real gap was `SPACE_MD +
+    // SPACE_SM` while the column arithmetic above assumed `SPACE_MD`,
+    // and five cards wanted twenty-five points more than the row had.
+    let item_spacing = ui.spacing().item_spacing;
+
     for start in (0..count).step_by(columns) {
         let end = (start + columns).min(count);
         ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
             for index in start..end {
                 // An explicit width and a *zero* desired height. A region
                 // given the parent's remaining height claims all of it,
@@ -223,7 +232,15 @@ pub fn card_grid(ui: &mut Ui, minimum: f32, count: usize, mut card: impl FnMut(&
                 ui.allocate_ui_with_layout(
                     Vec2::new(width, 0.0),
                     egui::Layout::top_down(Align::Min),
-                    |ui| card(ui, index),
+                    |ui| {
+                        // A card's *contents* want the app's normal
+                        // spacing back. Without this the zeroing above
+                        // reaches every label inside every card, and a
+                        // caption and its value are drawn touching:
+                        // "active41%".
+                        ui.spacing_mut().item_spacing = item_spacing;
+                        card(ui, index);
+                    },
                 );
                 if index + 1 < end {
                     ui.add_space(SPACE_MD);
