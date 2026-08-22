@@ -956,57 +956,104 @@ mod tests {
     }
 
     #[test]
-    fn the_cpu_panel_leaves_the_window_edge_through_the_real_central_panel() -> anyhow::Result<()> {
-        // One level up from the test above: goes through
-        // `theme::content()`'s own frame (`CentralPanel`'s margin,
-        // `PAD`) and calls the real `cpu()` panel, not a stand-in for
-        // it — so a regression in either layer, or in how the two
-        // compose, fails this rather than only the narrower test.
+    fn no_performance_panel_lets_its_content_reach_the_window_edge() -> anyhow::Result<()> {
+        // The general form of the regression above: every resource in
+        // the picker draws through the same `detail()` wrapper, and any
+        // of the five can develop the same "claims more width than it
+        // was given" bug `stat_column` and `graph::legend` did — this
+        // drives all five through the real entry point, through the
+        // real `CentralPanel` frame, at a real window size, rather than
+        // picking one panel by hand and trusting the rest by
+        // resemblance.
+        //
+        // `min_rect()`, not the painted shapes: egui clips a shape to
+        // its own rect on the way to the screen, so a shape-bounds check
+        // would pass even on an overflow, because the overflowing part
+        // is exactly what got clipped away — invisible, not out of
+        // frame. `min_rect` is the *layout* claim, made before any
+        // clipping, which is where a widget claiming too much width
+        // actually originates.
         let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1024.0, 768.0));
-        let mut app = App::new(crate::config::Config::default());
-        let theme = app.theme.clone();
-        // Sixteen cores, so the core grid actually draws — it is the
-        // element the "cut off by edge" report was screenshotted
-        // against, and `cpu()` skips it entirely while this is empty.
-        app.performance.cores = vec![crate::model::history::Series::new(60); 16];
-        let system = SystemSample {
-            cpu: crate::model::CpuSample {
-                logical_cores: 16,
-                physical_cores: 8,
+        let theme = App::new(crate::config::Config::default()).theme;
+
+        let snapshot = Snapshot {
+            system: SystemSample {
+                cpu: crate::model::CpuSample {
+                    logical_cores: 16,
+                    physical_cores: 8,
+                    ..Default::default()
+                },
+                disks: vec![
+                    crate::model::DiskSample {
+                        name: "C:".to_string(),
+                        capacity: 1,
+                        ..Default::default()
+                    },
+                    crate::model::DiskSample {
+                        name: "D:".to_string(),
+                        capacity: 1,
+                        ..Default::default()
+                    },
+                ],
+                adapters: vec![crate::model::AdapterSample {
+                    name: "Ethernet".to_string(),
+                    receive_rate: 500.0,
+                    link_speed: 1_000_000_000,
+                    ..Default::default()
+                }],
+                gpus: vec![crate::model::GpuSample {
+                    name: "Test GPU".to_string(),
+                    utilisation: 10.0,
+                    engines: vec![("3D".to_string(), 10.0)],
+                    ..Default::default()
+                }],
                 ..Default::default()
             },
             ..Default::default()
         };
-        let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(window),
-            ..Default::default()
-        };
-        let mut min_rect = None;
-        let mut output = ctx.run_ui(input, |ui| {
-            egui::CentralPanel::default()
-                .frame(theme::content(&theme))
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            let width = (ui.available_width() - SPACE_MD).max(0.0);
-                            ui.set_max_width(width);
-                            cpu(&app, ui, &theme, &system);
-                            min_rect = Some(ui.min_rect());
-                        });
-                });
-        });
-        output.textures_delta.clear();
 
-        let min_rect = min_rect.ok_or_else(|| anyhow::anyhow!("cpu() drew nothing"))?;
-        let margin = window.right() - min_rect.right();
-        assert!(
-            margin >= SPACE_MD,
-            "the real cpu() panel, drawn through the real CentralPanel \
-             frame, left only {margin} from the window's right edge, \
-             wanted at least {SPACE_MD}"
-        );
+        for focus in [
+            PerformanceFocus::Cpu,
+            PerformanceFocus::Memory,
+            PerformanceFocus::Disk,
+            PerformanceFocus::Network,
+            PerformanceFocus::Gpu,
+        ] {
+            let mut app = App::new(crate::config::Config::default());
+            app.theme = theme.clone();
+            app.performance.focus = focus;
+            // Sixteen cores, so the CPU panel's core grid actually draws
+            // — it is the element the original report was screenshotted
+            // against, and the panel skips it entirely while this is
+            // empty.
+            app.performance.cores = vec![crate::model::history::Series::new(60); 16];
+
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                screen_rect: Some(window),
+                ..Default::default()
+            };
+            let mut min_rect = None;
+            let mut output = ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default()
+                    .frame(theme::content(&theme))
+                    .show(ui, |ui| {
+                        detail(&mut app, ui, &theme, &snapshot);
+                        min_rect = Some(ui.min_rect());
+                    });
+            });
+            output.textures_delta.clear();
+
+            let min_rect =
+                min_rect.ok_or_else(|| anyhow::anyhow!("{focus:?} panel drew nothing"))?;
+            let margin = window.right() - min_rect.right();
+            assert!(
+                margin >= SPACE_MD,
+                "{focus:?} panel, drawn through the real CentralPanel \
+                 frame, left only {margin} from the window's right edge, \
+                 wanted at least {SPACE_MD}"
+            );
+        }
         Ok(())
     }
 
