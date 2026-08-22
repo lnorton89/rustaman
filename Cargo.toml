@@ -67,8 +67,13 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
     "Win32_System_Kernel",
-    # NtQuerySystemInformation and the SYSTEM_*_INFORMATION structs: one
-    # call gets CPU, memory, and I/O for every process at once.
+    # NtQuerySystemInformation: one call gets CPU, memory, and I/O for
+    # every process at once. It lives under the `Wdk` namespace rather
+    # than `Win32` because the public SDK does not document it — which is
+    # also why `src/win/nt/types.rs` declares the struct layouts by hand
+    # instead of importing the redacted ones from Win32_System_
+    # WindowsProgramming.
+    "Wdk_System_SystemInformation",
     "Win32_System_WindowsProgramming",
     # PDH, for the GPU engine counters. There is no Win32 call for GPU
     # utilisation — Task Manager reads the same counters.
