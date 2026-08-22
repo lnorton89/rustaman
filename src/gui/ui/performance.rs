@@ -254,12 +254,28 @@ fn floor_for(focus: PerformanceFocus) -> f32 {
 fn detail(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show(ui, |ui| match app.performance.focus {
-            PerformanceFocus::Cpu => cpu(app, ui, theme, &snapshot.system),
-            PerformanceFocus::Memory => memory(app, ui, theme, &snapshot.system),
-            PerformanceFocus::Disk => disk(app, ui, theme, &snapshot.system),
-            PerformanceFocus::Network => network(app, ui, theme, &snapshot.system),
-            PerformanceFocus::Gpu => gpu(app, ui, theme, &snapshot.system),
+        .show(ui, |ui| {
+            // The graphs and the core grid below them fill exactly
+            // `ui.available_width()` — no dense multi-column table has
+            // to be squeezed into this view the way `PAD` is sized
+            // around, so this trims a further step off the right edge
+            // rather than letting a bordered chart end flush with it.
+            let width = (ui.available_width() - SPACE_MD).max(0.0);
+            ui.set_max_width(width);
+            match app.performance.focus {
+                PerformanceFocus::Cpu => cpu(app, ui, theme, &snapshot.system),
+                PerformanceFocus::Memory => memory(app, ui, theme, &snapshot.system),
+                PerformanceFocus::Disk => disk(app, ui, theme, &snapshot.system),
+                PerformanceFocus::Network => network(app, ui, theme, &snapshot.system),
+                PerformanceFocus::Gpu => gpu(app, ui, theme, &snapshot.system),
+            }
+            // Every panel's own last element (the core grid, the last
+            // device card, the kernel-memory row) would otherwise end
+            // flush with the scroll area's own lower edge — the same
+            // gap a section leaves above itself, left below the last one
+            // too, so the content never reads as clipped by the pane
+            // rather than simply ending.
+            ui.add_space(chrome::SECTION_GAP);
         });
 }
 
