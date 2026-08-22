@@ -416,16 +416,32 @@ mod tests {
         // So the state lives in `dnd`, in egui's own memory, and a view
         // reaches it through `Lane`. Reading `drag_started` here is the
         // tell: it means a view is deciding for itself what a drag is.
+        //
+        // The exception is the window's own chrome: handing a gesture
+        // straight to `ViewportCommand::StartDrag` (moving the window,
+        // `chrome::drag_region`) or `BeginResize` (its invisible resize
+        // handles, `chrome::resize_handles`) holds no state at all, which
+        // is the opposite of what this lint exists to catch. A
+        // `drag_started` a handful of lines above either is that
+        // hand-off, not a view reimplementing `dnd::Lane`.
         for (name, source) in DRAWING_MODULES {
-            for (number, line) in source.lines().enumerate() {
+            let lines: Vec<&str> = source.lines().collect();
+            for (number, line) in lines.iter().enumerate() {
                 if is_prose(line) {
                     continue;
                 }
+                let hand_tracked = line.contains("drag_started")
+                    || line.contains("drag_stopped")
+                    || line.contains("dragged_by")
+                    || line.contains("drag_delta");
+                if !hand_tracked {
+                    continue;
+                }
+                let nearby = lines[number..(number + 10).min(lines.len())].join("\n");
+                let handed_to_window_manager = nearby.contains("ViewportCommand::StartDrag")
+                    || nearby.contains("ViewportCommand::BeginResize");
                 assert!(
-                    !line.contains("drag_started")
-                        && !line.contains("drag_stopped")
-                        && !line.contains("dragged_by")
-                        && !line.contains("drag_delta"),
+                    handed_to_window_manager,
                     "{name}:{} tracks a drag by hand: {}. Use gui::ui::dnd, \
                      which owns the feedback as well as the state",
                     number + 1,
