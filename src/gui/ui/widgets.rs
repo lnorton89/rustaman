@@ -180,6 +180,62 @@ pub fn disclosure(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Lays `count` cards out in as many columns as the pane can fit.
+///
+/// The equivalent of a CSS `repeat(auto-fill, minmax(min, 1fr))` grid:
+/// the column count comes from the width available rather than being
+/// stated, so the same code gives one column on a narrow window and four
+/// on a wide one, and the cards always fill the row.
+///
+/// This exists because the Performance view stacked one full-width card
+/// per device. A machine with three disks got three cards, each about a
+/// hundred points tall and seventeen hundred wide, holding three short
+/// numbers — so the view was a column of mostly-empty bars with the
+/// bottom two thirds of the window blank. Cards that hold a label and
+/// three stats want roughly the width of those stats, and the answer to
+/// "what do I do with the rest" is another card, not more whitespace.
+///
+/// `minimum` is the narrowest a card may be before the grid drops to
+/// fewer columns. It is a property of the card's *content* — the widest
+/// stat row it has to hold without wrapping — so each caller states its
+/// own rather than sharing one.
+pub fn card_grid(ui: &mut Ui, minimum: f32, count: usize, mut card: impl FnMut(&mut Ui, usize)) {
+    if count == 0 {
+        return;
+    }
+    let available = ui.available_width();
+    // How many `minimum`-wide cards fit, counting the gaps between them.
+    // At least one, so a pane narrower than a single card still draws it
+    // (clipped) rather than dividing by zero and drawing nothing.
+    let columns =
+        (((available + SPACE_MD) / (minimum + SPACE_MD)).floor() as usize).clamp(1, count);
+    let gaps = SPACE_MD * (columns.saturating_sub(1)) as f32;
+    let width = ((available - gaps) / columns as f32).max(1.0);
+
+    for start in (0..count).step_by(columns) {
+        let end = (start + columns).min(count);
+        ui.horizontal_top(|ui| {
+            for index in start..end {
+                // An explicit width and a *zero* desired height. A region
+                // given the parent's remaining height claims all of it,
+                // so one card in a scroll area would grow to fill the
+                // pane and strand its own content at the top.
+                ui.allocate_ui_with_layout(
+                    Vec2::new(width, 0.0),
+                    egui::Layout::top_down(Align::Min),
+                    |ui| card(ui, index),
+                );
+                if index + 1 < end {
+                    ui.add_space(SPACE_MD);
+                }
+            }
+        });
+        if end < count {
+            ui.add_space(SPACE_MD);
+        }
+    }
+}
+
 /// A small labelled pill — a status, a count, a category.
 ///
 /// Measures, allocates exactly, then paints; see the module docs on why a
@@ -366,24 +422,32 @@ pub fn meter(ui: &mut Ui, theme: &Palette, fraction: f32, fill: Rgb) -> Response
 
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::hover());
-    let painter = ui.painter();
     let radius = CornerRadius::same(3);
 
-    painter.rect_filled(rect, radius, theme::rgb(theme.raised));
+    ui.painter()
+        .rect_filled(rect, radius, theme::rgb(theme.raised));
     // A non-finite fraction would produce a NaN width, which egui paints
     // as nothing — so a broken measurement would look like an empty bar
     // rather than a broken one.
-    let fraction = if fraction.is_finite() {
+    let target = if fraction.is_finite() {
         fraction.clamp(0.0, 1.0)
     } else {
         0.0
     };
+    // The bar travels to its new level rather than jumping there.
+    //
+    // These are sampled once a second, so an un-animated bar spends that
+    // second perfectly still and then teleports — which reads as the
+    // display being broken rather than as the machine being busy. A bar
+    // that slides carries the *direction* of the change as well as its
+    // value, which no single frame of a static bar can.
+    let fraction = motion::value(ui.ctx(), response.id.with("level"), target);
     if fraction > 0.0 {
         let filled = Rect::from_min_size(
             rect.min,
             Vec2::new((rect.width() * fraction).max(2.0), rect.height()),
         );
-        painter.rect_filled(filled, radius, theme::rgb(fill));
+        ui.painter().rect_filled(filled, radius, theme::rgb(fill));
     }
     response
 }
@@ -398,13 +462,26 @@ pub fn meter(ui: &mut Ui, theme: &Palette, fraction: f32, fill: Rgb) -> Response
 pub fn row_background(
     ui: &Ui,
     theme: &Palette,
-    rect: Rect,
+    viewport: Rect,
     id: egui::Id,
     selected: bool,
     hovered: bool,
     striped: bool,
 ) {
-    let painter = ui.painter();
+    // The row's full width, derived here rather than by the caller.
+    //
+    // A table cell's painter is clipped to that cell, and the row fill
+    // has to be painted while drawing the *first* cell so that
+    // everything else lands on top of it. With the cell's own painter
+    // the highlight therefore covered the name column and stopped dead:
+    // a selected row read as a selected *cell* with seven unrelated
+    // cells beside it, in all four of this app's tables. Widening the
+    // rect alone does not help — the clip is what truncates it — which
+    // is why `viewport` is a parameter and why computing the rect is
+    // this function's job and not four call sites'.
+    let cell = ui.max_rect();
+    let rect = Rect::from_min_max(cell.min, egui::pos2(viewport.right(), cell.bottom()));
+    let painter = ui.painter().with_clip_rect(viewport);
     let base = if striped { theme.raised } else { theme.panel };
     let fill = if selected {
         theme::rgb(theme.selection)
@@ -414,7 +491,15 @@ pub fn row_background(
     painter.rect_filled(rect, CornerRadius::ZERO, fill);
 
     if selected {
-        let bar = Rect::from_min_size(rect.left_top(), Vec2::new(SELECTION_BAR, rect.height()));
+        // The bar animates out from the leading edge rather than
+        // appearing at full height, so moving the selection down a list
+        // reads as one marker travelling rather than as a series of
+        // unrelated flashes.
+        let grown = motion::toggle(ui.ctx(), id.with("selected"), true, motion::QUICK);
+        let bar = Rect::from_center_size(
+            egui::pos2(rect.left() + SELECTION_BAR / 2.0, rect.center().y),
+            Vec2::new(SELECTION_BAR, rect.height() * grown),
+        );
         painter.rect_filled(bar, CornerRadius::ZERO, theme::rgb(theme.accent));
     }
 }
@@ -433,9 +518,16 @@ pub fn heat_cell(ui: &Ui, theme: &Palette, rect: Rect, load: f32) {
     /// almost-invisible colour across three hundred idle rows, which is
     /// noise rather than signal.
     const FLOOR: f32 = 0.03;
-    /// The tint's opacity at full load. Low, because the number on top of
-    /// it has to stay readable — the tint is a hint, not a highlight.
-    const MAX_ALPHA: f32 = 56.0;
+    /// The tint's opacity at full load.
+    ///
+    /// This was 56, which paints a solid slab of colour behind the
+    /// number — a column of them reads as a set of coloured blocks that
+    /// happen to contain digits, rather than as numbers with a weight.
+    /// The gauge below carries the magnitude now, so the tint only has
+    /// to make the cell feel warm.
+    const MAX_ALPHA: f32 = 22.0;
+    /// The height of the gauge along the cell's bottom edge.
+    const GAUGE: f32 = 2.0;
 
     if !load.is_finite() || load < FLOOR {
         return;
@@ -444,10 +536,30 @@ pub fn heat_cell(ui: &Ui, theme: &Palette, rect: Rect, load: f32) {
     // Square-rooted, as in `crate::color::heat`: a linear ramp leaves
     // everything under about 30% looking identical to idle, and that is
     // exactly the range where "this should not be doing anything" lives.
-    let alpha = (load.sqrt() * MAX_ALPHA).clamp(0.0, 255.0) as u8;
+    let emphasis = load.sqrt();
     let color = theme.heat(load);
-    ui.painter()
-        .rect_filled(rect, CornerRadius::ZERO, theme::translucent(color, alpha));
+
+    let alpha = (emphasis * MAX_ALPHA).clamp(0.0, 255.0) as u8;
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::ZERO, theme::translucent(color, alpha));
+
+    // A gauge along the bottom edge, proportional to the load.
+    //
+    // The reason this is better than tinting harder: a tint encodes
+    // magnitude as *saturation*, which the eye compares badly between
+    // two cells that are not adjacent and which collides with the
+    // requirement that the number on top stay readable. A length is
+    // compared accurately at a glance, down a whole column, and costs
+    // the text nothing. It is also what makes a row's four metric cells
+    // legible as a little profile of that process.
+    let width = rect.width() * load;
+    if width >= 1.0 {
+        let gauge = Rect::from_min_size(
+            egui::pos2(rect.left(), rect.bottom() - GAUGE),
+            Vec2::new(width, GAUGE),
+        );
+        painter.rect_filled(gauge, CornerRadius::ZERO, theme::rgb(color));
+    }
 }
 
 /// A right-aligned numeric cell in the tabular font.

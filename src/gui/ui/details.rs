@@ -32,12 +32,12 @@ use crate::model::sort::SortKey;
 use crate::model::tree::Entry;
 use crate::model::{ProcessKey, ProcessRow};
 use crate::theme::Palette;
-use egui::{Sense, Ui, Vec2};
+use egui::{Sense, Ui};
 use egui_extras::{Column, TableBuilder};
 
 /// The columns, with the width each starts at.
 const COLUMNS: [(SortKey, f32); 10] = [
-    (SortKey::Name, 0.0), // the remainder column
+    (SortKey::Name, 260.0),
     (SortKey::Pid, 64.0),
     (SortKey::Status, 82.0),
     (SortKey::User, 150.0),
@@ -146,6 +146,10 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     let mut sort_clicked: Option<SortKey> = None;
     let mut action: Option<Action> = None;
 
+    // Captured before the builder borrows the `Ui`; see
+    // `widgets::row_background` on why a row needs it.
+    let viewport = ui.available_rect_before_wrap();
+
     let mut builder = TableBuilder::new(ui)
         .resizable(true)
         .vscroll(true)
@@ -153,37 +157,37 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
         .sense(Sense::click());
 
     for (index, (_, width)) in COLUMNS.iter().enumerate() {
-        builder = if index == 0 {
-            builder.column(Column::remainder().at_least(180.0).clip(true))
-        } else {
-            builder.column(
-                Column::initial(*width)
-                    .at_least(48.0)
-                    .resizable(true)
-                    .clip(true),
-            )
-        };
+        let least = if index == 0 { 180.0 } else { 48.0 };
+        builder = builder.column(
+            Column::initial(*width)
+                .at_least(least)
+                .resizable(true)
+                .clip(true),
+        );
     }
+    // The trailing spacer that absorbs the window's slack; see
+    // `super::processes` on why the absorbing column has to be one with
+    // nothing in it.
+    builder = builder.column(Column::remainder().clip(true));
 
     builder
         .header(HEADER_HEIGHT, |mut header| {
             for (index, (key, _)) in COLUMNS.iter().enumerate() {
                 header.col(|ui| {
                     let sorted = (app.details.sort == *key).then_some(app.details.descending);
-                    if widgets::sortable_header(
-                        ui,
-                        theme,
-                        key.label(),
-                        sorted,
-                        index == 0,
-                        index > 0,
-                    )
-                    .clicked()
+                    // `claims_width: false` for every column now that
+                    // none of them is the remainder — see the header
+                    // loop in `super::processes`.
+                    if widgets::sortable_header(ui, theme, key.label(), sorted, false, index > 0)
+                        .clicked()
                     {
                         sort_clicked = Some(*key);
                     }
                 });
             }
+            // The spacer's heading, which is empty. Skipping it leaves
+            // the header one cell short of the body.
+            header.col(|_| {});
         })
         .body(|body| {
             body.rows(ROW_HEIGHT, entries.len(), |mut row| {
@@ -197,18 +201,16 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                 let key = process.key();
                 let selected = app.details.selected == Some(key);
 
-                for column in 0..COLUMNS.len() {
-                    row.col(|ui| {
-                        let cell = ui.max_rect();
-                        if column == 0 {
-                            let full = egui::Rect::from_min_size(
-                                cell.min,
-                                Vec2::new(cell.width() + 4_000.0, cell.height()),
-                            );
+                // `..=COLUMNS.len()`: the trailing spacer is a real
+                // column and has to be filled, or the row stops one
+                // column short of the window's edge.
+                for column in 0..=COLUMNS.len() {
+                    row.col(|ui| match column {
+                        0 => {
                             widgets::row_background(
                                 ui,
                                 theme,
-                                full,
+                                viewport,
                                 egui::Id::new("detail-row").with(key),
                                 selected,
                                 false,
@@ -219,9 +221,9 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                                 egui::RichText::new(process.display_name())
                                     .color(theme::rgb(theme.text)),
                             );
-                        } else {
-                            cell_text(ui, theme, column, process);
                         }
+                        _ if column < COLUMNS.len() => cell_text(ui, theme, column, process),
+                        _ => {}
                     });
                 }
 

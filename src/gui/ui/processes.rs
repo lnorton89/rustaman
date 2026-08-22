@@ -20,11 +20,19 @@
 //! window, and the table opens with a horizontal scrollbar over columns
 //! nobody asked to be that wide.
 //!
-//! Exactly one column absorbs the slack, and it is the Name column, which
-//! is the one that benefits from the room. It is a `remainder()`, and a
-//! `remainder()` cannot also be resizable — dragging one gives it a
-//! stored width, after which it absorbs nothing and the table stops
-//! filling its pane.
+//! **Exactly one column absorbs the slack, and it is a trailing spacer
+//! with nothing in it.** Only a non-resizable `remainder()` re-fits to
+//! the pane each frame, and a `remainder()` cannot also be resizable —
+//! dragging one gives it a stored width, after which it absorbs nothing
+//! and the table stops filling its pane. So the absorbing column has to
+//! be one nobody can drag, and the only column that can afford to be
+//! undraggable is one with no content.
+//!
+//! Name used to be that column. It could therefore not be resized at
+//! all, and on a wide window it grew to nearly a thousand points for
+//! entries about thirty characters long — a wall of name beside seven
+//! cramped metrics, with the table still stopping short of the window's
+//! right edge.
 //!
 //! **No column ever disappears at a narrow width.** Hiding columns below
 //! a breakpoint is the obvious way to handle a narrow window and it is
@@ -47,21 +55,21 @@ use crate::model::sort::SortKey;
 use crate::model::tree::{Entry, Totals};
 use crate::model::{ProcessKey, ProcessKind, ProcessRow};
 use crate::theme::Palette;
-use egui::{Rect, Sense, Ui, Vec2};
+use egui::{Sense, Ui, Vec2};
 use egui_extras::{Column, TableBuilder};
 
 /// The columns, in order, with the width each starts at.
 ///
 /// Stated rather than measured; see the module docs.
 const COLUMNS: [(SortKey, f32); 8] = [
-    (SortKey::Name, 0.0), // the remainder column; the width is ignored
+    (SortKey::Name, 320.0),
     (SortKey::Pid, 64.0),
     (SortKey::Status, 82.0),
-    (SortKey::Cpu, 62.0),
-    (SortKey::Memory, 86.0),
-    (SortKey::Disk, 92.0),
-    (SortKey::Network, 62.0),
-    (SortKey::Gpu, 58.0),
+    (SortKey::Cpu, 68.0),
+    (SortKey::Memory, 92.0),
+    (SortKey::Disk, 96.0),
+    (SortKey::Network, 74.0),
+    (SortKey::Gpu, 64.0),
 ];
 
 /// The least a resizable column may be dragged to.
@@ -220,6 +228,14 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     let mut action: Option<Action> = None;
     let mut sort_clicked: Option<SortKey> = None;
 
+    // The table's own rect, captured before the builder borrows the `Ui`.
+    //
+    // Every row needs it to paint a background that reaches the window's
+    // edge: a table cell's painter is clipped to that cell, and the row
+    // fill has to be painted while drawing the first one so that
+    // everything else lands on top of it.
+    let viewport = ui.available_rect_before_wrap();
+
     let mut builder = TableBuilder::new(ui)
         .striped(false)
         .resizable(true)
@@ -228,39 +244,57 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
         .sense(Sense::click());
 
     for (index, (_, width)) in COLUMNS.iter().enumerate() {
-        builder = if index == 0 {
-            // The Name column absorbs the slack. A `remainder()` cannot
-            // also be resizable — dragging one gives it a stored width,
-            // after which it absorbs nothing and the table stops filling
-            // its pane.
-            builder.column(Column::remainder().at_least(200.0).clip(true))
-        } else {
-            builder.column(
-                Column::initial(*width)
-                    .at_least(MIN_COLUMN)
-                    .resizable(true)
-                    .clip(true),
-            )
-        };
+        let least = if index == 0 { NAME_MINIMUM } else { MIN_COLUMN };
+        builder = builder.column(
+            Column::initial(*width)
+                .at_least(least)
+                .resizable(true)
+                .clip(true),
+        );
     }
+    // Exactly one column absorbs the window's slack, and it is a trailing
+    // spacer with nothing in it.
+    //
+    // Name used to be that column, as a `remainder()`. Two things were
+    // wrong with it. A `remainder()` cannot also be resizable — dragging
+    // one gives it a stored width, after which it absorbs nothing and the
+    // table stops filling the pane — so the Name column could not be
+    // resized at all. And on a wide window it grew to nearly a thousand
+    // points for a column whose longest entry is about thirty characters,
+    // which is how the table ended up as a wall of name and eight cramped
+    // metrics.
+    //
+    // The spacer takes the slack instead, so every real column keeps the
+    // width it was given, the row backgrounds run to the window's edge,
+    // and the one column nobody can drag is the one that has nothing in
+    // it to drag.
+    builder = builder.column(Column::remainder().clip(true));
 
     builder
         .header(HEADER_HEIGHT, |mut header| {
             for (index, (key, _)) in COLUMNS.iter().enumerate() {
                 header.col(|ui| {
                     let sorted = (app.processes.sort == *key).then_some(app.processes.descending);
-                    // Only the Name column claims its cell's width; see
-                    // `widgets::sortable_header` on why the others must
-                    // not.
-                    let claims = index == 0;
-                    let right = index > 0;
-                    if widgets::sortable_header(ui, theme, key.label(), sorted, claims, right)
+                    // No column claims its cell's width any more.
+                    //
+                    // `egui_extras` records the widest thing a column
+                    // ever allocated and will not let the column shrink
+                    // below it, so a heading that allocates its whole
+                    // cell is a floor that column can never come back
+                    // under. That was harmless while Name was a
+                    // non-resizable remainder; now that every column is
+                    // resizable, it would mean Name could be widened and
+                    // never narrowed again.
+                    if widgets::sortable_header(ui, theme, key.label(), sorted, false, index > 0)
                         .clicked()
                     {
                         sort_clicked = Some(*key);
                     }
                 });
             }
+            // The spacer's heading, which is empty. Skipping it leaves
+            // the header one cell short of the body.
+            header.col(|_| {});
         })
         .body(|body| {
             body.rows(ROW_HEIGHT, entries.len(), |mut row| {
@@ -275,13 +309,17 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         collapsed,
                     } => {
                         let mut hit = false;
-                        for column in 0..COLUMNS.len() {
-                            row.col(|ui| {
-                                if column == 0 {
-                                    hit |= group_heading(ui, theme, *kind, totals, *collapsed);
-                                } else {
+                        // `COLUMNS.len() + 1` throughout: the trailing
+                        // spacer is a real column and has to be filled,
+                        // or every row below stops one column short of
+                        // the window edge.
+                        for column in 0..=COLUMNS.len() {
+                            row.col(|ui| match column {
+                                0 => hit |= group_heading(ui, theme, *kind, totals, *collapsed),
+                                _ if column < COLUMNS.len() => {
                                     group_cell(ui, theme, column, totals);
                                 }
+                                _ => {}
                             });
                         }
                         if hit || row.response().clicked() {
@@ -303,35 +341,35 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         row.set_selected(false);
 
                         let mut disclosure = false;
-                        for column in 0..COLUMNS.len() {
+                        for column in 0..=COLUMNS.len() {
                             row.col(|ui| {
-                                let cell = ui.max_rect();
-                                if column == 0 {
-                                    // The background is painted from the
-                                    // first cell across the whole row,
-                                    // before anything else, so the heat
-                                    // tints and the text land on top of
-                                    // it.
-                                    let full = Rect::from_min_size(
-                                        cell.min,
-                                        Vec2::new(
-                                            ui.available_width().max(cell.width()) + 4_000.0,
-                                            cell.height(),
-                                        ),
-                                    );
-                                    widgets::row_background(
-                                        ui,
-                                        theme,
-                                        full,
-                                        egui::Id::new("row").with(key),
-                                        selected,
-                                        false,
-                                        index % 2 == 1,
-                                    );
-                                    disclosure =
-                                        name_cell(ui, theme, process, *depth, *children, *expanded);
-                                } else {
-                                    metric_cell(ui, theme, column, process, totals, *expanded);
+                                match column {
+                                    0 => {
+                                        // The background is painted from
+                                        // the first cell across the whole
+                                        // row, before anything else, so
+                                        // the heat gauges and the text
+                                        // land on top of it. It needs
+                                        // `viewport` because a cell's own
+                                        // painter is clipped to that cell
+                                        // — see `widgets::row_background`.
+                                        widgets::row_background(
+                                            ui,
+                                            theme,
+                                            viewport,
+                                            egui::Id::new("row").with(key),
+                                            selected,
+                                            false,
+                                            index % 2 == 1,
+                                        );
+                                        disclosure = name_cell(
+                                            ui, theme, process, *depth, *children, *expanded,
+                                        );
+                                    }
+                                    _ if column < COLUMNS.len() => {
+                                        metric_cell(ui, theme, column, process, totals, *expanded);
+                                    }
+                                    _ => {}
                                 }
                             });
                         }

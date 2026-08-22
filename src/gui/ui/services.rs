@@ -29,7 +29,7 @@ use crate::gui::app::actions::Action;
 use crate::gui::app::App;
 use crate::theme::Palette;
 use crate::win::services::{Service, ServiceState};
-use egui::{Sense, Ui, Vec2};
+use egui::{Sense, Ui};
 use egui_extras::{Column, TableBuilder};
 use std::time::{Duration, Instant};
 
@@ -136,6 +136,10 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     let mut clicked: Option<String> = None;
     let mut action: Option<Action> = None;
 
+    // Captured before the builder borrows the `Ui`; see
+    // `widgets::row_background` on why a row needs it.
+    let viewport = ui.available_rect_before_wrap();
+
     TableBuilder::new(ui)
         .resizable(true)
         .vscroll(true)
@@ -167,15 +171,10 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                 let selected = app.services.selected.as_ref() == Some(&service.name);
 
                 row.col(|ui| {
-                    let cell = ui.max_rect();
-                    let full = egui::Rect::from_min_size(
-                        cell.min,
-                        Vec2::new(cell.width() + 4_000.0, cell.height()),
-                    );
                     widgets::row_background(
                         ui,
                         theme,
-                        full,
+                        viewport,
                         egui::Id::new("service-row").with(position),
                         selected,
                         false,
@@ -356,6 +355,10 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     let mut clicked: Option<String> = None;
     let mut reveal: Option<std::path::PathBuf> = None;
 
+    // Captured before the builder borrows the `Ui`; see
+    // `widgets::row_background` on why a row needs it.
+    let viewport = ui.available_rect_before_wrap();
+
     TableBuilder::new(ui)
         .resizable(true)
         .vscroll(true)
@@ -385,15 +388,10 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                 let selected = app.startup.selected.as_ref() == Some(&entry.name);
 
                 row.col(|ui| {
-                    let cell = ui.max_rect();
-                    let full = egui::Rect::from_min_size(
-                        cell.min,
-                        Vec2::new(cell.width() + 4_000.0, cell.height()),
-                    );
                     widgets::row_background(
                         ui,
                         theme,
-                        full,
+                        viewport,
                         egui::Id::new("startup-row").with(position),
                         selected,
                         false,

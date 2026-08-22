@@ -45,6 +45,15 @@ const PICKER_ROW: f32 = 52.0;
 /// The height the main graph gets.
 const GRAPH_HEIGHT: f32 = 220.0;
 
+/// The narrowest a per-device card may be before the grid drops a column.
+///
+/// Set by the widest thing these cards hold: the disk card's three stat
+/// columns, whose last one is a `"97.1 GB / 1.57 TB"` pair. Below about
+/// this the pair wraps and the card's three columns stop lining up with
+/// the card beside it, which is most of what makes a grid of cards read
+/// as a grid rather than as a pile.
+const DEVICE_CARD_WIDTH: f32 = 340.0;
+
 /// Draws the Performance view.
 pub fn draw(app: &mut App, ui: &mut Ui) {
     let theme = app.theme.clone();
@@ -469,7 +478,15 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         widgets::empty_state(ui, theme, "No physical disks reported");
         return;
     }
-    for disk in &system.disks {
+    // A grid rather than a stack. A machine with three disks used to get
+    // three full-width cards holding three short numbers each, which on
+    // a wide window is a column of near-empty bars with the bottom two
+    // thirds of the view blank.
+    let disks = system.disks.clone();
+    widgets::card_grid(ui, DEVICE_CARD_WIDTH, disks.len(), |ui, index| {
+        let Some(disk) = disks.get(index) else {
+            return;
+        };
         chrome::panel_card(ui, theme, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
@@ -513,7 +530,7 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
                 );
             });
         });
-    }
+    });
 }
 
 /// The network panel.
@@ -541,7 +558,11 @@ fn network(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         widgets::empty_state(ui, theme, "No connected adapters");
         return;
     }
-    for adapter in &system.adapters {
+    let adapters = system.adapters.clone();
+    widgets::card_grid(ui, DEVICE_CARD_WIDTH, adapters.len(), |ui, index| {
+        let Some(adapter) = adapters.get(index) else {
+            return;
+        };
         chrome::panel_card(ui, theme, |ui| {
             ui.label(
                 egui::RichText::new(&adapter.name)
@@ -568,7 +589,7 @@ fn network(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
                 );
             });
         });
-    }
+    });
 }
 
 /// The GPU panel.
@@ -600,7 +621,11 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         );
         return;
     }
-    for adapter in &system.gpus {
+    let gpus = system.gpus.clone();
+    widgets::card_grid(ui, DEVICE_CARD_WIDTH, gpus.len(), |ui, card| {
+        let Some(adapter) = gpus.get(card) else {
+            return;
+        };
         chrome::panel_card(ui, theme, |ui| {
             ui.label(
                 egui::RichText::new(&adapter.name)
@@ -631,7 +656,7 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
                 );
             }
         });
-    }
+    });
 }
 
 /// One readout in a row of them.
