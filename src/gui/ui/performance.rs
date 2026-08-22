@@ -422,9 +422,12 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         );
         // Height scaled to the core count so a 4-core machine does not
         // get a grid of four tall boxes and a 64-core one does not get a
-        // grid too short to see anything in.
-        let rows = (app.performance.cores.len() as f32).sqrt().ceil().max(1.0);
-        let height = (rows * 46.0).clamp(90.0, 320.0);
+        // grid too short to see anything in. `core_grid_layout` rather
+        // than a squareness formula of its own — see that function's
+        // docs on why keeping a separate copy here is the bug, not just
+        // duplication.
+        let (_, rows) = graph::core_grid_layout(app.performance.cores.len());
+        let height = (rows as f32 * 46.0).clamp(90.0, 320.0);
         let (rect, _) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
         graph::core_grid(ui, theme, rect, &app.performance.cores);

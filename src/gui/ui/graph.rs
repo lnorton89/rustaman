@@ -214,11 +214,12 @@ pub fn core_grid(ui: &mut Ui, theme: &Palette, rect: Rect, cores: &[Series]) {
 /// The column and row count for `count` cores, as square as it allows.
 ///
 /// Rounded so wide-and-short beats tall-and-narrow — a monitor is wider
-/// than it is tall. A free function rather than inline in [`core_grid`]
-/// so the test can call the layout the grid actually uses instead of
-/// keeping its own copy of the formula, which would keep passing after a
-/// change to this one drifted the two apart.
-fn core_grid_layout(count: usize) -> (usize, usize) {
+/// than it is tall. `pub(crate)`, not private: [`super::performance`]
+/// has to reserve a rect tall enough for this grid *before* it is drawn,
+/// and calling this rather than keeping its own copy of the formula is
+/// what stops the reservation from silently drifting out of step with
+/// what the grid actually lays out.
+pub(crate) fn core_grid_layout(count: usize) -> (usize, usize) {
     let columns = (count as f32).sqrt().ceil().max(1.0) as usize;
     let rows = count.div_ceil(columns);
     (columns, rows)
