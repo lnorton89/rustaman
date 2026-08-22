@@ -274,12 +274,21 @@ pub fn sortable_header(
     sorted: Option<bool>,
     claims_width: bool,
     right_aligned: bool,
+    lifted: bool,
 ) -> Response {
     let font = TextStyle::Small.resolve(ui.style());
     let color = if sorted.is_some() {
         theme.text
     } else {
         theme.text_muted
+    };
+    // A heading being dragged is dimmed towards the surface behind it, so
+    // it reads as lifted out of the row rather than as a second copy of
+    // itself sitting beside the ghost that follows the pointer.
+    let color = if lifted {
+        color.lerp(theme.panel, 0.7)
+    } else {
+        color
     };
     // The arrow occupies a reserved column whether or not this heading
     // is the sorted one, so a column does not jump sideways when the
@@ -297,7 +306,12 @@ pub fn sortable_header(
     } else {
         galley.size() + Vec2::new(SPACE_SM + arrow_column, SPACE_XS)
     };
-    let (rect, response) = ui.allocate_exact_size(wanted, Sense::click());
+    // `click_and_drag`, so the same control sorts on a click and reorders
+    // on a drag. egui reports `clicked()` as false once the pointer has
+    // moved far enough to count as a drag, so the two cannot both fire —
+    // which is what lets a heading be its own drag handle rather than
+    // needing a separate grip beside it.
+    let (rect, response) = ui.allocate_exact_size(wanted, super::dnd::Lane::sense());
 
     // Sensed across the whole cell so the click target is the column
     // heading rather than only its glyphs, without the allocation that

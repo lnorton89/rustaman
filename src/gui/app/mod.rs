@@ -38,6 +38,7 @@ pub mod rows;
 use crate::config::Config;
 use crate::engine::Engine;
 use crate::icon::Icon;
+use crate::model::columns::ColumnOrder;
 use crate::model::filter::Query;
 use crate::model::history::Series;
 use crate::model::sort::SortKey;
@@ -159,6 +160,13 @@ pub struct ProcessView {
     pub collapsed: HashSet<ProcessKind>,
     /// The selected row, if any.
     pub selected: Option<ProcessKey>,
+    /// The order the columns are drawn in, as the user dragged them.
+    ///
+    /// Persisted, and reconciled against the build's own column set on
+    /// load — see [`crate::model::columns`], which is where the cases
+    /// that matter (a column added or removed by a later release) are
+    /// handled.
+    pub columns: ColumnOrder,
     /// The flattened rows to draw, and the state they were built from.
     pub rows: rows::Cache,
 }
@@ -176,6 +184,7 @@ impl Default for ProcessView {
             expanded: HashSet::new(),
             collapsed: HashSet::new(),
             selected: None,
+            columns: ColumnOrder::new(&crate::gui::ui::processes::DEFAULT_COLUMNS),
             rows: rows::Cache::default(),
         }
     }
@@ -387,6 +396,15 @@ impl App {
         if let Some(grouped) = config.grouped {
             processes.grouped = grouped;
         }
+        if let Some(saved) = config.columns.as_deref() {
+            // Reconciled, never trusted. A saved order written by an
+            // older build does not mention a column added since, and a
+            // table that used the list as it stands would silently draw
+            // one fewer column than this build has — which reads as the
+            // feature never having shipped.
+            processes.columns =
+                ColumnOrder::reconcile(saved, &crate::gui::ui::processes::DEFAULT_COLUMNS);
+        }
 
         Self {
             engine,
@@ -577,6 +595,7 @@ impl App {
             sort: Some(self.processes.sort),
             sort_descending: Some(self.processes.descending),
             grouped: Some(self.processes.grouped),
+            columns: Some(self.processes.columns.as_slice().to_vec()),
             custom_chrome: Some(self.custom_chrome),
             ..self.config.clone()
         }

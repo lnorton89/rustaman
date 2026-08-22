@@ -48,7 +48,7 @@
 //! and the row would lose both.
 
 use super::theme::{self, HEADER_HEIGHT, PAD, ROW_HEIGHT, SPACE_MD, SPACE_SM, SPACE_XS};
-use super::{chrome, widgets};
+use super::{chrome, dnd, widgets};
 use crate::gui::app::actions::Action;
 use crate::gui::app::{rows::RowKey, App};
 use crate::model::sort::SortKey;
@@ -58,19 +58,54 @@ use crate::theme::Palette;
 use egui::{Sense, Ui, Vec2};
 use egui_extras::{Column, TableBuilder};
 
-/// The columns, in order, with the width each starts at.
+/// The columns this build has, in the order a fresh install shows them.
 ///
-/// Stated rather than measured; see the module docs.
-const COLUMNS: [(SortKey, f32); 8] = [
-    (SortKey::Name, 320.0),
-    (SortKey::Pid, 64.0),
-    (SortKey::Status, 82.0),
-    (SortKey::Cpu, 68.0),
-    (SortKey::Memory, 92.0),
-    (SortKey::Disk, 96.0),
-    (SortKey::Network, 74.0),
-    (SortKey::Gpu, 64.0),
+/// The *order* is a default, not a fixed layout: a user drags the
+/// headings into whatever arrangement they want and it is persisted. The
+/// *set* is what this build can draw, and a saved order is reconciled
+/// against it on load — see [`crate::model::columns`].
+pub const DEFAULT_COLUMNS: [SortKey; 8] = [
+    SortKey::Name,
+    SortKey::Pid,
+    SortKey::Status,
+    SortKey::Cpu,
+    SortKey::Memory,
+    SortKey::Disk,
+    SortKey::Network,
+    SortKey::Gpu,
 ];
+
+/// The width each column starts at.
+///
+/// Stated rather than measured; see the module docs. Keyed by column
+/// rather than positional, because the position is now the user's to
+/// choose and a width tied to a slot would mean dragging Name into the
+/// third slot gave it the PID column's width.
+fn initial_width(key: SortKey) -> f32 {
+    match key {
+        SortKey::Name => 320.0,
+        SortKey::Pid => 64.0,
+        SortKey::Status => 82.0,
+        SortKey::Cpu => 68.0,
+        SortKey::Memory => 92.0,
+        SortKey::Disk => 96.0,
+        SortKey::Network => 74.0,
+        SortKey::Gpu => 64.0,
+        // Not shown in this view; the Details view has them. Named
+        // rather than wildcarded so a column added to `DEFAULT_COLUMNS`
+        // without a width here is a compile error rather than a column
+        // that silently opens at the fallback size.
+        SortKey::PrivateBytes
+        | SortKey::User
+        | SortKey::Threads
+        | SortKey::Handles
+        | SortKey::CpuTime
+        | SortKey::Priority
+        | SortKey::Architecture
+        | SortKey::Session
+        | SortKey::Path => MIN_COLUMN,
+    }
+}
 
 /// The least a resizable column may be dragged to.
 ///
@@ -236,6 +271,21 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     // everything else lands on top of it.
     let viewport = ui.available_rect_before_wrap();
 
+    // The user's column order, taken by value so the table can draw while
+    // `app` is borrowed mutably by the row closures.
+    let columns: Vec<SortKey> = app.processes.columns.as_slice().to_vec();
+    let mut reordered: Option<crate::gui::ui::dnd::Moved> = None;
+
+    // The headings are a drag lane. It is declared out here, filled in
+    // inside the header closure, and resolved after the table has
+    // finished — the closure has no `&Ui` of its own to resolve against,
+    // and in immediate mode the answer to "what is under the pointer"
+    // is not available until every heading has been drawn anyway.
+    let mut lane = Some(dnd::Lane::new(
+        egui::Id::new("process-columns"),
+        dnd::Axis::Horizontal,
+    ));
+
     let mut builder = TableBuilder::new(ui)
         .striped(false)
         .resizable(true)
@@ -243,10 +293,17 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .sense(Sense::click());
 
-    for (index, (_, width)) in COLUMNS.iter().enumerate() {
-        let least = if index == 0 { NAME_MINIMUM } else { MIN_COLUMN };
+    for key in &columns {
+        // The Name column needs more room than the rest whatever slot it
+        // has been dragged into, because it is the one holding text
+        // rather than a number.
+        let least = if *key == SortKey::Name {
+            NAME_MINIMUM
+        } else {
+            MIN_COLUMN
+        };
         builder = builder.column(
-            Column::initial(*width)
+            Column::initial(initial_width(*key))
                 .at_least(least)
                 .resizable(true)
                 .clip(true),
@@ -272,7 +329,7 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
 
     builder
         .header(HEADER_HEIGHT, |mut header| {
-            for (index, (key, _)) in COLUMNS.iter().enumerate() {
+            for (index, key) in columns.iter().enumerate() {
                 header.col(|ui| {
                     let sorted = (app.processes.sort == *key).then_some(app.processes.descending);
                     // No column claims its cell's width any more.
@@ -285,9 +342,29 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                     // non-resizable remainder; now that every column is
                     // resizable, it would mean Name could be widened and
                     // never narrowed again.
-                    if widgets::sortable_header(ui, theme, key.label(), sorted, false, index > 0)
-                        .clicked()
-                    {
+                    let response = widgets::sortable_header(
+                        ui,
+                        theme,
+                        key.label(),
+                        sorted,
+                        false,
+                        index > 0,
+                        // The heading a drag is carrying is dimmed in
+                        // place, so it reads as lifted out of the row
+                        // rather than duplicated by the ghost.
+                        lane.as_ref()
+                            .is_some_and(|lane| lane.is_dragging(ui, index)),
+                    );
+                    if let Some(lane) = lane.as_mut() {
+                        lane.item(index, ui.max_rect(), key.label(), &response);
+                    }
+
+                    // A click sorts; a drag reorders. `clicked()` is
+                    // false when the pointer moved far enough to become
+                    // a drag, so the two do not fight — which is why the
+                    // heading senses both rather than the app needing a
+                    // separate grip to drag by.
+                    if response.clicked() {
                         sort_clicked = Some(*key);
                     }
                 });
@@ -313,13 +390,17 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         // spacer is a real column and has to be filled,
                         // or every row below stops one column short of
                         // the window edge.
-                        for column in 0..=COLUMNS.len() {
-                            row.col(|ui| match column {
-                                0 => hit |= group_heading(ui, theme, *kind, totals, *collapsed),
-                                _ if column < COLUMNS.len() => {
-                                    group_cell(ui, theme, column, totals);
+                        for slot in 0..=columns.len() {
+                            row.col(|ui| match columns.get(slot) {
+                                // The heading sits in whichever slot the
+                                // Name column has been dragged to, not
+                                // in the first one.
+                                Some(SortKey::Name) => {
+                                    hit |= group_heading(ui, theme, *kind, totals, *collapsed);
                                 }
-                                _ => {}
+                                Some(key) => group_cell(ui, theme, *key, totals),
+                                // The trailing spacer.
+                                None => {}
                             });
                         }
                         if hit || row.response().clicked() {
@@ -341,35 +422,42 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         row.set_selected(false);
 
                         let mut disclosure = false;
-                        for column in 0..=COLUMNS.len() {
+                        for slot in 0..=columns.len() {
                             row.col(|ui| {
-                                match column {
-                                    0 => {
-                                        // The background is painted from
-                                        // the first cell across the whole
-                                        // row, before anything else, so
-                                        // the heat gauges and the text
-                                        // land on top of it. It needs
-                                        // `viewport` because a cell's own
-                                        // painter is clipped to that cell
-                                        // — see `widgets::row_background`.
-                                        widgets::row_background(
-                                            ui,
-                                            theme,
-                                            viewport,
-                                            egui::Id::new("row").with(key),
-                                            selected,
-                                            false,
-                                            index % 2 == 1,
-                                        );
+                                // The background is painted from the
+                                // *first* cell, whichever column has been
+                                // dragged into it, across the whole row
+                                // and before anything else — so the heat
+                                // gauges and the text land on top of it.
+                                // Painting it from the Name column instead
+                                // would put it over every column dragged
+                                // to the left of Name.
+                                //
+                                // It needs `viewport` because a cell's own
+                                // painter is clipped to that cell; see
+                                // `widgets::row_background`.
+                                if slot == 0 {
+                                    widgets::row_background(
+                                        ui,
+                                        theme,
+                                        viewport,
+                                        egui::Id::new("row").with(key),
+                                        selected,
+                                        false,
+                                        index % 2 == 1,
+                                    );
+                                }
+                                match columns.get(slot) {
+                                    Some(SortKey::Name) => {
                                         disclosure = name_cell(
                                             ui, theme, process, *depth, *children, *expanded,
                                         );
                                     }
-                                    _ if column < COLUMNS.len() => {
-                                        metric_cell(ui, theme, column, process, totals, *expanded);
+                                    Some(column) => {
+                                        metric_cell(ui, theme, *column, process, totals, *expanded);
                                     }
-                                    _ => {}
+                                    // The trailing spacer.
+                                    None => {}
                                 }
                             });
                         }
@@ -393,6 +481,20 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                 }
             });
         });
+
+    // Resolved out here rather than inside the header closure: the drop
+    // target cannot be known until every heading has been drawn, and the
+    // closure has no `&Ui` of its own to paint the feedback with. The
+    // table's borrow of `ui` has ended by this point.
+    if let Some(lane) = lane.take() {
+        reordered = lane.show(ui, theme);
+    }
+    if let Some(moved) = reordered {
+        // `move_column`, not `drop_at`: the lane has already converted the
+        // drop gap into a destination index. See `model::columns::landing`
+        // on why those are two different numbers.
+        app.processes.columns.move_column(moved.from, moved.to);
+    }
 
     if let Some(key) = sort_clicked {
         toggle_sort(app, key);
@@ -463,7 +565,7 @@ fn group_heading(
 }
 
 /// Draws a category heading's aggregate figure for one column.
-fn group_cell(ui: &mut Ui, theme: &Palette, column: usize, totals: &Totals) {
+fn group_cell(ui: &mut Ui, theme: &Palette, key: SortKey, totals: &Totals) {
     let rect = ui.max_rect();
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::ZERO, theme::rgb(theme.raised));
@@ -471,12 +573,26 @@ fn group_cell(ui: &mut Ui, theme: &Palette, column: usize, totals: &Totals) {
     // Only the summable columns carry a category total. A PID or a
     // status has no meaningful aggregate, and showing one would be worse
     // than showing nothing.
-    let text = match COLUMNS.get(column).map(|(key, _)| *key) {
-        Some(SortKey::Cpu) => crate::format::percent_or_dash(totals.cpu_percent),
-        Some(SortKey::Memory) => crate::format::bytes_or_dash(totals.working_set),
-        Some(SortKey::Disk) => crate::format::rate_or_dash(totals.disk_rate),
-        Some(SortKey::Gpu) => crate::format::percent_or_dash(totals.gpu_percent),
-        Some(_) | None => String::new(),
+    let text = match key {
+        SortKey::Cpu => crate::format::percent_or_dash(totals.cpu_percent),
+        SortKey::Memory => crate::format::bytes_or_dash(totals.working_set),
+        SortKey::Disk => crate::format::rate_or_dash(totals.disk_rate),
+        SortKey::Gpu => crate::format::percent_or_dash(totals.gpu_percent),
+        // Only the summable columns carry a category total; the rest are
+        // named rather than wildcarded so a new one is a compile error.
+        SortKey::Name
+        | SortKey::Pid
+        | SortKey::Status
+        | SortKey::Network
+        | SortKey::PrivateBytes
+        | SortKey::User
+        | SortKey::Threads
+        | SortKey::Handles
+        | SortKey::CpuTime
+        | SortKey::Priority
+        | SortKey::Architecture
+        | SortKey::Session
+        | SortKey::Path => String::new(),
     };
     if !text.is_empty() {
         widgets::number(ui, theme, &text, true);
@@ -533,15 +649,12 @@ fn name_cell(
 fn metric_cell(
     ui: &mut Ui,
     theme: &Palette,
-    column: usize,
+    key: SortKey,
     process: &ProcessRow,
     totals: &Totals,
     expanded: bool,
 ) {
     let rect = ui.max_rect();
-    let Some((key, _)) = COLUMNS.get(column) else {
-        return;
-    };
 
     // A collapsed parent shows its subtree's total, or collapsing the
     // tree makes a busy process disappear — which is the single most
@@ -751,12 +864,14 @@ mod tests {
     }
 
     #[test]
-    fn every_column_is_sortable_and_named() {
-        for (key, width) in COLUMNS {
+    fn every_column_is_sortable_and_opens_wide_enough_to_read() {
+        for key in DEFAULT_COLUMNS {
             assert!(!key.label().is_empty());
+            let width = initial_width(key);
             assert!(
-                width >= MIN_COLUMN || key == SortKey::Name,
-                "{} starts at {width}, below the minimum",
+                width >= MIN_COLUMN,
+                "{} opens at {width}, below the width its own heading \
+                 needs",
                 key.label()
             );
         }
@@ -765,7 +880,7 @@ mod tests {
     #[test]
     fn the_columns_are_distinct() {
         // A duplicate would make one heading sort by the other's column.
-        let mut keys: Vec<SortKey> = COLUMNS.iter().map(|(key, _)| *key).collect();
+        let mut keys: Vec<SortKey> = DEFAULT_COLUMNS.to_vec();
         let count = keys.len();
         keys.sort_unstable();
         keys.dedup();
@@ -773,14 +888,33 @@ mod tests {
     }
 
     #[test]
-    fn exactly_one_column_absorbs_the_slack() {
-        // A `remainder()` cannot also be resizable, and two of them would
-        // fight. The first column is the one, and it is the Name column
-        // because that is what benefits from the room.
-        assert_eq!(
-            COLUMNS.first().map(|(key, _)| *key),
-            Some(SortKey::Name),
-            "the absorbing column must be the first one"
+    fn a_reordered_table_still_draws_every_column() {
+        // The table iterates the user's order rather than `DEFAULT_COLUMNS`,
+        // so the property that matters is that no arrangement can lose a
+        // column or draw one twice. The reconciliation and the moves are
+        // tested in `crate::model::columns`; this checks that this view's
+        // own column set survives a trip through it.
+        let mut order = crate::model::columns::ColumnOrder::new(&DEFAULT_COLUMNS);
+        order.move_column(0, DEFAULT_COLUMNS.len() - 1);
+        assert_eq!(order.len(), DEFAULT_COLUMNS.len());
+        for key in DEFAULT_COLUMNS {
+            assert!(
+                order.as_slice().contains(&key),
+                "{} was lost by a reorder",
+                key.label()
+            );
+        }
+    }
+
+    #[test]
+    fn the_name_column_keeps_its_own_minimum_wherever_it_is_dragged() {
+        // The width floor is keyed on the column, not on the slot. Tied
+        // to a slot, dragging Name into third place would give it the
+        // Status column's minimum and clip every process name in the
+        // table.
+        assert!(
+            initial_width(SortKey::Name) > initial_width(SortKey::Pid),
+            "the text column should open wider than a numeric one"
         );
     }
 }

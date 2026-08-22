@@ -157,8 +157,15 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
         .header(HEADER_HEIGHT, |mut header| {
             for (index, label) in ["Name", "Service", "Status", "PID"].into_iter().enumerate() {
                 header.col(|ui| {
-                    let _ =
-                        widgets::sortable_header(ui, theme, label, None, index == 0, index == 3);
+                    let _ = widgets::sortable_header(
+                        ui,
+                        theme,
+                        label,
+                        None,
+                        index == 0,
+                        index == 3,
+                        false,
+                    );
                 });
             }
         })
@@ -375,7 +382,8 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
         .header(HEADER_HEIGHT, |mut header| {
             for (index, label) in ["Name", "Status", "Location"].into_iter().enumerate() {
                 header.col(|ui| {
-                    let _ = widgets::sortable_header(ui, theme, label, None, index == 0, false);
+                    let _ =
+                        widgets::sortable_header(ui, theme, label, None, index == 0, false, false);
                 });
             }
         })

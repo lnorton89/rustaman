@@ -38,6 +38,7 @@
 
 pub mod chrome;
 pub mod details;
+pub mod dnd;
 pub mod graph;
 pub mod icon;
 pub mod modal;
@@ -358,6 +359,36 @@ mod tests {
                     !arguments.contains("0."),
                     "{name}:{} passes a bare duration: {}. Use INSTANT, \
                      QUICK, SETTLE or ENTER",
+                    number + 1,
+                    line.trim()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_drawing_module_carries_its_own_drag_state() {
+        // Drag and drop is almost entirely feedback — a dimmed source, a
+        // ghost on the pointer, an indicator at the drop target, and
+        // nothing at all when the drop would be ignored. A view that
+        // tracked its own `dragging: Option<usize>` would get some subset
+        // of those, and a different subset from the next one.
+        //
+        // So the state lives in `dnd`, in egui's own memory, and a view
+        // reaches it through `Lane`. Reading `drag_started` here is the
+        // tell: it means a view is deciding for itself what a drag is.
+        for (name, source) in DRAWING_MODULES {
+            for (number, line) in source.lines().enumerate() {
+                if is_prose(line) {
+                    continue;
+                }
+                assert!(
+                    !line.contains("drag_started")
+                        && !line.contains("drag_stopped")
+                        && !line.contains("dragged_by")
+                        && !line.contains("drag_delta"),
+                    "{name}:{} tracks a drag by hand: {}. Use gui::ui::dnd, \
+                     which owns the feedback as well as the state",
                     number + 1,
                     line.trim()
                 );

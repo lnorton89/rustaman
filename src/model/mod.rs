@@ -36,6 +36,7 @@
 //! number. Selection, expansion, the history graphs, and the kill path
 //! all key on [`ProcessKey`] for that reason.
 
+pub mod columns;
 pub mod filter;
 pub mod history;
 pub mod rates;

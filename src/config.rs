@@ -84,9 +84,17 @@ pub struct Config {
     /// The window's size in logical points, as `[width, height]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_size: Option<[f32; 2]>,
-    /// Which optional columns are shown, by their stable names.
+    /// The order the process table's columns are drawn in.
+    ///
+    /// Written whenever a heading is dragged. It is a *preference*, not a
+    /// layout: on load it is reconciled against the columns this build
+    /// actually has, so a column added by a later release appears rather
+    /// than silently going missing, and one that was removed is dropped
+    /// rather than leaving a heading with nothing behind it. See
+    /// [`crate::model::columns`], where the four cases are handled and
+    /// tested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub columns: Option<Vec<String>>,
+    pub columns: Option<Vec<SortKey>>,
 }
 
 impl Config {
@@ -274,7 +282,7 @@ mod tests {
             always_on_top: Some(false),
             confirm_end_task: Some(true),
             window_size: Some([1440.0, 900.0]),
-            columns: Some(vec!["cpu".to_string(), "memory".to_string()]),
+            columns: Some(vec![SortKey::Cpu, SortKey::Memory]),
         };
         let text = toml::to_string_pretty(&original)?;
         assert_eq!(

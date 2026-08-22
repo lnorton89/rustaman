@@ -178,8 +178,16 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                     // `claims_width: false` for every column now that
                     // none of them is the remainder — see the header
                     // loop in `super::processes`.
-                    if widgets::sortable_header(ui, theme, key.label(), sorted, false, index > 0)
-                        .clicked()
+                    if widgets::sortable_header(
+                        ui,
+                        theme,
+                        key.label(),
+                        sorted,
+                        false,
+                        index > 0,
+                        false,
+                    )
+                    .clicked()
                     {
                         sort_clicked = Some(*key);
                     }
