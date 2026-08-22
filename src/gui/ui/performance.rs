@@ -83,6 +83,7 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     egui::Panel::left("performance-picker-gap")
         .exact_size(SPACE_LG)
         .frame(egui::Frame::new())
+        .show_separator_line(false)
         .show(ui, |_| {});
     detail(app, ui, &theme, &snapshot);
 }
@@ -1083,6 +1084,7 @@ mod tests {
                     egui::Panel::left("performance-picker-gap")
                         .exact_size(SPACE_LG)
                         .frame(egui::Frame::new())
+                        .show_separator_line(false)
                         .show(ui, |_| {});
                     detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
                 });
@@ -1096,6 +1098,83 @@ mod tests {
             gap >= SPACE_LG,
             "the seam between the picker and the detail column is only \
              {gap} wide, wanted at least {SPACE_LG}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_picker_detail_seam_draws_exactly_one_separator_line() -> anyhow::Result<()> {
+        // The spacer panel that carves out the seam's gap is itself a
+        // `Panel::left`, and a `Panel::left` draws its own separator
+        // line by default — right next to the picker panel's own,
+        // already-correct one. The two lines sit only a few pixels
+        // apart, which reads as a single doubled border hugging
+        // whichever column is on the near side, not as a gap. A rect
+        // check can't see this: neither panel's content rect moves, so
+        // the fix has to be verified against what actually gets
+        // painted at the seam.
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1024.0, 768.0));
+        let mut app = App::new(crate::config::Config::default());
+        let theme = app.theme.clone();
+        let snapshot = Snapshot::default();
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(window),
+            ..Default::default()
+        };
+
+        let mut picker_rect = None;
+        let mut detail_rect = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default()
+                .frame(theme::content(&theme))
+                .show(ui, |ui| {
+                    egui::Panel::left("performance-picker")
+                        .exact_size(PICKER_WIDTH)
+                        .frame(egui::Frame::new().inner_margin(theme::margin_xy(0.0, 0.0)))
+                        .show(ui, |ui| {
+                            picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
+                        });
+                    egui::Panel::left("performance-picker-gap")
+                        .exact_size(SPACE_LG)
+                        .frame(egui::Frame::new())
+                        .show_separator_line(false)
+                        .show(ui, |_| {});
+                    detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
+                });
+        });
+        output.textures_delta.clear();
+
+        let picker_rect = picker_rect.ok_or_else(|| anyhow::anyhow!("picker() drew nothing"))?;
+        let detail_rect = detail_rect.ok_or_else(|| anyhow::anyhow!("detail() drew nothing"))?;
+
+        let seam_lines = output
+            .shapes
+            .iter()
+            .filter(|clipped| match &clipped.shape {
+                egui::Shape::LineSegment { points, .. } => {
+                    let is_vertical = (points[0].x - points[1].x).abs() < 0.01;
+                    let in_seam = points[0].x >= picker_rect.right() - 1.0
+                        && points[0].x <= detail_rect.left() + 1.0;
+                    is_vertical && in_seam
+                }
+                egui::Shape::Noop
+                | egui::Shape::Vec(_)
+                | egui::Shape::Circle(_)
+                | egui::Shape::Ellipse(_)
+                | egui::Shape::Path(_)
+                | egui::Shape::Rect(_)
+                | egui::Shape::Text(_)
+                | egui::Shape::Mesh(_)
+                | egui::Shape::QuadraticBezier(_)
+                | egui::Shape::CubicBezier(_)
+                | egui::Shape::Callback(_) => false,
+            })
+            .count();
+
+        assert_eq!(
+            seam_lines, 1,
+            "expected exactly one separator line at the picker/detail seam, found {seam_lines}"
         );
         Ok(())
     }
