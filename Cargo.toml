@@ -1,0 +1,154 @@
+[package]
+name = "rustaman"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "A modern Windows task manager: process, service, startup and performance management in one native app."
+license = "MIT"
+repository = "https://github.com/lnorton89/rustaman"
+readme = "README.md"
+keywords = ["windows", "task-manager", "process", "performance", "gui"]
+categories = ["gui", "os::windows-apis"]
+
+[lib]
+name = "rustaman"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustaman"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+dirs = "6"
+clap = { version = "4", features = ["derive"] }
+# The sampler thread hands snapshots to the UI thread over a bounded
+# channel. `crossbeam-channel` rather than `std::sync::mpsc` for
+# `try_recv` on a bounded queue with a non-blocking `send` that reports a
+# full queue instead of growing without limit — a sampler that outruns a
+# stalled UI must drop frames, not buffer them.
+crossbeam-channel = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+# The GUI stack, current release — and Windows-only, like the front end
+# it builds. `gui` is `cfg(windows)` because it draws data only
+# `win` can produce, so there is nothing for egui to render on another
+# platform. Scoping it here is what lets the portable core (`model`,
+# `theme`, `format`, `color`, `config`) compile and run its tests on a
+# Linux CI runner without dragging in winit, wgpu and an X11 stack that
+# have no one to talk to there.
+#
+# Held on wgpu rather than the default glow/glutin path: wgpu picks D3D12
+# or Vulkan according to what the machine exposes, where glutin's WGL path
+# is the one that fails on machines with a stale or hybrid OpenGL ICD —
+# common on exactly the switchable-graphics laptops this app is most
+# useful on.
+eframe = { version = "0.36", default-features = false, features = [
+    "wgpu",
+    "default_fonts",
+] }
+egui = "0.36"
+egui_extras = "0.36"
+
+# Every system fact in this app comes through here. `windows-sys` rather
+# than `windows`: this crate's Win32 surface is raw structs and function
+# pointers wrapped by hand in `src/win/` (see the safe-leaf-wrapper rule
+# in CLAUDE.md), so the higher-level crate's generated wrappers and COM
+# machinery would be a second abstraction over the one that is actually
+# used, at several times the compile time.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    # Process enumeration, control, and token inspection.
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Kernel",
+    # NtQuerySystemInformation and the SYSTEM_*_INFORMATION structs: one
+    # call gets CPU, memory, and I/O for every process at once.
+    "Win32_System_WindowsProgramming",
+    # PDH, for the GPU engine counters. There is no Win32 call for GPU
+    # utilisation — Task Manager reads the same counters.
+    "Win32_System_Performance",
+    "Win32_System_Registry",
+    "Win32_System_Services",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    # Physical-disk performance counters (IOCTL_DISK_PERFORMANCE).
+    "Win32_System_Ioctl",
+    "Win32_System_IO",
+    # Access tokens, SIDs, and the elevation/integrity queries the
+    # process list reports.
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    # CreateFileW, GetLogicalDrives, and the version-info calls the
+    # friendly-name column reads out of each executable.
+    "Win32_Storage_FileSystem",
+    # Adapter throughput and the per-PID TCP/UDP connection tables.
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    # Shell icons, "open file location", and the properties dialog.
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_HiDpi",
+    "Win32_Graphics_Gdi",
+    # Dark title bar on the native-chrome setting. Win10 1809+ only, so
+    # the call is probed at runtime rather than assumed.
+    "Win32_Graphics_Dwm",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+# Embeds the application icon and the side-by-side manifest into the
+# .exe. Without the icon, Explorer and the taskbar show the generic
+# blank-page icon — eframe's runtime window icon only covers the window
+# itself. Without the manifest, Windows lies to the app about the DPI and
+# gives it the Windows 8 behaviour for every version check.
+winresource = "0.1"
+
+[dev-dependencies]
+# The brand-asset generator (`cargo run --example brand_assets`) writes
+# the PNGs and the .ico that `build.rs` embeds.
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+# A task manager that panics should say so and stop, not unwind through
+# a sampler thread holding an open handle to every process on the box.
+panic = "abort"
+
+[lints.rust]
+warnings = "deny"
+dead_code = "deny"
+non_snake_case = "deny"
+non_upper_case_globals = "deny"
+non_camel_case_types = "deny"
+unused_variables = "deny"
+unused_imports = "forbid"
+unused_must_use = "forbid"
+unreachable_patterns = "forbid"
+unreachable_pub = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+wildcard_enum_match_arm = "deny"
+match_wildcard_for_single_variants = "deny"
+match_wild_err_arm = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+ignored_unit_patterns = "deny"
+allow_attributes = "deny"

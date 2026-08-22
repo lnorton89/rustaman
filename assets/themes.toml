@@ -1,0 +1,199 @@
+# The theme catalog.
+#
+# This file is compiled into the binary with `include_str!`, and any
+# `*.toml` file with the same shape dropped into
+# `%APPDATA%\rustaman\themes\` is loaded on top of it at startup — so a
+# theme can be added, or a shipped one tweaked, without rebuilding. A user
+# theme whose `id` matches a built-in one replaces it.
+#
+# Each theme states thirteen colours and everything else is derived from
+# them in `Palette::derive` — the selection fill, the muted accent, the
+# scrollbar handle, the grid line, the text colour that goes on the
+# accent, and the whole rainbow series ramp. That is deliberate: it is
+# what stops a theme from shipping a scrollbar handle the same colour as
+# the card it scrolls, which is the sort of thing nobody notices until it
+# is invisible.
+#
+# The four surface layers are named for depth, not for use. `app` is
+# behind everything, `panel` sits on it, `raised` on that, and `hover` is
+# the interactive lift above `raised`. In a dark theme that ramp gets
+# lighter as it comes forward. In a light theme it goes the other way,
+# because a pale surface reads as lifted by getting *darker* — which is
+# why `mode` is stated rather than guessed.
+#
+# `rainbow_span` is how many degrees of hue the series ramp covers,
+# centred on the accent. Per-core CPU graphs, stacked chart series and
+# category chips all index into it. Wider is more colourful and risks
+# colliding with the semantic red and green at the ends; narrower is
+# calmer but harder to tell sixteen cores apart in.
+#
+# Every theme is checked by `every_theme_is_readable` and the tests beside
+# it: adjacent layers must be tellable apart, primary text must clear WCAG
+# AAA (7:1) and secondary text AA (4.5:1) against every surface either can
+# land on — including a hovered row and a selected one — the accent and
+# status colours must be visible against the panel, and the derived
+# scrollbar handle must not vanish into any surface. A theme that fails is
+# a failing build, not a subtly unreadable window.
+#
+# `id` is persisted in the config file. Never rename one — a rename
+# silently drops everyone using it back to the default. The first entry is
+# the default theme.
+
+# --------------------------------------------------------------- dark
+
+# The default. A deep blue-black with a cyan accent, and a rainbow that
+# runs from green-cyan through blue and violet to magenta — the widest
+# band in the catalog, because this is the theme the app is designed
+# around and a sixteen-core graph should look like something.
+[[theme]]
+id = "midnight"
+name = "Midnight"
+mode = "dark"
+app = "#0a0c11"
+panel = "#11141c"
+raised = "#1a1e28"
+hover = "#242936"
+border = "#333a4a"
+accent = "#4cc9f0"
+text = "#e9edf5"
+text_muted = "#98a3b8"
+danger = "#ff5c7a"
+warning = "#ffb347"
+success = "#4ade80"
+rainbow_span = 280
+
+# Neutral greys, no colour cast in the chrome at all. For anyone who finds
+# a tinted background distracting behind a screen that is mostly numbers.
+[[theme]]
+id = "graphite"
+name = "Graphite"
+mode = "dark"
+app = "#131313"
+panel = "#1a1a1a"
+raised = "#242424"
+hover = "#2f2f2f"
+border = "#3d3d3d"
+accent = "#62b6f5"
+text = "#e6e6e6"
+text_muted = "#a3a3a3"
+danger = "#f2606f"
+warning = "#e0a53f"
+success = "#5ec46f"
+rainbow_span = 250
+
+# Warm violet, magenta accent. The rainbow is pulled towards the reds and
+# oranges to match it.
+[[theme]]
+id = "nebula"
+name = "Nebula"
+mode = "dark"
+app = "#0c0810"
+panel = "#16111f"
+raised = "#211a2d"
+hover = "#2d243c"
+border = "#3f3352"
+accent = "#d385f5"
+text = "#eee8f5"
+text_muted = "#a598b5"
+danger = "#ff6b81"
+warning = "#f0a94a"
+success = "#63d69a"
+rainbow_span = 240
+
+# Cool teal on slate, the calmest of the dark themes. A narrow band, so
+# the per-core graph reads as one family of colours rather than a rainbow.
+[[theme]]
+id = "harbour"
+name = "Harbour"
+mode = "dark"
+app = "#0d1214"
+panel = "#131a1d"
+raised = "#1c2529"
+hover = "#263136"
+border = "#354349"
+accent = "#4fd6c4"
+text = "#e4edee"
+text_muted = "#98aaac"
+danger = "#f4707f"
+warning = "#e8b054"
+success = "#63d68a"
+rainbow_span = 170
+
+# Amber on near-black: a monitoring console. The band runs through the
+# warm half of the wheel only.
+[[theme]]
+id = "amber"
+name = "Amber"
+mode = "dark"
+app = "#0d0b07"
+panel = "#171310"
+raised = "#221c16"
+hover = "#2e261e"
+border = "#413629"
+accent = "#f0a94a"
+text = "#f2e9dc"
+text_muted = "#ad9d89"
+danger = "#f2646e"
+warning = "#e8c95a"
+success = "#7fc96a"
+rainbow_span = 150
+
+# Pure black background for OLED panels, where a black pixel is an unlit
+# pixel. The layers above it still have to separate, so the ramp climbs
+# faster than the other dark themes'.
+[[theme]]
+id = "void"
+name = "Void"
+mode = "dark"
+app = "#000000"
+panel = "#0c0c0e"
+raised = "#17171b"
+hover = "#232329"
+border = "#34343d"
+accent = "#5ac8fa"
+text = "#ededf2"
+text_muted = "#9898a1"
+danger = "#ff5f70"
+warning = "#ffb347"
+success = "#4fd67f"
+rainbow_span = 270
+
+# -------------------------------------------------------------- light
+
+# The light default. Cool white, blue accent, and a band dark enough to
+# read against paper — which is what the shared lightness of the ramp buys
+# here: every series is legible, not just the blues.
+[[theme]]
+id = "daylight"
+name = "Daylight"
+mode = "light"
+app = "#eef1f6"
+panel = "#f7f9fc"
+raised = "#eaeef5"
+hover = "#dde3ee"
+border = "#c3ccdb"
+accent = "#0b63ad"
+text = "#12161d"
+text_muted = "#525c6b"
+danger = "#b3213a"
+warning = "#8a5a06"
+success = "#1a6b3c"
+rainbow_span = 250
+
+# Warm off-white. The same rules, a paper-coloured ground.
+[[theme]]
+id = "parchment"
+name = "Parchment"
+mode = "light"
+app = "#efe9de"
+panel = "#f8f4ec"
+raised = "#ebe4d8"
+hover = "#ded5c5"
+border = "#c4b9a5"
+accent = "#9c4221"
+text = "#1c1814"
+text_muted = "#5b5245"
+danger = "#a51f36"
+warning = "#7d5504"
+success = "#1f6540"
+rainbow_span = 200
