@@ -31,7 +31,7 @@ use super::{chrome, graph, widgets};
 use crate::gui::app::{App, PerformanceFocus};
 use crate::model::{Snapshot, SystemSample};
 use crate::theme::Palette;
-use egui::{Rect, Sense, Ui, Vec2};
+use egui::{Rect, Response, Sense, Ui, Vec2};
 
 /// The width of the resource picker.
 ///
@@ -335,27 +335,32 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     ui.add_space(chrome::SECTION_GAP);
 
     ui.horizontal(|ui| {
+        let width = stat_column_width(ui.available_width());
         stat_column(
             ui,
             theme,
+            width,
             "Processes",
             &crate::format::count(system.process_count as u64),
         );
         stat_column(
             ui,
             theme,
+            width,
             "Threads",
             &crate::format::count(system.thread_count),
         );
         stat_column(
             ui,
             theme,
+            width,
             "Handles",
             &crate::format::count(system.handle_count),
         );
         stat_column(
             ui,
             theme,
+            width,
             "Up time",
             &crate::format::duration(system.uptime_seconds),
         );
@@ -419,21 +424,25 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     ui.add_space(SPACE_MD);
 
     ui.horizontal(|ui| {
+        let width = stat_column_width(ui.available_width());
         stat_column(
             ui,
             theme,
+            width,
             "In use",
             &crate::format::bytes(system.memory.used()),
         );
         stat_column(
             ui,
             theme,
+            width,
             "Available",
             &crate::format::bytes(system.memory.available),
         );
         stat_column(
             ui,
             theme,
+            width,
             "Committed",
             &format!(
                 "{} / {}",
@@ -444,6 +453,7 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         stat_column(
             ui,
             theme,
+            width,
             "Cached",
             &crate::format::bytes(system.memory.cached),
         );
@@ -452,9 +462,11 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
 
     widgets::section(ui, theme, "Kernel memory");
     ui.horizontal(|ui| {
+        let width = stat_column_width(ui.available_width());
         stat_column(
             ui,
             theme,
+            width,
             "Paged pool",
             &crate::format::bytes(system.memory.paged_pool),
         );
@@ -463,6 +475,7 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         stat_column(
             ui,
             theme,
+            width,
             "Non-paged pool",
             &crate::format::bytes(system.memory.nonpaged_pool),
         );
@@ -543,11 +556,25 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             );
             ui.add_space(SPACE_SM);
             ui.horizontal(|ui| {
-                stat_column(ui, theme, "Read", &crate::format::rate(disk.read_rate));
-                stat_column(ui, theme, "Write", &crate::format::rate(disk.write_rate));
+                let width = stat_column_width(ui.available_width());
                 stat_column(
                     ui,
                     theme,
+                    width,
+                    "Read",
+                    &crate::format::rate(disk.read_rate),
+                );
+                stat_column(
+                    ui,
+                    theme,
+                    width,
+                    "Write",
+                    &crate::format::rate(disk.write_rate),
+                );
+                stat_column(
+                    ui,
+                    theme,
+                    width,
                     "Free",
                     &format!(
                         "{} / {}",
@@ -609,16 +636,25 @@ fn network(app: &mut App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
                 );
                 ui.add_space(SPACE_XS);
                 ui.horizontal(|ui| {
+                    let width = stat_column_width(ui.available_width());
                     stat_column(
                         ui,
                         theme,
+                        width,
                         "Receive",
                         &crate::format::rate(adapter.receive_rate),
                     );
-                    stat_column(ui, theme, "Send", &crate::format::rate(adapter.send_rate));
                     stat_column(
                         ui,
                         theme,
+                        width,
+                        "Send",
+                        &crate::format::rate(adapter.send_rate),
+                    );
+                    stat_column(
+                        ui,
+                        theme,
+                        width,
                         "Link speed",
                         // Link speed is in bits per second; the byte
                         // formatter would report a gigabit adapter as
@@ -801,6 +837,7 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
                 stat_column(
                     ui,
                     theme,
+                    stat_column_width(ui.available_width()),
                     "Dedicated memory in use",
                     &crate::format::bytes(adapter.memory_used),
                 );
@@ -809,17 +846,55 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     });
 }
 
+/// The width [`stat_column`] gives each of a row's columns.
+///
+/// A fixed quarter of the row, not a quarter of however many columns
+/// happen to be in it — that is what lines a three-column row up with a
+/// four-column one above it, at the cost of a three-column row not
+/// stretching to fill the last quarter.
+///
+/// Callers must measure `available` **once**, before the row's first
+/// [`stat_column`] call, and pass the same value to every column in that
+/// row. Reading `ui.available_width()` freshly inside `stat_column`
+/// itself was the bug this exists to prevent: `ui.horizontal`'s own
+/// available width shrinks as each sibling is allocated, so a column
+/// computed after its neighbours already claimed space is a quarter of
+/// what was left rather than a quarter of the row — four calls in a row
+/// then produce four different widths, shrinking geometrically instead
+/// of matching.
+#[must_use]
+fn stat_column_width(available: f32) -> f32 {
+    // Four columns is three gaps between them, and `theme::apply` sets
+    // `ui.horizontal`'s own `item_spacing.x` to `SPACE_SM` — so claiming
+    // a plain quarter for each of the four, via `set_min_width` below,
+    // asks the row for `4 * quarter + 3 * SPACE_SM`, which is
+    // `3 * SPACE_SM` more than the row actually has. Left in, that
+    // overshoot is exactly what pushed the CPU panel's own drawn content
+    // past the window's real edge two levels up the call stack.
+    ((available - 3.0 * SPACE_SM) / 4.0).max(0.0)
+}
+
 /// One readout in a row of them.
 ///
-/// Each takes an equal share of the row, so a row of four lines up with a
-/// row of three above it rather than each column being as wide as its own
-/// value.
-fn stat_column(ui: &mut Ui, theme: &Palette, caption: &str, value: &str) {
-    let width = ui.available_width() / 4.0;
+/// Each takes an equal share of the row — see [`stat_column_width`] on
+/// why `width` is a parameter here rather than something this function
+/// measures for itself.
+fn stat_column(ui: &mut Ui, theme: &Palette, width: f32, caption: &str, value: &str) -> Response {
     ui.allocate_ui_with_layout(
         Vec2::new(width, 0.0),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
+            // `allocate_ui_with_layout` only gives this child a *ceiling*
+            // of `width` to wrap within — the space it actually claims
+            // back from the parent's cursor is its content's own
+            // measured size, which for two short lines of text is far
+            // narrower than a quarter of the row. Without pinning the
+            // minimum too, every column ends up exactly as wide as its
+            // own caption or value and no wider, so "Processes" (the
+            // longest caption in its row) reads as its own column while
+            // "Threads"/"Handles"/"Up time" bunch up together — four
+            // ransom-note widths rather than four equal ones.
+            ui.set_min_width(width);
             ui.label(
                 egui::RichText::new(caption)
                     .color(theme::rgb(theme.text_muted))
@@ -831,12 +906,175 @@ fn stat_column(ui: &mut Ui, theme: &Palette, caption: &str, value: &str) {
                     .text_style(egui::TextStyle::Monospace),
             );
         },
-    );
+    )
+    .response
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_width_rect_inside_detail_stays_off_the_window_edge() -> anyhow::Result<()> {
+        // Exercises the exact mechanism `detail()` relies on — a
+        // `ScrollArea` whose ui gets `set_max_width` before anything
+        // fills it — rather than re-deriving the arithmetic by hand, so
+        // a change to how that composes (a different scroll style, a
+        // different order of calls) would fail this test too, not just
+        // a formula.
+        let window_width = 1024.0;
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(window_width, 768.0),
+            )),
+            ..Default::default()
+        };
+        let mut rect = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let width = (ui.available_width() - SPACE_MD).max(0.0);
+                    ui.set_max_width(width);
+                    let (r, _) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 50.0), Sense::hover());
+                    rect = Some(r);
+                });
+        });
+        output.textures_delta.clear();
+
+        let rect = rect.ok_or_else(|| anyhow::anyhow!("the rect was never allocated"))?;
+        let margin = window_width - rect.right();
+        assert!(
+            margin >= SPACE_MD,
+            "a full-width rect inside the detail column left only {margin} \
+             from the window edge, wanted at least {SPACE_MD}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_cpu_panel_leaves_the_window_edge_through_the_real_central_panel() -> anyhow::Result<()> {
+        // One level up from the test above: goes through
+        // `theme::content()`'s own frame (`CentralPanel`'s margin,
+        // `PAD`) and calls the real `cpu()` panel, not a stand-in for
+        // it — so a regression in either layer, or in how the two
+        // compose, fails this rather than only the narrower test.
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1024.0, 768.0));
+        let mut app = App::new(crate::config::Config::default());
+        let theme = app.theme.clone();
+        // Sixteen cores, so the core grid actually draws — it is the
+        // element the "cut off by edge" report was screenshotted
+        // against, and `cpu()` skips it entirely while this is empty.
+        app.performance.cores = vec![crate::model::history::Series::new(60); 16];
+        let system = SystemSample {
+            cpu: crate::model::CpuSample {
+                logical_cores: 16,
+                physical_cores: 8,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(window),
+            ..Default::default()
+        };
+        let mut min_rect = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default()
+                .frame(theme::content(&theme))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let width = (ui.available_width() - SPACE_MD).max(0.0);
+                            ui.set_max_width(width);
+                            cpu(&app, ui, &theme, &system);
+                            min_rect = Some(ui.min_rect());
+                        });
+                });
+        });
+        output.textures_delta.clear();
+
+        let min_rect = min_rect.ok_or_else(|| anyhow::anyhow!("cpu() drew nothing"))?;
+        let margin = window.right() - min_rect.right();
+        assert!(
+            margin >= SPACE_MD,
+            "the real cpu() panel, drawn through the real CentralPanel \
+             frame, left only {margin} from the window's right edge, \
+             wanted at least {SPACE_MD}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stat_column_width_leaves_room_for_the_three_gaps_between_four_columns() {
+        // A fixed unit, not a quarter of however many columns this
+        // particular row has — see the function's own docs on why a
+        // three-column row still divides by four. And not a bare
+        // quarter either: `set_min_width` forces every column to claim
+        // this width exactly, so if the four widths plus the three gaps
+        // `ui.horizontal` inserts between them summed to more than
+        // `available`, the row would overflow it — which is the
+        // regression this guards.
+        let available = 400.0;
+        let width = stat_column_width(available);
+        let claimed = 4.0 * width + 3.0 * SPACE_SM;
+        assert!(
+            claimed <= available,
+            "four columns of {width} plus three {SPACE_SM}-wide gaps is \
+             {claimed}, which overflows the {available} available"
+        );
+        assert!((stat_column_width(0.0) - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_row_of_stat_columns_are_all_the_same_width() -> anyhow::Result<()> {
+        // The regression this guards: `stat_column` used to give its
+        // child ui only a *ceiling* to wrap text within, and the space
+        // it actually claimed back from the row was its own content's
+        // measured size — so a caption longer than its neighbours (like
+        // "Processes" beside "Threads"/"Handles"/"Up time") produced a
+        // wider column purely because the word is longer, not because
+        // the layout intended it. `ui.set_min_width` inside
+        // `stat_column` is what makes the allocated width the real one.
+        let app = App::new(crate::config::Config::default());
+        let theme = app.theme.clone();
+        let ctx = egui::Context::default();
+        let mut widths = Vec::new();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            ui.horizontal(|ui| {
+                let width = stat_column_width(ui.available_width());
+                // Deliberately mismatched caption and value lengths —
+                // the exact shape that exposed the bug.
+                for (caption, value) in [
+                    ("Processes", "581"),
+                    ("Threads", "9,125"),
+                    ("Handles", "226,047"),
+                    ("Up time", "2d 1:57:44"),
+                ] {
+                    let response = stat_column(ui, &theme, width, caption, value);
+                    widths.push(response.rect.width());
+                }
+            });
+        });
+        output.textures_delta.clear();
+
+        assert_eq!(widths.len(), 4);
+        for (index, width) in widths.iter().enumerate() {
+            assert!(
+                (width - widths[0]).abs() < 0.5,
+                "column {index} is {width} wide but column 0 is {}; every \
+                 column in a row must be the same width regardless of its \
+                 own content, got {widths:?}",
+                widths[0]
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn a_percentage_resource_has_a_fixed_axis_and_a_rate_does_not() {

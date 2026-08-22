@@ -320,13 +320,22 @@ pub fn legend(ui: &mut Ui, theme: &Palette, color: Rgb, label: &str, value: &str
                 .color(theme::rgb(theme.text_muted))
                 .text_style(TextStyle::Small),
         );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(value)
-                    .color(theme::rgb(theme.text))
-                    .text_style(TextStyle::Monospace),
-            );
-        });
+        ui.add_space(SPACE_XS);
+        // A plain label, not `Layout::right_to_left` — that layout
+        // justifies against the *whole remaining row*, not against this
+        // legend entry's own few pixels. Harmless when `legend` is the
+        // only thing in its row; call it twice in one `ui.horizontal`,
+        // as the CPU panel does for Total and Kernel, and the first
+        // entry's value claims every pixel left in the row to
+        // right-align against, leaving the second entry nothing to draw
+        // into and inflating the row's own measured width far past what
+        // was actually available — which is what was cutting the panel
+        // off against the window's real edge two entries down the tree.
+        ui.label(
+            egui::RichText::new(value)
+                .color(theme::rgb(theme.text))
+                .text_style(TextStyle::Monospace),
+        );
     });
     ui.add_space(SPACE_XS);
 }
