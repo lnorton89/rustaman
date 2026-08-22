@@ -354,6 +354,56 @@ table form one column.
 bare number. If you want a value between two steps, the answer is one of
 the two steps.
 
+### A table row is one row, and one function paints it
+
+Every table draws through `widgets::row_background` — the stripe, the
+hover lift and the selection bar together, across the **whole** row.
+
+Two things make that harder than it sounds, and both have already been
+got wrong once.
+
+A table cell's painter is clipped to that cell, so the fill has to be
+painted from the *first* cell and widened. `Painter::with_clip_rect`
+**intersects** with the clip already in force, so it undoes the widening
+on the next line; `set_clip_rect` replaces it. Every table in the app
+drew its stripes across one column for as long as that was wrong, under
+a comment explaining that it had been fixed.
+`a_row_background_fills_the_row_and_not_just_its_first_cell` checks the
+painted shape against its own clip rect, because a bounds-only check
+passes on the broken version.
+
+And a resizable `egui_extras` table paints a rule at every column
+boundary, the full height of the scroll area and on down through the
+empty space below the last row. `theme::quiet_column_rules` silences the
+resting stroke for a table's own `Ui` and leaves the hovered and dragged
+ones alone, so the resize affordance survives and the grid does not. Call
+it before building any table.
+
+**A colour that encodes nothing is worse than no colour.** The metric
+cells spend colour on load, the chips on status, the graphs on series
+identity, and the Network panel's dots on an adapter's state. The
+process rows used to carry a hue hashed from the process key, at the
+leading edge of the row, meaning nothing at all — and it won, because it
+was leftmost.
+
+### An `egui_extras` column keeps its width whatever the pane can afford
+
+Only a `remainder()` shrinks, and a table that overruns its pane neither
+clips nor scrolls: it paints over whatever is beside it. The Details
+table drew its last three columns across the inspector, and over the
+inspector's own empty-state message, for exactly this reason.
+
+So a table's stated widths have to fit the window the app opens at
+(`config::Config::default`, 1440 points) *including* whatever else is on
+screen beside it, and `every_details_column_fits_the_default_window`
+holds the widest table to it.
+
+`egui::Panel::right` is not a fix for that: it reserves its width by
+moving the parent's cursor, and in a top-down layout
+`available_rect_before_wrap` is derived from the parent's `max_rect`, so
+a table measuring itself never sees the reservation. `details::draw`
+splits the pane by hand and hands each half an explicit `max_rect`.
+
 ### `bg_fill` and `weak_bg_fill` are not interchangeable
 
 egui paints buttons from `weak_bg_fill` and filled controls — scrollbar

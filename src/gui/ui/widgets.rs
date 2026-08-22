@@ -939,4 +939,72 @@ mod tests {
              ramp has picked up a duration of its own"
         );
     }
+
+    #[test]
+    fn a_row_background_fills_the_row_and_not_just_its_first_cell() -> anyhow::Result<()> {
+        // The bug this guards survived a comment explaining that it had
+        // been fixed. `row_background` widened its rect to the row and
+        // then clipped it with `Painter::with_clip_rect`, which
+        // *intersects* with the clip already in force — the cell — so
+        // the widening was undone on the next line and every stripe,
+        // hover and selection in the app covered one column.
+        //
+        // Checked against the painted shape rather than the arithmetic,
+        // and against the shape's own clip rect as well as its bounds:
+        // the previous version produced a correctly-sized rect that was
+        // then clipped away, so a bounds-only assertion would have
+        // passed on the broken code.
+        use super::super::theme;
+        use super::row_background;
+        use egui::{Rect, Sense, Shape, Vec2};
+
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 200.0));
+        let theme = crate::theme::Catalog::load().get(None).clone();
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, &theme);
+        let input = egui::RawInput {
+            screen_rect: Some(window),
+            ..Default::default()
+        };
+
+        let mut viewport = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            let row = ui.available_rect_before_wrap();
+            viewport = Some(row);
+            // A narrow child `Ui` standing in for a table's first cell,
+            // clipped to itself the way `egui_extras` clips one.
+            let cell = Rect::from_min_size(row.min, Vec2::new(90.0, theme::ROW_HEIGHT));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(cell), |ui| {
+                ui.set_clip_rect(cell);
+                ui.allocate_exact_size(cell.size(), Sense::hover());
+                row_background(ui, &theme, row, egui::Id::new("row"), true, false, false);
+            });
+        });
+        output.textures_delta.clear();
+
+        let viewport = viewport.ok_or_else(|| anyhow::anyhow!("nothing was drawn"))?;
+        let painted = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| {
+                // `if let` rather than a `match` with a wildcard: the
+                // crate denies `wildcard_enum_match_arm`, and naming
+                // eleven `epaint::Shape` variants to say "not a rect"
+                // would be a list this test has to maintain against a
+                // dependency's enum.
+                if let Shape::Rect(rect) = &clipped.shape {
+                    Some(rect.rect.intersect(clipped.clip_rect).width())
+                } else {
+                    None
+                }
+            })
+            .fold(0.0f32, f32::max);
+
+        assert!(
+            painted >= viewport.width() - 1.0,
+            "the widest painted row fill is {painted} points inside its own              clip, but the row is {} — the fill is being clipped back to              the cell it was widened out of",
+            viewport.width()
+        );
+        Ok(())
+    }
 }
