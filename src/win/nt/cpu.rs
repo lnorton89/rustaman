@@ -37,7 +37,7 @@ use super::types::{
     SystemProcessorPerformanceInformation, PROCESSOR_PERFORMANCE_SIZE,
     SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_CLASS,
 };
-use super::{query, InfoBuffer, QueryError};
+use super::{query_exact, InfoBuffer, QueryError};
 
 /// One logical processor's cumulative times, in 100ns ticks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -113,8 +113,13 @@ impl Utilisation {
 /// Reads every logical processor's cumulative times.
 ///
 /// One entry per logical processor, in the order Windows numbers them.
+///
+/// Goes through [`query_exact`] rather than [`super::query`]: this class
+/// mismatches even against an oversized buffer, so the generic
+/// grow-and-retry protocol can never converge for it. See
+/// `query_exact`'s docs.
 pub fn read(buffer: &mut InfoBuffer) -> Result<Vec<CoreTimes>, QueryError> {
-    query(SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_CLASS, buffer)?;
+    query_exact(SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_CLASS, buffer)?;
     Ok(parse(buffer.filled()))
 }
 
@@ -202,9 +207,28 @@ pub fn overall(previous: &[CoreTimes], current: &[CoreTimes]) -> Utilisation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     /// One second, in the 100ns ticks these counters use.
     const SECOND: u64 = 10_000_000;
+
+    #[test]
+    fn this_machine_reports_its_own_per_core_times() -> Result<()> {
+        // The regression this guards against: `read` used to go through
+        // `super::query`, whose grow-and-retry protocol assumes a bigger
+        // buffer eventually succeeds. `SystemProcessorPerformanceInformation`
+        // mismatches even against an oversized one, so that call failed on
+        // every real machine, on every sample, and `sample_cpu` silently
+        // swallowed the error — every process's per-core graph, and the
+        // machine's own total CPU figure, read as permanently idle.
+        let mut buffer = InfoBuffer::new();
+        let cores = read(&mut buffer)?;
+        assert!(
+            !cores.is_empty(),
+            "a running machine reports at least one logical processor"
+        );
+        Ok(())
+    }
 
     #[test]
     fn an_idle_core_reads_as_idle() {

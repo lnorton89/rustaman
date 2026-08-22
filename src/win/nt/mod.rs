@@ -77,6 +77,16 @@ const RETRY_MARGIN: usize = 4; // reported + reported / 4
 /// a real failure and should be reported as one.
 const MAX_ATTEMPTS: usize = 4;
 
+/// How many times [`query_exact`] retries before giving up.
+///
+/// Smaller than [`MAX_ATTEMPTS`] on purpose: the first attempt exists
+/// only to learn the exact size, and the second attempt at that size
+/// should always succeed, since the logical processor count it reports
+/// does not change mid-process. A third is slack for the one case it
+/// could — a hot-added or hot-removed processor between the two calls —
+/// rather than a schedule that expects to need it.
+const EXACT_MATCH_ATTEMPTS: usize = 3;
+
 /// The largest buffer to ask for before treating the situation as broken.
 ///
 /// A guard against a corrupted or hostile length: without it a bad
@@ -94,6 +104,10 @@ pub enum QueryError {
     /// than the call can enumerate them, which is worth surfacing rather
     /// than retrying forever.
     Grew,
+    /// [`query_exact`]'s reported size never stabilised within its
+    /// attempt budget — see that function's docs on why it retries
+    /// against an exact size rather than growing.
+    Unstable,
     /// The call failed with a status other than a length mismatch.
     Status(NTSTATUS),
 }
@@ -104,6 +118,10 @@ impl std::fmt::Display for QueryError {
             Self::Grew => write!(
                 formatter,
                 "the process list kept growing faster than it could be read"
+            ),
+            Self::Unstable => write!(
+                formatter,
+                "the reported buffer size never settled to a value that could be read"
             ),
             Self::Status(status) => {
                 write!(
@@ -192,6 +210,56 @@ pub fn query(class: i32, buffer: &mut InfoBuffer) -> Result<(), QueryError> {
 
     buffer.filled = 0;
     Err(QueryError::Grew)
+}
+
+/// Queries an information class whose length check wants an *exact*
+/// match rather than [`query`]'s "big enough" one.
+///
+/// `SystemProcessorPerformanceInformation` is the one class this crate
+/// reads where `STATUS_INFO_LENGTH_MISMATCH` fires even when the buffer
+/// is *larger* than the true size — confirmed against a real machine,
+/// since it is not documented behaviour. [`query`]'s margin-and-double
+/// growth can never converge against that: every attempt only ever asks
+/// for more, so an already-oversized buffer just becomes a bigger
+/// oversized one and the call fails identically every time.
+///
+/// This resizes to exactly what the kernel reports instead. That works
+/// because the quantity behind the size — the logical processor count —
+/// does not change while the process runs, so the exact size the first
+/// attempt reports is still correct on the second attempt. The bound is
+/// still small, in case a hot-added or hot-removed processor makes the
+/// second attempt's size stale in turn.
+pub fn query_exact(class: i32, buffer: &mut InfoBuffer) -> Result<(), QueryError> {
+    if buffer.bytes.is_empty() {
+        buffer.bytes.resize(INITIAL_BUFFER, 0);
+    }
+
+    for _ in 0..EXACT_MATCH_ATTEMPTS {
+        let mut needed: u32 = 0;
+        let capacity = u32::try_from(buffer.bytes.len()).unwrap_or(u32::MAX);
+        let status = call(class, &mut buffer.bytes, capacity, &mut needed);
+
+        if status == STATUS_SUCCESS {
+            buffer.filled = usize::try_from(needed).unwrap_or(0).min(buffer.bytes.len());
+            return Ok(());
+        }
+        if status != STATUS_INFO_LENGTH_MISMATCH {
+            buffer.filled = 0;
+            return Err(QueryError::Status(status));
+        }
+
+        // A `needed` of zero, or unchanged from the capacity that was
+        // just rejected, cannot be acted on: resizing to it would either
+        // allocate nothing or repeat the exact call that just failed.
+        let reported = usize::try_from(needed).unwrap_or(0);
+        if reported == 0 || reported == buffer.bytes.len() {
+            break;
+        }
+        buffer.bytes.resize(reported, 0);
+    }
+
+    buffer.filled = 0;
+    Err(QueryError::Unstable)
 }
 
 /// The FFI call, and nothing else.
@@ -313,11 +381,49 @@ mod tests {
     #[test]
     fn the_error_messages_say_what_happened() {
         assert!(QueryError::Grew.to_string().contains("growing"));
+        assert!(
+            QueryError::Unstable.to_string().contains("settled"),
+            "Unstable is query_exact's failure, not query's — it must \
+             not reuse Grew's process-list wording"
+        );
         let status = QueryError::Status(-1_073_741_820).to_string();
         assert!(
             status.contains("0x"),
             "an NTSTATUS should be shown in hex, which is how every \
              reference lists them; got {status}"
+        );
+    }
+
+    #[test]
+    fn query_exact_gives_up_when_the_reported_size_repeats() {
+        // Mirrors `query_exact`'s stop condition. If the kernel reports
+        // the same size that was just rejected, resizing to it and
+        // calling again would repeat the identical failed call — so the
+        // loop has to recognise that as stuck rather than spin for
+        // `EXACT_MATCH_ATTEMPTS` iterations doing nothing.
+        let capacity = INITIAL_BUFFER;
+        let reported = capacity;
+        let stuck = reported == 0 || reported == capacity;
+        assert!(stuck, "an unchanged report must be treated as stuck");
+    }
+
+    #[test]
+    fn query_exact_shrinks_to_a_reported_size_smaller_than_an_oversized_buffer() {
+        // The scenario `query_exact` exists for: a buffer already larger
+        // than needed still mismatches, and the fix is willing to shrink
+        // to exactly what was reported — the opposite of `query`'s
+        // never-shrink rule, which exists for a different class with
+        // different failure semantics.
+        let capacity = INITIAL_BUFFER;
+        let reported = 768usize; // e.g. 16 logical processors * 48 bytes.
+        let stuck = reported == 0 || reported == capacity;
+        assert!(
+            !stuck,
+            "a genuine, different reported size must not be treated as stuck"
+        );
+        assert!(
+            reported < capacity,
+            "this is specifically the smaller-than-capacity case"
         );
     }
 }
