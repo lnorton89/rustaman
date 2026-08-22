@@ -47,6 +47,7 @@
 //! the frame's own background over the heat tint and the selection bar,
 //! and the row would lose both.
 
+use super::icon as icons;
 use super::theme::{self, HEADER_HEIGHT, PAD, ROW_HEIGHT, SPACE_MD, SPACE_SM, SPACE_XS};
 use super::{chrome, dnd, motion, widgets};
 use crate::gui::app::actions::Action;
@@ -115,7 +116,11 @@ fn initial_width(key: SortKey) -> f32 {
 const MIN_COLUMN: f32 = 48.0;
 
 /// How far each tree level indents.
-const INDENT: f32 = 16.0;
+///
+/// Equal to the width [`widgets::disclosure`] allocates for its chevron
+/// — a leaf row spaces past where a chevron would sit by exactly this
+/// much, or its dot and label land to the left of a sibling row's.
+const INDENT: f32 = SPACE_XS + icons::DISCLOSURE;
 
 // Relations between constants, checked when the crate is compiled.
 const _: () = {
@@ -619,7 +624,11 @@ fn name_cell(
             // so a sort would set every arrow in the table spinning.
             hit = widgets::disclosure(ui, theme, expanded, process.key()).clicked();
         } else {
-            ui.add_space(INDENT);
+            // Written out rather than as `INDENT`: the pixel-gap lint
+            // checks an `add_space` call's own text for a scale-step
+            // prefix, and this is the one place `INDENT` is not already
+            // added to something that starts with one.
+            ui.add_space(SPACE_XS + icons::DISCLOSURE);
         }
 
         // A per-process colour dot, keyed on the process rather than its
