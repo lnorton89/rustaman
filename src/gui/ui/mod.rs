@@ -54,6 +54,42 @@ use crate::gui::app::actions::Action;
 use crate::gui::app::{App, View};
 use egui::{Key, Ui};
 
+/// Fades and lifts a view into place as it arrives.
+///
+/// A view that simply replaces the last one gives the user no idea where
+/// the new content came from, and switching between two dense tables
+/// reads as a flicker rather than as navigation. A short fade upward
+/// answers "this is new, and it arrived from below".
+///
+/// It works by setting the `Ui`'s opacity and nudging the layout's
+/// origin, both of which apply to everything drawn afterwards — so no
+/// individual view has to know it is being animated, and a view added
+/// later gets the transition without doing anything.
+///
+/// Everything is left alone once the transition finishes, rather than
+/// being multiplied by 1.0 forever: a permanently non-opaque `Ui` forces
+/// egui to composite the whole panel to its own layer every frame, which
+/// is real cost for no visible effect.
+fn enter_view(app: &App, ui: &mut Ui) {
+    /// How far the content rises as it arrives. Small: this is a hint at
+    /// a direction, not a slide.
+    const RISE: f32 = 6.0;
+
+    // Keyed on the view, so switching *to* a view restarts its own
+    // animation rather than continuing whatever the last one was doing.
+    let progress = motion::transition(
+        ui.ctx(),
+        egui::Id::new("view-enter").with(app.view),
+        true,
+        motion::ENTER,
+    );
+    if progress >= 1.0 {
+        return;
+    }
+    ui.set_opacity(progress);
+    ui.add_space(RISE * (1.0 - progress));
+}
+
 /// Draws one frame.
 pub fn draw(app: &mut App, ui: &mut Ui) {
     // Installed before anything paints, so no widget can be drawn under
@@ -80,13 +116,16 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
 
     egui::CentralPanel::default()
         .frame(theme::content(&app.theme))
-        .show(ui, |ui| match app.view {
-            View::Processes => processes::draw(app, ui),
-            View::Performance => performance::draw(app, ui),
-            View::Details => details::draw(app, ui),
-            View::Services => services::draw(app, ui),
-            View::Startup => services::draw_startup(app, ui),
-            View::Settings => settings::draw(app, ui),
+        .show(ui, |ui| {
+            enter_view(app, ui);
+            match app.view {
+                View::Processes => processes::draw(app, ui),
+                View::Performance => performance::draw(app, ui),
+                View::Details => details::draw(app, ui),
+                View::Services => services::draw(app, ui),
+                View::Startup => services::draw_startup(app, ui),
+                View::Settings => settings::draw(app, ui),
+            }
         });
 
     if app.custom_chrome {

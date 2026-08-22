@@ -164,7 +164,39 @@ not reproduce where it was written.
 
 ---
 
-## 4. The graphs
+## 4. Motion costs frames, and that is the trade
+
+Cells, meters and graphs animate to their new values over
+`motion::SETTLE` (0.35s) rather than jumping. An egui animation requests
+a repaint while it is running, so with a one-second sampling interval the
+window is now redrawing for roughly a third of each second instead of
+once per second.
+
+That is a deliberate trade, and it is worth being explicit about which
+way it goes. A table of four hundred live numbers that *replace*
+themselves once a second is close to unreadable — the eye registers the
+whole grid changing at once as flicker, not as information. Sliding
+values stay legible while they move and carry the direction of the change
+as well as its magnitude.
+
+The cost is bounded by the same thing that bounds everything else here:
+only visible rows are drawn, so it is thirty rows' worth of interpolation
+per frame, not four hundred. Two rules keep it that way:
+
+- **Animate in the draw path, never in the sampler.** The sampler
+  publishes real readings. Smoothing is a property of the display.
+- **Key every animation on the thing, not its position.** An id built
+  from a row index makes a re-sort animate every row to the value of
+  whatever used to be in its slot — which is both wrong and the most
+  expensive thing the table could possibly do.
+
+When the machine is idle and nothing is changing, every animation
+converges and the window goes back to redrawing once per sample.
+`motion::Tween` snaps its last fraction of a pixel for exactly this
+reason: an asymptotic approach never arrives, so the window would ask for
+frames forever over a difference nobody can see.
+
+## 5. The graphs
 
 `model::history` holds fixed-size ring buffers. A ring buffer, not a
 `Vec` with a `drain(..1)`: the graphs keep a couple of minutes of history
@@ -184,7 +216,7 @@ drawing.
 
 ---
 
-## 5. If you are about to measure something
+## 6. If you are about to measure something
 
 Two things that will mislead you:
 

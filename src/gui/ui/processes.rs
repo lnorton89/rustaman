@@ -48,7 +48,7 @@
 //! and the row would lose both.
 
 use super::theme::{self, HEADER_HEIGHT, PAD, ROW_HEIGHT, SPACE_MD, SPACE_SM, SPACE_XS};
-use super::{chrome, dnd, widgets};
+use super::{chrome, dnd, motion, widgets};
 use crate::gui::app::actions::Action;
 use crate::gui::app::{rows::RowKey, App};
 use crate::model::sort::SortKey;
@@ -661,26 +661,55 @@ fn metric_cell(
     // common thing a task manager is opened to find.
     let aggregated = !expanded && totals.processes > 1;
 
+    // The continuous metrics slide to their new readings rather than
+    // replacing them.
+    //
+    // This is the difference between a table that is readable while it
+    // updates and one that is not. Samples arrive once a second, so
+    // un-animated the whole grid sits still and then every cell changes
+    // at once — which the eye reads as the display flickering rather than
+    // as the machine's state moving. Sliding numbers stay legible
+    // throughout, and the movement itself carries information no single
+    // frame can: a column where everything is drifting upward is a
+    // machine getting busier.
+    //
+    // Keyed on the process and the column, not the row index — the table
+    // re-sorts constantly, and keyed on position a row would animate to
+    // the value of whatever used to be in its slot.
+    let smooth = |ui: &Ui, value: f64| -> f64 {
+        let id = egui::Id::new("cell")
+            .with(process.key())
+            .with(key)
+            .with(aggregated);
+        f64::from(motion::value(ui.ctx(), id, value as f32))
+    };
+
     let (text, load) = match key {
         SortKey::Pid => (process.pid.to_string(), 0.0),
         SortKey::Status => (process.status.label().to_string(), 0.0),
         SortKey::Cpu => {
-            let value = if aggregated {
-                totals.cpu_percent
-            } else {
-                process.cpu_percent
-            };
+            let value = smooth(
+                ui,
+                if aggregated {
+                    totals.cpu_percent
+                } else {
+                    process.cpu_percent
+                },
+            );
             (
                 crate::format::percent_or_dash(value),
                 (value / 100.0) as f32,
             )
         }
         SortKey::Memory => {
-            let value = if aggregated {
-                totals.working_set
-            } else {
-                process.working_set
-            };
+            let value = smooth(
+                ui,
+                if aggregated {
+                    totals.working_set
+                } else {
+                    process.working_set
+                } as f64,
+            ) as u64;
             // Scaled against a gigabyte rather than against the machine's
             // memory: the tint is asking "is this a lot for a process",
             // and on a 128 GB machine every process would otherwise be
@@ -691,11 +720,14 @@ fn metric_cell(
             )
         }
         SortKey::Disk => {
-            let value = if aggregated {
-                totals.disk_rate
-            } else {
-                process.disk_rate()
-            };
+            let value = smooth(
+                ui,
+                if aggregated {
+                    totals.disk_rate
+                } else {
+                    process.disk_rate()
+                },
+            );
             // Against 100 MB/s, which is a busy disk for one process.
             (
                 crate::format::rate_or_dash(value),
@@ -718,11 +750,14 @@ fn metric_cell(
             )
         }
         SortKey::Gpu => {
-            let value = if aggregated {
-                totals.gpu_percent
-            } else {
-                process.gpu_percent
-            };
+            let value = smooth(
+                ui,
+                if aggregated {
+                    totals.gpu_percent
+                } else {
+                    process.gpu_percent
+                },
+            );
             (
                 crate::format::percent_or_dash(value),
                 (value / 100.0) as f32,

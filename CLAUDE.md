@@ -258,6 +258,63 @@ in-gamut colour at the same hue and lightness, rather than clipping
 channels — clipping shifts the hue, which is how you get a "red" that has
 gone orange only in the themes with a bright accent.
 
+### Icons are geometry; nothing is set in a font
+
+`src/icon.rs` holds twenty-two icons as polylines on a shared 16×16 grid;
+`gui/ui/icon.rs` strokes them in the theme's colour.
+
+This is not a stylistic choice. The app originally used Unicode
+characters — `U+25B8` for a disclosure arrow, `U+2699` for settings, the
+three window-control codepoints — and **every one of them shipped as an
+empty box.** egui bundles Ubuntu Sans, Hack and an emoji subset, which
+cover Latin, Greek, Cyrillic and a few hundred emoji and almost nothing
+in Geometric Shapes, Miscellaneous Symbols or Dingbats.
+
+`no_drawing_module_sets_an_icon_in_a_font` scans for pictographic
+codepoints and fails the build. Typographic punctuation (an em dash, a
+middle dot, an ellipsis) is explicitly fine — the rule is about
+pictographs.
+
+Three tests guard the set itself, and all three catch things that are
+invisible in review: every icon stays inside its grid, is optically
+centred, and reaches far enough across the grid to look like a member of
+the same set. The third one rejected the first drag grip.
+
+### Every animation goes through `motion`, and there are four durations
+
+`src/motion.rs` owns the curves and the durations; `gui/ui/motion.rs` is
+the egui binding and is **the only file allowed to call `ctx.animate_*`**.
+`no_drawing_module_animates_by_hand` fails the build for a call anywhere
+else, and `no_drawing_module_holds_a_bare_duration` for a number passed
+to one of the helpers.
+
+The four are `INSTANT` (a hover), `QUICK` (a selection, a disclosure),
+`SETTLE` (the machine's own state arriving) and `ENTER` (a whole view).
+Each has a job; a fifth would be one of these with a different number,
+which is the drift the module exists to stop. Their relationships are
+compile-time assertions.
+
+**Key every animation on the thing, not its position.** An id built from
+a loop index animates the *slot*: re-sort the table and every row
+inherits the animation state of whatever used to be there, so the whole
+table flashes. Derive ids from a `ProcessKey`, a service name, a column.
+
+### Drag and drop lives in `dnd`, feedback included
+
+One `Lane` serves every reorderable list. Not because the code is long,
+but because a reorder is almost entirely *feedback* — a dimmed source, a
+ghost on the pointer, an indicator at the drop gap, and nothing at all
+when the drop would be ignored — and a view tracking its own
+`dragging: Option<usize>` implements some subset of those and the next
+view a different subset. `no_drawing_module_carries_its_own_drag_state`
+fails the build for a view that reads `drag_started` itself.
+
+The pointer resolves to the **gap** it is nearest, never the item it is
+over: resolving to an item leaves a dead zone in the middle of each one
+and makes the position after the last item unreachable. Converting a gap
+back to an index is `model::columns::landing`, which is portable so the
+off-by-one is tested everywhere rather than only on the Windows CI job.
+
 ### No hand-picked pixel gaps
 
 Every margin, inset and `add_space` is one of `SPACE_XS` / `SPACE_SM` /
