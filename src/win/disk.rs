@@ -45,10 +45,11 @@ use super::handle::OwnedHandle;
 use super::strings;
 use windows_sys::Win32::Foundation::MAX_PATH;
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, GetDiskFreeSpaceExW, GetLogicalDrives, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, FILE_ATTRIBUTE_NORMAL,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Ioctl::{DISK_PERFORMANCE, IOCTL_DISK_PERFORMANCE};
+use windows_sys::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE};
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
 /// The highest physical drive number to probe.
@@ -221,6 +222,19 @@ pub fn volumes() -> Vec<Volume> {
             continue;
         };
         let root = format!("{letter}:\\");
+        // Asked what kind of drive it is *before* asking anything of the
+        // drive itself. `GetDriveTypeW` reads the mount table and cannot
+        // block; `GetDiskFreeSpaceExW` talks to the device and can block
+        // for as long as the device takes to answer — which for a
+        // network drive whose server has gone is the redirector's whole
+        // timeout, once per second, for as long as the app is open.
+        //
+        // Network and optical drives are excluded on their own merits
+        // too: this list exists to describe the machine's *physical*
+        // disks, and neither is one.
+        if !is_local_disk(&root) {
+            continue;
+        }
         let Some((capacity, free)) = free_space(&root) else {
             // A card reader with no card, or a disconnected network
             // drive. Skipped rather than shown as a zero-byte volume.
@@ -242,6 +256,21 @@ pub fn volumes() -> Vec<Volume> {
 fn logical_drives() -> u32 {
     // SAFETY: takes no arguments, returns a bitmask, cannot fail.
     unsafe { GetLogicalDrives() }
+}
+
+/// Whether a drive letter names a disk attached to this machine.
+///
+/// `DRIVE_FIXED` and `DRIVE_REMOVABLE` — an internal disk and a USB
+/// stick. Everything else is either not a disk (`DRIVE_REMOTE` is a
+/// share on another machine, `DRIVE_RAMDISK` is memory) or is one that
+/// makes the caller wait while it finds out (`DRIVE_CDROM` spins media
+/// up).
+fn is_local_disk(root: &str) -> bool {
+    let wide = strings::to_wide(root);
+    // SAFETY: `wide` is a live, NUL-terminated UTF-16 path bound to a
+    // local. The call reads it and retains nothing.
+    let kind = unsafe { GetDriveTypeW(wide.as_ptr()) };
+    kind == DRIVE_FIXED || kind == DRIVE_REMOVABLE
 }
 
 /// A volume's total and free bytes.
@@ -293,6 +322,28 @@ const _: () = assert!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_volume_comes_from_a_drive_that_can_block() {
+        // `volumes()` runs on the sampler thread once a second, and
+        // `GetDiskFreeSpaceExW` talks to the device. On a network drive
+        // whose server has gone that blocks for the redirector's whole
+        // timeout; on optical media it waits for a spin-up. Neither is a
+        // physical disk, which is what this list is for, so neither
+        // should ever be reached.
+        //
+        // Checked against the drive type of what came back rather than
+        // against the filter's source, because the filter is only worth
+        // anything if it is the thing deciding the result.
+        for volume in volumes() {
+            let root = format!("{}\\", volume.letter);
+            assert!(
+                is_local_disk(&root),
+                "{} is in the volume list but is not a local disk —                  querying it can park the sampler on a device timeout",
+                volume.letter
+            );
+        }
+    }
 
     /// One second, in the 100ns ticks these counters use.
     const SECOND: u64 = 10_000_000;

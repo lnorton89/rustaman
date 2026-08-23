@@ -64,6 +64,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
     "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics_ToolHelp",
+    # SetThreadErrorMode: stops a not-ready device putting a modal
+    # "insert a disk" dialog in front of the sampler thread and blocking
+    # it there. See win::system::suppress_device_error_dialogs.
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
     "Win32_System_Kernel",

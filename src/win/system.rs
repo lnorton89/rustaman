@@ -30,10 +30,69 @@
 //! distrust every other number on the page.
 
 use super::strings;
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    SetThreadErrorMode, SEM_FAILCRITICALERRORS, THREAD_ERROR_MODE,
+};
 use windows_sys::Win32::System::SystemInformation::{
     GetLogicalProcessorInformationEx, GetSystemInfo, GetTickCount64, RelationProcessorCore,
     SYSTEM_INFO,
 };
+
+/// Stops Windows putting a modal error dialog in front of this thread
+/// when a device it touches is not ready.
+///
+/// **This is the fix for the app hanging on close**, and the reason is
+/// not obvious from any of the call sites it protects.
+///
+/// By default, a call that reaches a device with no media — a card
+/// reader with nothing in it, an optical drive with the tray open, a
+/// USB slot whose stick was pulled — makes the system raise a *hard
+/// error*: the "There is no disk in the drive. Please insert a disk into
+/// drive E:" box. That dialog is modal and it **blocks the thread that
+/// made the call until somebody dismisses it**. Raised from a background
+/// thread it need not appear anywhere near the app's own window, so what
+/// the user sees is not a dialog to answer. It is a task manager that
+/// has stopped responding.
+///
+/// The sampler walks every drive letter on the machine once a second
+/// (see [`super::disk::volumes`]), so it is exposed to this constantly,
+/// and the exposure grows with how long the app has been open — a stick
+/// pulled at any point in a long session arms it.
+///
+/// `SEM_FAILCRITICALERRORS` turns that dialog into an error return,
+/// which every caller here already handles. Set per **thread** rather
+/// than through `SetErrorMode`, which is process-wide and would reach
+/// into whatever else is running.
+///
+/// Returns whether the mode was accepted; a machine where it was not is
+/// one where the dialogs are still possible, which is worth a test
+/// rather than a silent assumption.
+pub fn suppress_device_error_dialogs() -> bool {
+    let mut previous: THREAD_ERROR_MODE = 0;
+    // SAFETY: `previous` is a live, uniquely-borrowed out-parameter the
+    // callee writes the old mode into. The mode argument is a by-value
+    // constant. Nothing is retained.
+    let ok =
+        unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, std::ptr::from_mut(&mut previous)) };
+    ok != 0
+}
+
+/// The error mode currently in force on this thread.
+///
+/// Only exists so the test below can check that
+/// [`suppress_device_error_dialogs`] actually took — reading it back is
+/// the only way to tell.
+#[cfg(test)]
+fn thread_error_mode() -> THREAD_ERROR_MODE {
+    let mut previous: THREAD_ERROR_MODE = 0;
+    // SAFETY: as above. Setting the mode to whatever it already is, to
+    // read the old value out of the out-parameter.
+    let _ = unsafe { SetThreadErrorMode(0, std::ptr::from_mut(&mut previous)) };
+    // Put it back, so reading the mode does not change it.
+    // SAFETY: as above.
+    let _ = unsafe { SetThreadErrorMode(previous, std::ptr::null_mut()) };
+    previous
+}
 
 /// What the machine is, as far as it can be described without sampling.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -261,6 +320,24 @@ fn registry_dword(subkey: &str, value: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_error_mode_actually_suppresses_the_not_ready_dialog() {
+        // The one call standing between the sampler and a modal system
+        // dialog raised on its own thread, which blocks it there until
+        // somebody finds and dismisses it. The failure mode is the app
+        // hanging, and nothing about the code that *causes* it — a
+        // free-space query on a drive letter — looks dangerous, so the
+        // guarantee is worth reading back rather than assuming.
+        assert!(
+            suppress_device_error_dialogs(),
+            "the thread error mode was refused, so a drive with no media              can still put a dialog in front of this thread"
+        );
+        assert!(
+            thread_error_mode() & SEM_FAILCRITICALERRORS != 0,
+            "SEM_FAILCRITICALERRORS is not in force after setting it"
+        );
+    }
 
     #[test]
     fn the_machine_describes_itself() {

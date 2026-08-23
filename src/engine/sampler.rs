@@ -57,6 +57,13 @@ use std::time::{Duration, Instant};
 ///
 /// Runs until the receiver disconnects or `stopping` is set.
 pub fn run(sender: &Sender<Snapshot>, interval_ms: &AtomicU64, stopping: &AtomicBool) {
+    // First, before anything touches a device. This thread walks every
+    // drive letter on the machine once a second, and a drive that is not
+    // ready would otherwise raise a modal system dialog *on this thread*
+    // and block it there until dismissed — which is the app hanging.
+    // See `win::system::suppress_device_error_dialogs`.
+    win::system::suppress_device_error_dialogs();
+
     // Asked for once, at startup. Without it, identity lookups come back
     // empty for roughly half the machine — see `win::privilege`.
     let elevated = win::privilege::enable();
