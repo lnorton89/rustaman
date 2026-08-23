@@ -116,8 +116,21 @@ const _: () = {
 /// `WGPU_BACKEND` still overrides, which is the escape hatch in the other
 /// direction: a machine whose D3D12 path is the broken one can be started
 /// on Vulkan without a rebuild.
+///
+/// An *empty* override is refused, and that is not a nicety.
+/// `Backends::from_env` returns `Some` whenever the variable is merely
+/// set, and `from_comma_list` maps a name it does not recognise to the
+/// empty set — so `WGPU_BACKEND=d3d`, or the variable exported with no
+/// value, hands wgpu a set containing nothing. It then finds no adapter,
+/// and the window does not open: no window, no message, a GUI-subsystem
+/// binary with no console. That is the exact failure this function was
+/// written to prevent, reached through the escape hatch meant to prevent
+/// it. A typo in an override should cost the override, not the app.
 fn backends() -> eframe::wgpu::Backends {
-    eframe::wgpu::Backends::from_env().unwrap_or(eframe::wgpu::Backends::DX12)
+    match eframe::wgpu::Backends::from_env() {
+        Some(chosen) if !chosen.is_empty() => chosen,
+        _ => eframe::wgpu::Backends::DX12,
+    }
 }
 
 /// Opens the window and runs until it closes.
@@ -254,6 +267,37 @@ mod tests {
             super::backends(),
             eframe::wgpu::Backends::DX12,
             "the window must be created on D3D12 alone"
+        );
+    }
+
+    #[test]
+    fn a_backend_override_that_names_nothing_is_refused() {
+        // `Backends::from_env` reports `Some` whenever `WGPU_BACKEND` is
+        // set at all, and `from_comma_list` maps an unrecognised name to
+        // the *empty* set. So a typo — `d3d` for `dx12` — or the variable
+        // exported with no value would hand wgpu a set containing no
+        // backends, it would find no adapter, and the window would not
+        // open: no window and no message, which is the whole failure this
+        // module is here to prevent.
+        //
+        // Stated against `from_comma_list` rather than by setting the
+        // variable, because the environment is process-wide and the test
+        // runner is threaded: a test that sets it would change what every
+        // other test in this binary observes.
+        let empty = eframe::wgpu::Backends::from_comma_list("d3d");
+        assert!(
+            empty.is_empty(),
+            "this test is built on an unrecognised name yielding nothing;              if wgpu has changed that, the guard in `backends` may no              longer be needed"
+        );
+
+        let chosen = match Some(empty) {
+            Some(set) if !set.is_empty() => set,
+            _ => eframe::wgpu::Backends::DX12,
+        };
+        assert_eq!(
+            chosen,
+            eframe::wgpu::Backends::DX12,
+            "an override naming nothing has to fall back to D3D12, not              leave wgpu with no backend to pick from"
         );
     }
 }
