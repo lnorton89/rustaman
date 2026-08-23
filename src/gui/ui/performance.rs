@@ -721,18 +721,59 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         Vec2::new(ui.available_width(), graph_height(ui, DISK)),
         Sense::hover(),
     );
-    graph::area(
+    // Read and write drawn separately, on one axis. The combined line
+    // this replaces answered "is the disk busy" and hid the only thing
+    // worth knowing about a busy one, which is which way the traffic is
+    // going: a machine paging is reading and a machine writing a backup
+    // is writing, and summed they are the same picture.
+    //
+    // Two ramp hues rather than a hue and a status colour, because
+    // neither direction is a state and neither is a share of the other —
+    // see `graph::layered`. Read keeps the panel's own hue so the
+    // picker's sparkline and the line it summarises are one colour.
+    graph::layered(
         ui,
         theme,
         rect,
-        &graph::Graph {
-            series: &app.performance.disk,
-            color: theme.series(2, 5),
-            floor: 0.0,
-            unit: graph::Unit::Rate,
-        },
+        &[
+            graph::Graph {
+                series: &app.performance.disk_read,
+                color: theme.series(2, 5),
+                floor: 0.0,
+                unit: graph::Unit::Rate,
+            },
+            graph::Graph {
+                series: &app.performance.disk_write,
+                color: theme.series(4, 5),
+                floor: 0.0,
+                unit: graph::Unit::Rate,
+            },
+        ],
     );
-    ui.add_space(SPACE_MD);
+    // The same gap the CPU panel leaves between a graph and its legend.
+    ui.add_space(SPACE_SM);
+
+    let (read, write) = system.disks.iter().fold((0.0, 0.0), |(read, write), disk| {
+        (read + disk.read_rate, write + disk.write_rate)
+    });
+    ui.horizontal(|ui| {
+        graph::legend(
+            ui,
+            theme,
+            theme.series(2, 5),
+            "Read",
+            &crate::format::rate(read),
+        );
+        ui.add_space(SPACE_LG);
+        graph::legend(
+            ui,
+            theme,
+            theme.series(4, 5),
+            "Write",
+            &crate::format::rate(write),
+        );
+    });
+    ui.add_space(chrome::SECTION_GAP);
 
     // `if`/`else` rather than an early return: the panel has to measure
     // itself on the way out of *either* branch, and a `return` above the
@@ -892,12 +933,16 @@ fn network_graph(
     system: &SystemSample,
     focused: Option<&crate::model::AdapterSample>,
 ) -> Rect {
-    let total_color = theme.series(3, 5);
-    // The send band is `info` rather than another ramp hue for the same
-    // reason the CPU panel's kernel band is `danger`: it is not a second
-    // series, it is a share of the one being drawn, and a colour from
-    // the ramp would claim equal billing with it.
-    let send_color = theme.info;
+    // Receive keeps the panel's own hue, so the picker's sparkline and
+    // the line it summarises are one colour, and send takes another from
+    // the ramp. Send used to be `info` — a deliberate non-ramp colour,
+    // because it was drawn as a *band* under the total and a ramp hue
+    // would have claimed equal billing with the whole it was part of.
+    // It is not a share of anything now: the two directions are drawn as
+    // independent series on one axis, which is exactly the case where
+    // equal billing is what they should have.
+    let receive_color = theme.series(3, 5);
+    let send_color = theme.series(1, 5);
 
     let heading = focused.map_or_else(
         || "Network · all adapters".to_string(),
@@ -920,27 +965,29 @@ fn network_graph(
             rect,
             &graph::Graph {
                 series,
-                color: total_color,
+                color: receive_color,
                 floor: 0.0,
                 unit: graph::Unit::Rate,
             },
         ),
-        None => graph::banded(
+        None => graph::layered(
             ui,
             theme,
             rect,
-            &graph::Graph {
-                series: &app.performance.network,
-                color: total_color,
-                floor: 0.0,
-                unit: graph::Unit::Rate,
-            },
-            &graph::Graph {
-                series: &app.performance.network_send,
-                color: send_color,
-                floor: 0.0,
-                unit: graph::Unit::Rate,
-            },
+            &[
+                graph::Graph {
+                    series: &app.performance.network_receive,
+                    color: receive_color,
+                    floor: 0.0,
+                    unit: graph::Unit::Rate,
+                },
+                graph::Graph {
+                    series: &app.performance.network_send,
+                    color: send_color,
+                    floor: 0.0,
+                    unit: graph::Unit::Rate,
+                },
+            ],
         ),
     }
     // The same gap the CPU panel leaves between its graph and its
@@ -957,13 +1004,16 @@ fn network_graph(
         |adapter| (adapter.receive_rate, adapter.send_rate),
     );
     ui.horizontal(|ui| {
-        graph::legend(
-            ui,
-            theme,
-            total_color,
-            "Total",
-            &crate::format::rate(receive + send),
-        );
+        // A per-adapter ring holds that adapter's combined throughput
+        // and nothing else, so a scoped graph is one line and its legend
+        // says what that line is rather than naming a direction the
+        // graph is not separating.
+        let (label, value) = if scoped.is_some() {
+            ("Total", receive + send)
+        } else {
+            ("Receive", receive)
+        };
+        graph::legend(ui, theme, receive_color, label, &crate::format::rate(value));
         if scoped.is_none() {
             ui.add_space(SPACE_LG);
             graph::legend(ui, theme, send_color, "Send", &crate::format::rate(send));
