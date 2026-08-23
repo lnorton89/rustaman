@@ -274,7 +274,7 @@ fn dominant(rgba: &[u8]) -> Rgb {
 /// as the whole window refusing to render, on the machine with the most
 /// processes.
 #[cfg(test)]
-fn gdi_objects() -> u32 {
+pub(crate) fn gdi_objects() -> u32 {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetGuiResources};
     /// `GR_GDIOBJECTS`.
     const GDI_OBJECTS: u32 = 0;

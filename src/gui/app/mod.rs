@@ -727,6 +727,20 @@ pub struct App {
     pub last_snapshot_at: Option<std::time::Instant>,
     /// When monitoring started, so a missing first sample can go stale.
     pub engine_started_at: std::time::Instant,
+    /// The notification-area icon, once the native window exists to own
+    /// its clicks. `None` until then, and for the whole run if the shell
+    /// refused it — a missing tray icon costs a convenience, not the app.
+    tray: Option<crate::win::tray::Tray>,
+    /// The picture last pushed to the tray, so an unchanged one is not
+    /// pushed again.
+    ///
+    /// Same reasoning as [`App::dressed_border`], and the same shape: the
+    /// load moves continuously while the icon only has five steps, so
+    /// comparing what would be drawn against what was drawn keeps
+    /// `Shell_NotifyIcon` — and the `HICON` behind it — off the frames
+    /// where the picture is identical. On an idle machine that is every
+    /// frame.
+    tray_face: Option<crate::tray::Face>,
     /// Efficiency-mode changes this app has made and the sampler has not
     /// caught up with yet.
     ///
@@ -801,6 +815,8 @@ impl App {
             custom_chrome: config.custom_chrome.unwrap_or(true),
             maximised: false,
             dressed_border: None,
+            tray: None,
+            tray_face: None,
             native_window: None,
             elevated,
             last_snapshot_at: None,
@@ -1074,6 +1090,48 @@ impl App {
             self.engine.interval(),
         )
     }
+
+    /// Keeps the notification-area icon in step with the CPU load.
+    ///
+    /// Created on the first frame that has a window to hang it off —
+    /// `native_window` is attached by the launcher after `App::new` has
+    /// already run, so this cannot happen in the constructor.
+    ///
+    /// Then gated, hard. Building an icon means a DIB section, a mask, a
+    /// `CreateIconIndirect` and a `Shell_NotifyIcon`, and the load feeding
+    /// it changes on every sample while the picture it produces has five
+    /// steps and one colour ramp. Comparing the face against the last one
+    /// turns "twice a second forever" into "when the meter actually
+    /// moves".
+    fn refresh_tray(&mut self) {
+        if self.tray.is_none() {
+            let Some(window) = self.native_window else {
+                return;
+            };
+            self.tray = crate::win::tray::Tray::create(window);
+        }
+        let Some(tray) = self.tray.as_mut() else {
+            return;
+        };
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return;
+        };
+        // The snapshot reports 0..=100 and the meter wants 0..=1.
+        let load = (snapshot.system.cpu.total_percent / 100.0) as f32;
+        let face = crate::tray::face(load, &self.theme);
+        if self.tray_face == Some(face) {
+            return;
+        }
+        let edge = crate::win::tray::icon_edge();
+        let pixels = crate::tray::rasterise(face, edge as usize);
+        let tooltip = format!(
+            "Rustaman — CPU {}",
+            crate::format::percent(snapshot.system.cpu.total_percent)
+        );
+        if tray.show(&pixels, edge, &tooltip) {
+            self.tray_face = Some(face);
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -1104,6 +1162,7 @@ impl eframe::App for App {
             super::dress_window_for_windows_11(self.native_window, &self.theme, self.custom_chrome);
             self.dressed_border = Some(self.theme.border);
         }
+        self.refresh_tray();
 
         self.poll();
         super::ui::draw(self, ui);

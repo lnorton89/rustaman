@@ -105,5 +105,6 @@ pub mod services;
 pub mod startup;
 pub mod strings;
 pub mod system;
+pub mod tray;
 pub mod window;
 pub mod windows;
