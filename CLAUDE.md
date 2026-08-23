@@ -536,5 +536,15 @@ range (`<previous>..<tag>`) computed from it is then wrong. The changelog
 - **eframe runs on wgpu, not glow.** The glutin WGL path is the one that
   fails on hybrid-graphics laptops — exactly the machines this app is
   most useful on.
+- **And wgpu is pinned to D3D12, not left on `Backends::PRIMARY`.**
+  `gui::backends`. A Vulkan ICD is vendor code in this process just as a
+  WGL one is, and leaving Vulkan in the set reopens the wound one vendor
+  along: an Intel UHD 620 on the 2021 driver takes an access violation
+  inside `igvk64.dll` during swapchain creation, so the app does not fail
+  to draw — it fails to *open*, silently, because a GUI-subsystem binary
+  has no console. The offscreen scenes cannot catch this class of bug:
+  headless creates no surface, and the surface is where such a driver
+  dies. **A real window on a real machine is the only test for it.**
+  `WGPU_BACKEND` still overrides.
 - **The floor is Windows 10 1809.** Anything newer is probed at runtime,
   so a missing entry point costs a column rather than the app.
