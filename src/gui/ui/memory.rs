@@ -50,14 +50,21 @@ use crate::model::{ProcessKey, ProcessRow, Snapshot};
 use crate::theme::Palette;
 use egui::{Rect, Sense, Ui, Vec2};
 
-/// The height the treemap gets.
+/// The least height the treemap gets, whatever else is on screen.
 ///
-/// Generous: this is the view's subject, not an illustration beside it,
-/// and a treemap's whole value is that the small tiles are still big
-/// enough to see. Anything under about this and the tail of the machine
-/// — the two hundred processes holding a megabyte each — collapses into
-/// a band of slivers.
-const MAP_HEIGHT: f32 = 380.0;
+/// A treemap's whole value is that the small tiles stay big enough to
+/// see. Under about this the tail of the machine — the hundreds of
+/// processes holding a megabyte each — collapses into a band of slivers,
+/// and the map stops answering anything the Processes view could not.
+const MAP_MINIMUM: f32 = 380.0;
+
+/// What the map leaves below itself for the machine's own summary and
+/// the key, when no tile is picked.
+const SUMMARY_HEIGHT: f32 = 190.0;
+
+/// What it leaves for a picked process's breakdown, which is taller: a
+/// composition bar, its key, and two rows of readouts.
+const BREAKDOWN_HEIGHT: f32 = 250.0;
 
 /// The narrowest a tile may be before its label is left off.
 ///
@@ -76,8 +83,12 @@ const _: () = {
         "a tile has to be allowed to carry a label at some width"
     );
     assert!(
-        MAP_HEIGHT > LABEL_MINIMUM,
+        MAP_MINIMUM > LABEL_MINIMUM,
         "a map shorter than one label is wide cannot show a labelled tile          at all"
+    );
+    assert!(
+        BREAKDOWN_HEIGHT > SUMMARY_HEIGHT,
+        "a picked process shows strictly more than the summary it          replaces, so it cannot need less room"
     );
 };
 
@@ -101,7 +112,21 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
             let width = (ui.available_width() - SPACE_MD).max(0.0);
             ui.set_max_width(width);
 
-            map(app, ui, &theme, &snapshot);
+            // The map takes whatever the breakdown below it does not.
+            //
+            // A fixed height left a third of a tall window empty while
+            // the thing the view is *for* was cropped — and a treemap
+            // given more room does not merely look better, it shows more
+            // of the machine, because every extra square point is
+            // another process over the fold-in threshold.
+            let reserved = if app.memory_view.selected.is_some() {
+                BREAKDOWN_HEIGHT
+            } else {
+                SUMMARY_HEIGHT
+            };
+            let height = (ui.available_height() - reserved - chrome::SECTION_GAP).max(MAP_MINIMUM);
+
+            map(app, ui, &theme, &snapshot, height);
             ui.add_space(chrome::SECTION_GAP);
             breakdown(app, ui, &theme, &snapshot);
             ui.add_space(chrome::SECTION_GAP);
@@ -199,11 +224,11 @@ enum Slice<'a> {
 }
 
 /// The treemap.
-fn map(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) {
+fn map(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot, height: f32) {
     let measure = app.memory_view.measure;
 
     let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), MAP_HEIGHT), Sense::click());
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());
     ui.painter().rect_filled(
         rect,
         egui::CornerRadius::same(theme::RADIUS),

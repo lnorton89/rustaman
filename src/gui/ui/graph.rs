@@ -92,6 +92,24 @@ impl Unit {
 
 /// Draws a filled area graph into `rect`.
 pub fn area(ui: &Ui, theme: &Palette, rect: Rect, graph: &Graph<'_>) {
+    area_with(ui, theme, rect, graph, Axis::Labelled);
+}
+
+/// Whether an area graph states the value at the top of its own axis.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    /// The usual case: a graph standing on its own needs its scale
+    /// stated, because the shape means nothing without it.
+    Labelled,
+    /// For a graph in a grid of identical ones. Sixteen core tiles share
+    /// one fixed axis, so sixteen copies of "100%" state a fact once and
+    /// then repeat it fifteen times in the corner of every tile — the
+    /// grid's own heading already says what these are.
+    Shared,
+}
+
+/// [`area`], with the axis label optional.
+fn area_with(ui: &Ui, theme: &Palette, rect: Rect, graph: &Graph<'_>, axis: Axis) {
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::same(RADIUS), theme::rgb(theme.app));
     grid(ui, theme, rect);
@@ -102,7 +120,9 @@ pub fn area(ui: &Ui, theme: &Palette, rect: Rect, graph: &Graph<'_>) {
         // One point is not a line. Drawing nothing is right: the graph's
         // frame and gridlines are already on screen, so it reads as
         // "waiting for data" rather than as broken.
-        axis_label(ui, theme, rect, graph.unit.label(scale));
+        if axis == Axis::Labelled {
+            axis_label(ui, theme, rect, graph.unit.label(scale));
+        }
         return;
     }
 
@@ -112,7 +132,9 @@ pub fn area(ui: &Ui, theme: &Palette, rect: Rect, graph: &Graph<'_>) {
         Stroke::new(1.5, theme::rgb(graph.color)),
     ));
     frame(ui, theme, rect);
-    axis_label(ui, theme, rect, graph.unit.label(scale));
+    if axis == Axis::Labelled {
+        axis_label(ui, theme, rect, graph.unit.label(scale));
+    }
 }
 
 /// Draws a two-band area graph: a total with a second series shaded
@@ -187,7 +209,7 @@ pub fn core_grid(ui: &mut Ui, theme: &Palette, rect: Rect, cores: &[Series]) {
                 (cell.y + SPACE_XS) * row as f32,
             );
         let cell_rect = Rect::from_min_size(origin, cell);
-        area(
+        area_with(
             ui,
             theme,
             cell_rect,
@@ -197,6 +219,8 @@ pub fn core_grid(ui: &mut Ui, theme: &Palette, rect: Rect, cores: &[Series]) {
                 floor: 100.0,
                 unit: Unit::Percent,
             },
+            // One axis, shared by every tile — see `Axis::Shared`.
+            Axis::Shared,
         );
         // A tile is an unlabelled square, and on a sixteen-or-more-core
         // machine there is no other way to tell which one is core seven —

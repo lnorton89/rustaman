@@ -26,8 +26,8 @@ is worse than one showing the present.
 
 ## The portable half
 
-`model`, `theme`, `format`, `color`, and `config` have no `windows_sys`
-in them and compile on any platform. This is deliberate and it is
+`model`, `theme`, `format`, `color`, `treemap`, and `config` have no
+`windows_sys` in them and compile on any platform. This is deliberate and it is
 enforced: CI runs their tests on Linux (`.github/workflows/ci.yml`, the
 `portable` job) and a `use windows_sys::` that leaks into one of them
 fails there.
@@ -38,6 +38,15 @@ building, the rate arithmetic, the colour space and the contrast checks
 are all *pure functions over data*, and pure functions over data can be
 tested exhaustively without a machine to observe. Roughly four fifths of
 the test suite lives here.
+
+`treemap` is the newest of them and the clearest example of the split:
+the Memory view's map is a *layout*, so the squarified algorithm that
+produces it — the part with the arithmetic that can be wrong — lives
+here and is checked on Linux, while `gui/ui/memory.rs` only paints the
+rectangles it hands back. One of its tests measures the algorithm
+against the naive alternative rather than against itself: squarifying
+has to beat slice-and-dice by a factor of four on the worst aspect
+ratio, or it is not earning the extra sixty lines.
 
 ## `src/win/` — the Windows layer
 

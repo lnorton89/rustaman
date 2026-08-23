@@ -137,6 +137,23 @@ same structure and is the one to multiply by. Assuming 4 KiB is right on
 every machine anyone will run this on and wrong in principle, which is
 the kind of wrong that survives for years.
 
+**Per-process memory needs no call at all.** The Memory view shows a
+private working set, both peaks, both pool quotas and both fault counts
+for every process, and every one of those is a field of the
+`SYSTEM_PROCESS_INFORMATION` that `NtQuerySystemInformation` already
+returns for the process table. `GetProcessMemoryInfo` would be one
+`OpenProcess` and one call *per process, per sample* for the same
+numbers. Before reaching for a per-process memory API, check
+`src/win/nt/types.rs` — the struct is declared by hand there and most of
+it was going unread.
+
+**`WorkingSetPrivateSize` is the field that matters**, and it is the one
+the SDK's redacted struct does not have. A plain working set counts
+every DLL and mapped file against every process holding it open, so
+summing working sets across a machine gives a total several times its
+RAM. The private figure is what adds up, and it is why the treemap is
+sized by it.
+
 ### Disk — active time, not just throughput
 
 `src/win/disk.rs`. `DeviceIoControl(IOCTL_DISK_PERFORMANCE)` against
@@ -153,6 +170,21 @@ Opening `\\.\PhysicalDriveN` needs no elevation for this IOCTL, but the
 counters must be enabled — they are on by default on every modern
 Windows, and a drive that returns `ERROR_NOT_SUPPORTED` is skipped rather
 than shown as zero.
+
+**A drive letter can block the thread that asks about it, and can put a
+dialog in front of it.** `GetDiskFreeSpaceExW` talks to the device: on a
+network drive whose server has gone it blocks for the redirector's whole
+timeout, and on a drive with no media Windows raises a *hard error* —
+the "There is no disk in the drive" box — which is modal and holds the
+calling thread until somebody dismisses it. From the sampler thread that
+is the app hanging, with the dialog nowhere near its window.
+
+Two guards, both required: `win::system::suppress_device_error_dialogs`
+sets `SEM_FAILCRITICALERRORS` on the sampler thread so the dialog becomes
+an error return, and `volumes()` asks `GetDriveTypeW` — which reads the
+mount table and cannot block — before it asks the device anything.
+Anything added here that touches a device by letter needs the same
+treatment.
 
 ### Network
 
