@@ -599,6 +599,11 @@ impl Sampler {
         let Some(reading) = reading else {
             return Vec::new();
         };
+        // Read once for the whole pass rather than once per adapter:
+        // this walks a registry key, and the adapter list does not
+        // change between two adapters of the same sample.
+        let registry = win::gpu::adapters();
+
         // Group exact physical engines by adapter.
         let mut by_adapter: HashMap<String, Vec<(String, f64)>> = HashMap::new();
         for ((luid, physical, index, engine), value) in &reading.engines {
@@ -622,13 +627,18 @@ impl Sampler {
                     .clamp(0.0, 100.0);
                 engines.sort_by(|a, b| a.0.cmp(&b.0));
                 let memory_used = reading.memory_by_adapter.get(&luid).copied().unwrap_or(0);
+                // The counters name an adapter by LUID and carry neither
+                // a description nor a capacity; the registry has both.
+                // See `win::gpu::describe` on why only a single adapter
+                // is matched.
+                let (name, memory_total) = win::gpu::describe(&luid, &registry);
                 GpuSample {
-                    name: format!("GPU {luid}"),
+                    name,
                     luid,
                     utilisation,
                     engines,
                     memory_used,
-                    memory_total: 0,
+                    memory_total,
                 }
             })
             .collect();

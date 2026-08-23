@@ -1760,12 +1760,26 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             }
             if adapter.memory_used > 0 {
                 ui.add_space(SPACE_XS);
+                // Against the adapter's capacity when the registry gave
+                // one. "2.10 GB" answers less than "2.10 GB / 8.00 GB"
+                // does: the first is a quantity, the second is a
+                // fraction, and a fraction is the thing anybody looking
+                // at a memory readout is actually after.
+                let dedicated = if adapter.memory_total > 0 {
+                    format!(
+                        "{} / {}",
+                        crate::format::bytes(adapter.memory_used),
+                        crate::format::bytes(adapter.memory_total)
+                    )
+                } else {
+                    crate::format::bytes(adapter.memory_used)
+                };
                 stat_column(
                     ui,
                     theme,
                     stat_column_width(ui.available_width(), 1),
                     "Dedicated",
-                    &crate::format::bytes(adapter.memory_used),
+                    &dedicated,
                 );
             }
         });

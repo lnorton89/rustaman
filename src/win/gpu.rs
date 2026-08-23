@@ -48,6 +48,7 @@
 //! section. Every function below returns an empty result rather than an
 //! error for that reason.
 
+use super::handle::OwnedKey;
 use super::strings;
 use std::collections::HashMap;
 use windows_sys::Win32::Foundation::HANDLE;
@@ -55,6 +56,9 @@ use windows_sys::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
     PdhOpenQueryW, PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE,
     PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE,
+};
+use windows_sys::Win32::System::Registry::{
+    RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ,
 };
 
 /// The counter path for engine utilisation, across every instance.
@@ -464,6 +468,204 @@ pub fn parse_instance(name: &str) -> Option<Instance> {
     })
 }
 
+/// One display adapter as the driver registered it.
+///
+/// The performance counters name adapters by LUID and carry no
+/// description and no capacity, so both have to come from somewhere
+/// else. This is that somewhere: the display-adapter class key, which
+/// every driver writes on install.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Adapter {
+    /// What the driver calls it, e.g. "NVIDIA GeForce RTX 4070".
+    pub description: String,
+    /// Dedicated video memory, in bytes.
+    pub memory_total: u64,
+}
+
+/// The display-adapter class key. Every graphics driver registers a
+/// numbered subkey under it.
+const DISPLAY_CLASS: &str =
+    r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";
+
+/// Every display adapter the registry describes.
+///
+/// Read once per sample rather than cached, because a driver update or an
+/// external GPU changes it and a task manager that reports last week's
+/// hardware is worse than one that reports none.
+#[must_use]
+pub fn adapters() -> Vec<Adapter> {
+    let Some(class) = open_key(HKEY_LOCAL_MACHINE, DISPLAY_CLASS) else {
+        return Vec::new();
+    };
+    subkey_names(&class)
+        .into_iter()
+        .filter_map(|name| {
+            let path = format!("{DISPLAY_CLASS}\\{name}");
+            let key = open_key(HKEY_LOCAL_MACHINE, &path)?;
+            // `DriverDesc` is the name Device Manager shows. A subkey
+            // without one is not a device at all — the class key also
+            // carries `Configuration` and `Properties`.
+            let description = string_value(&key, "DriverDesc")?;
+            let memory_total = qword_value(&key, "HardwareInformation.qwMemorySize").unwrap_or(0);
+            Some(Adapter {
+                description,
+                memory_total,
+            })
+        })
+        .collect()
+}
+
+/// Opens a registry key for reading.
+fn open_key(hive: HKEY, subkey: &str) -> Option<OwnedKey> {
+    let wide = strings::to_wide(subkey);
+    let mut key: HKEY = std::ptr::null_mut();
+    // SAFETY: `hive` is a predefined key constant. `wide` is a live,
+    // NUL-terminated UTF-16 buffer owned by a local that outlives the
+    // call. `key` is a live out-parameter the callee writes an open key
+    // into on success, and `OwnedKey` then owns and closes it.
+    let status = unsafe {
+        RegOpenKeyExW(
+            hive,
+            wide.as_ptr(),
+            0,
+            KEY_READ,
+            std::ptr::addr_of_mut!(key),
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    OwnedKey::new(key)
+}
+
+/// The names of a key's immediate subkeys.
+///
+/// Enumerated by index until the call reports the end, which is the
+/// documented protocol, and bounded so a key that somehow never reports
+/// one cannot spin. This runs on the sampler thread, which the UI waits
+/// on.
+fn subkey_names(key: &OwnedKey) -> Vec<String> {
+    /// `ERROR_NO_MORE_ITEMS`.
+    const NO_MORE: u32 = 259;
+    /// More display adapters than any machine has. Ten is generous; the
+    /// class key holds one subkey per installed driver, not per device.
+    const LIMIT: u32 = 64;
+    /// The documented maximum key-name length, plus the terminator.
+    const NAME: usize = 256;
+
+    let mut names = Vec::new();
+    for index in 0..LIMIT {
+        let mut buffer = [0u16; NAME];
+        let mut length = NAME as u32;
+        // SAFETY: `buffer` is a live array of `length` UTF-16 units and
+        // `length` describes it exactly; the callee writes at most that
+        // many and updates the count. Every other out-parameter is null,
+        // which the API documents as "not wanted".
+        let status = unsafe {
+            RegEnumKeyExW(
+                key.raw(),
+                index,
+                buffer.as_mut_ptr(),
+                std::ptr::addr_of_mut!(length),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if status == NO_MORE {
+            break;
+        }
+        if status != 0 {
+            break;
+        }
+        names.push(strings::from_wide_nul(&buffer[..length as usize]));
+    }
+    names
+}
+
+/// A `REG_SZ` value, or `None` if it is absent or another type.
+fn string_value(key: &OwnedKey, name: &str) -> Option<String> {
+    /// `REG_SZ`.
+    const SZ: u32 = 1;
+    let wide = strings::to_wide(name);
+    let mut buffer = [0u16; 256];
+    let mut kind = 0u32;
+    let mut bytes = std::mem::size_of_val(&buffer) as u32;
+    // SAFETY: `wide` is a live NUL-terminated name. `buffer` is a live
+    // writable array and `bytes` states its size in bytes, which is what
+    // this API takes; the callee writes no more than that and updates the
+    // count. `kind` is a live out-parameter for the value's type.
+    let status = unsafe {
+        RegQueryValueExW(
+            key.raw(),
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::addr_of_mut!(kind),
+            buffer.as_mut_ptr().cast::<u8>(),
+            std::ptr::addr_of_mut!(bytes),
+        )
+    };
+    if status != 0 || kind != SZ {
+        return None;
+    }
+    let units = (bytes as usize / 2).min(buffer.len());
+    let text = strings::from_wide_nul(&buffer[..units]);
+    (!text.is_empty()).then_some(text)
+}
+
+/// A `REG_QWORD` value, or `None` if it is absent or another type.
+///
+/// `HardwareInformation.qwMemorySize` is the only value read this way.
+/// Older drivers wrote a `REG_BINARY` `HardwareInformation.MemorySize`
+/// instead; that one is deliberately not read, because it is four bytes
+/// on some drivers and eight on others with nothing to distinguish them,
+/// and a capacity guessed wrong is worse than a capacity left at zero.
+fn qword_value(key: &OwnedKey, name: &str) -> Option<u64> {
+    /// `REG_QWORD`.
+    const QWORD: u32 = 11;
+    let wide = strings::to_wide(name);
+    let mut value = 0u64;
+    let mut kind = 0u32;
+    let mut bytes = std::mem::size_of::<u64>() as u32;
+    // SAFETY: `wide` is a live NUL-terminated name. `value` is a live
+    // `u64` and `bytes` states its size exactly, so the callee cannot
+    // write past it. `kind` is a live out-parameter for the value's type.
+    let status = unsafe {
+        RegQueryValueExW(
+            key.raw(),
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::addr_of_mut!(kind),
+            std::ptr::addr_of_mut!(value).cast::<u8>(),
+            std::ptr::addr_of_mut!(bytes),
+        )
+    };
+    (status == 0 && kind == QWORD).then_some(value)
+}
+
+/// What to call an adapter, and how much memory it has.
+///
+/// Split out from the sampler and from the registry read so the rule can
+/// be tested without either.
+///
+/// **Only a single adapter is matched, deliberately.** The counters
+/// identify an adapter by LUID and the registry by class-key index, and
+/// nothing joins those two — so with two adapters the only options are to
+/// pair them by position, which is a guess, or to leave them unnamed.
+/// Pairing by position on a laptop with an integrated and a discrete GPU
+/// gets it wrong exactly when it matters, and it does not look wrong: the
+/// panel would confidently label the idle Intel chip as the RTX and
+/// report its capacity. A LUID in the heading is ugly and honest; the
+/// wrong name is neither.
+#[must_use]
+pub fn describe(luid: &str, registry: &[Adapter]) -> (String, u64) {
+    match registry {
+        [only] if !only.description.is_empty() => (only.description.clone(), only.memory_total),
+        _ => (format!("GPU {luid}"), 0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,6 +783,76 @@ mod tests {
         // the reading must be well-formed.
         for value in second.by_pid.values() {
             assert!(value.is_finite());
+        }
+    }
+}
+
+#[cfg(test)]
+mod adapter_tests {
+    use super::*;
+
+    fn adapter(description: &str, memory_total: u64) -> Adapter {
+        Adapter {
+            description: description.to_string(),
+            memory_total,
+        }
+    }
+
+    #[test]
+    fn one_adapter_is_named_and_measured_from_the_registry() {
+        let registry = [adapter("NVIDIA GeForce RTX 4070", 12_884_901_888)];
+        let (name, total) = describe("luid_0x00000000_0x0000C4F1", &registry);
+        assert_eq!(name, "NVIDIA GeForce RTX 4070");
+        assert_eq!(total, 12_884_901_888);
+    }
+
+    #[test]
+    fn two_adapters_are_left_unnamed_rather_than_guessed() {
+        // The counters identify an adapter by LUID and the registry by
+        // class-key index, and nothing joins the two. Pairing by position
+        // is a coin toss that does not look like one: on a laptop with
+        // Intel graphics and a discrete card it would confidently label
+        // the idle integrated chip as the RTX and report its capacity.
+        // A LUID in the heading is ugly and true.
+        let registry = [
+            adapter("Intel(R) UHD Graphics 620", 134_217_728),
+            adapter("NVIDIA GeForce RTX 4070", 12_884_901_888),
+        ];
+        let (name, total) = describe("luid_0x00000000_0x0000C4F1", &registry);
+        assert_eq!(name, "GPU luid_0x00000000_0x0000C4F1");
+        assert_eq!(
+            total, 0,
+            "a capacity that might be the wrong card is not reported"
+        );
+    }
+
+    #[test]
+    fn no_registry_entry_falls_back_to_the_luid() {
+        let (name, total) = describe("luid_0x0_0x1", &[]);
+        assert_eq!(name, "GPU luid_0x0_0x1");
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn an_adapter_with_no_description_is_not_used_as_a_name() {
+        // The class key also carries non-device subkeys. One that somehow
+        // reached this far must not blank the heading.
+        let registry = [adapter("", 8_589_934_592)];
+        let (name, total) = describe("luid_0x0_0x2", &registry);
+        assert_eq!(name, "GPU luid_0x0_0x2");
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn this_machine_describes_its_own_adapters() {
+        // Reads the real registry. Asserts shape rather than content —
+        // a CI box may have no display adapter at all, and a machine
+        // with one must not report it as nameless.
+        for found in adapters() {
+            assert!(
+                !found.description.is_empty(),
+                "an adapter is only collected when it has a DriverDesc"
+            );
         }
     }
 }
