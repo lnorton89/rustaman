@@ -71,6 +71,15 @@ pub fn paint_rotated(painter: &Painter, rect: Rect, icon: Icon, color: Color32, 
 
     for path in icon.strokes() {
         let mut points: Vec<Pos2> = path.points.iter().copied().map(place).collect();
+        if path.filled {
+            // Filled shapes are convex here — the only one is a
+            // rectangle — and `convex_polygon` is the cheap path for
+            // that. It takes its own stroke, which is `NONE`: a filled
+            // shape that is also outlined is a shape drawn half a stroke
+            // larger than the grid says.
+            painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+            continue;
+        }
         if path.closed {
             if let Some(&first) = points.first() {
                 points.push(first);

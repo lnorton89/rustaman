@@ -195,10 +195,10 @@ impl Icon {
             // a grid — `Memory` is already a divided box, and the two
             // have to stay distinguishable at eighteen points.
             Self::Windows => vec![
-                Path::closed(&[(2.5, 3.0), (7.2, 3.0), (7.2, 7.5), (2.5, 7.5)]),
-                Path::closed(&[(8.8, 3.0), (13.5, 3.0), (13.5, 7.5), (8.8, 7.5)]),
-                Path::closed(&[(2.5, 8.5), (7.2, 8.5), (7.2, 13.0), (2.5, 13.0)]),
-                Path::closed(&[(8.8, 8.5), (13.5, 8.5), (13.5, 13.0), (8.8, 13.0)]),
+                Path::solid(&[(2.5, 3.0), (7.4, 3.0), (7.4, 7.7), (2.5, 7.7)]),
+                Path::solid(&[(8.6, 3.0), (13.5, 3.0), (13.5, 7.7), (8.6, 7.7)]),
+                Path::solid(&[(2.5, 8.3), (7.4, 8.3), (7.4, 13.0), (2.5, 13.0)]),
+                Path::solid(&[(8.6, 8.3), (13.5, 8.3), (13.5, 13.0), (8.6, 13.0)]),
             ],
             Self::Memory => vec![
                 Path::closed(&[(2.5, 3.5), (13.5, 3.5), (13.5, 12.5), (2.5, 12.5)]),
@@ -373,6 +373,16 @@ pub struct Path {
     pub points: Vec<(f32, f32)>,
     /// Whether the last point joins back to the first.
     pub closed: bool,
+    /// Whether the enclosed area is filled rather than outlined.
+    ///
+    /// Almost nothing here wants this. An icon set drawn in one weight
+    /// of stroke reads as one set, and a filled shape among outlined
+    /// ones is the shape that shouts. The exception is a mark that is
+    /// *solid in life* — the platform's four panes are solid, and
+    /// outlining them at eighteen points produced four hollow squares
+    /// that read as a keypad and looked thin beside the solid, coloured
+    /// application icons on neighbouring rows.
+    pub filled: bool,
 }
 
 impl Path {
@@ -381,6 +391,7 @@ impl Path {
         Self {
             points: points.to_vec(),
             closed: false,
+            filled: false,
         }
     }
 
@@ -389,6 +400,16 @@ impl Path {
         Self {
             points: points.to_vec(),
             closed: true,
+            filled: false,
+        }
+    }
+
+    /// The same, filled rather than outlined. See [`Path::filled`].
+    fn solid(points: &[(f32, f32)]) -> Self {
+        Self {
+            points: points.to_vec(),
+            closed: true,
+            filled: true,
         }
     }
 
@@ -419,6 +440,7 @@ impl Path {
         Self {
             points,
             closed: false,
+            filled: false,
         }
     }
 
@@ -433,6 +455,7 @@ impl Path {
         Self {
             points: vec![(x, y), (x, y)],
             closed: false,
+            filled: false,
         }
     }
 
