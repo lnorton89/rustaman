@@ -397,13 +397,22 @@ mod tests {
         // view *settles*, not whether it ever requests one.
         const PASSES: usize = 12;
 
-        for view in View::ALL {
+        // Both scales. A repaint loop is if anything *more* likely at a
+        // fractional one: the loop this test exists for was a scrollbar
+        // whose visibility disagreed with its stored state every frame,
+        // and whether a scrollbar is needed is decided by a comparison
+        // that rounding can flip either way.
+        for (view, scale) in View::ALL
+            .into_iter()
+            .flat_map(|view| [(view, 1.0f32), (view, 1.5f32)])
+        {
             let mut app = an_app_showing(view);
 
             let window =
                 egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1180.0, 760.0));
             let ctx = egui::Context::default();
             theme::apply(&ctx, &app.theme.clone());
+            ctx.set_pixels_per_point(scale);
 
             let mut settled = None;
             for pass in 0..PASSES {
@@ -443,7 +452,7 @@ mod tests {
                 .collect();
             assert!(
                 settled.is_some(),
-                "the {view:?} view still wanted an immediate repaint after                  {PASSES} passes with no input. Something in it disagrees with                  its own stored state every frame — two scroll areas sharing                  an id is the way this has happened before. Causes: {causes:#?}"
+                "the {view:?} view at {scale}x scale still wanted an immediate                  repaint after {PASSES} passes with no input. Something in it                  disagrees with its own stored state every frame — two scroll                  areas sharing an id is the way this has happened before.                  Causes: {causes:#?}"
             );
         }
         Ok(())
@@ -477,66 +486,81 @@ mod tests {
             ("the smallest window it allows", [780.0, 480.0]),
         ];
 
+        // And at a real display scale as well as at one.
+        //
+        // 1.0 is the one value where nothing rounds: every edge lands on
+        // a whole device pixel, so a rect that is half a pixel too wide
+        // is indistinguishable from one that fits. Windows offers 125,
+        // 150 and 175 per cent and most laptops ship on one of them, so
+        // the scale this has always tested at is the scale almost nobody
+        // runs. 1.5 was where the panel hairlines first became visible.
+        let scales = [1.0, 1.5];
+
         for (size_name, size) in sizes {
-            for view in View::ALL {
-                let mut app = an_app_showing(view);
+            for scale in scales {
+                for view in View::ALL {
+                    let mut app = an_app_showing(view);
 
-                let window =
-                    egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(size[0], size[1]));
-                // The pane the app actually gives a view: inset by the
-                // navigation rail and the content padding, and short of
-                // the bottom for the status bar.
-                //
-                // Modelled rather than simplified to the whole window,
-                // and the difference is not cosmetic: at the smallest
-                // window the rail and the padding take a hundred and
-                // ninety points, which is the difference between a
-                // table that fits and one that does not. A test handed
-                // the whole window checks the views at a width the app
-                // never gives them.
-                let pane = egui::Rect::from_min_max(
-                    egui::pos2(theme::NAV_WIDTH + theme::PAD, 0.0),
-                    egui::pos2(window.right() - theme::PAD, window.bottom() - 120.0),
-                );
-
-                let ctx = egui::Context::default();
-                theme::apply(&ctx, &app.theme.clone());
-                let mut output = ctx.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(window),
-                        ..Default::default()
-                    },
-                    |ui| {
-                        ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
-                            draw_view(&mut app, view, ui);
-                        });
-                    },
-                );
-                output.textures_delta.clear();
-
-                // The two axes get different tolerances, because only
-                // one of them has anything legitimate to allow.
-                //
-                // Sideways, a row's fill is *deliberately* widened past
-                // its viewport by half the item spacing —
-                // `widgets::row_clip`, covering `egui_extras`' own hover
-                // fill, which is expanded by that much and would
-                // otherwise show as a strip of the control colour down
-                // the leading edge of every hovered row. So the
-                // horizontal tolerance is that overhang plus feathering,
-                // and it is a known quantity rather than a fudge.
-                //
-                // Vertically there is no such allowance and none is
-                // wanted: painting below the pane is the whole fault, so
-                // the only tolerance is epaint's feathering.
-                const FEATHER: f32 = 2.0;
-                let bleed = 0.5 * theme::SPACE_SM + 1.0 + FEATHER;
-                let allowed = pane.expand2(egui::vec2(bleed, FEATHER));
-                for visible in painted(&ctx, output.shapes) {
-                    assert!(
-                        allowed.contains_rect(visible),
-                        "at {size_name}, the {view:?} view painted {visible:?},                          outside the pane it was given ({pane:?}). Whatever is                          beside or below this view is being drawn over: the                          Details table did exactly that to its own inspector,                          and a half-visible row did it to the status bar"
+                    let window = egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::Vec2::new(size[0], size[1]),
                     );
+                    // The pane the app actually gives a view: inset by the
+                    // navigation rail and the content padding, and short of
+                    // the bottom for the status bar.
+                    //
+                    // Modelled rather than simplified to the whole window,
+                    // and the difference is not cosmetic: at the smallest
+                    // window the rail and the padding take a hundred and
+                    // ninety points, which is the difference between a
+                    // table that fits and one that does not. A test handed
+                    // the whole window checks the views at a width the app
+                    // never gives them.
+                    let pane = egui::Rect::from_min_max(
+                        egui::pos2(theme::NAV_WIDTH + theme::PAD, 0.0),
+                        egui::pos2(window.right() - theme::PAD, window.bottom() - 120.0),
+                    );
+
+                    let ctx = egui::Context::default();
+                    theme::apply(&ctx, &app.theme.clone());
+                    ctx.set_pixels_per_point(scale);
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(window),
+                            ..Default::default()
+                        },
+                        |ui| {
+                            ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
+                                draw_view(&mut app, view, ui);
+                            });
+                        },
+                    );
+                    output.textures_delta.clear();
+
+                    // The two axes get different tolerances, because only
+                    // one of them has anything legitimate to allow.
+                    //
+                    // Sideways, a row's fill is *deliberately* widened past
+                    // its viewport by half the item spacing —
+                    // `widgets::row_clip`, covering `egui_extras`' own hover
+                    // fill, which is expanded by that much and would
+                    // otherwise show as a strip of the control colour down
+                    // the leading edge of every hovered row. So the
+                    // horizontal tolerance is that overhang plus feathering,
+                    // and it is a known quantity rather than a fudge.
+                    //
+                    // Vertically there is no such allowance and none is
+                    // wanted: painting below the pane is the whole fault, so
+                    // the only tolerance is epaint's feathering.
+                    const FEATHER: f32 = 2.0;
+                    let bleed = 0.5 * theme::SPACE_SM + 1.0 + FEATHER;
+                    let allowed = pane.expand2(egui::vec2(bleed, FEATHER));
+                    for visible in painted(&ctx, output.shapes) {
+                        assert!(
+                        allowed.contains_rect(visible),
+                        "at {size_name} and {scale}x scale, the {view:?} view                          painted {visible:?}, outside the pane it was given                          ({pane:?}). Whatever is beside or below this view is                          being drawn over: the Details table did exactly that                          to its own inspector, and a half-visible row did it                          to the status bar"
+                    );
+                    }
                 }
             }
         }
