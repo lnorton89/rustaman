@@ -64,6 +64,8 @@ pub enum View {
     Processes,
     /// CPU, memory, disk, network and GPU graphs.
     Performance,
+    /// Per-process memory: what is holding it, and how.
+    Memory,
     /// A flat, technical table of every process.
     Details,
     /// Windows services.
@@ -76,9 +78,10 @@ pub enum View {
 
 impl View {
     /// Every view, in the order the navigation rail lists them.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Processes,
         Self::Performance,
+        Self::Memory,
         Self::Details,
         Self::Services,
         Self::Startup,
@@ -91,6 +94,7 @@ impl View {
         match self {
             Self::Processes => "Processes",
             Self::Performance => "Performance",
+            Self::Memory => "Memory",
             Self::Details => "Details",
             Self::Services => "Services",
             Self::Startup => "Startup",
@@ -110,6 +114,7 @@ impl View {
         match self {
             Self::Processes => Icon::Processes,
             Self::Performance => Icon::Performance,
+            Self::Memory => Icon::Memory,
             Self::Details => Icon::Details,
             Self::Services => Icon::Services,
             Self::Startup => Icon::Startup,
@@ -126,6 +131,7 @@ impl View {
         match self {
             Self::Processes => "processes",
             Self::Performance => "performance",
+            Self::Memory => "memory",
             Self::Details => "details",
             Self::Services => "services",
             Self::Startup => "startup",
@@ -293,6 +299,68 @@ impl Default for PerformanceView {
             focus: PerformanceFocus::default(),
             network_selected: None,
             network_virtual_expanded: false,
+        }
+    }
+}
+
+/// The Memory view's own state.
+///
+/// Small on purpose: everything it draws comes from the snapshot the
+/// sampler already produced, so there is nothing to cache here — only
+/// what the *reader* has chosen.
+#[derive(Default)]
+pub struct MemoryView {
+    /// The process whose breakdown is shown, if one has been picked.
+    ///
+    /// Keyed on [`ProcessKey`] rather than a PID or a tile index: the
+    /// treemap is rebuilt from a fresh snapshot every second and tiles
+    /// move, so an index would select whatever landed in that spot.
+    pub selected: Option<ProcessKey>,
+    /// Whether the treemap is sized by private working set or by total
+    /// commit. Two genuinely different questions — see
+    /// [`MemoryMeasure`].
+    pub measure: MemoryMeasure,
+}
+
+/// What the Memory view's treemap sizes its tiles by.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MemoryMeasure {
+    /// Private working set: the resident pages a process shares with
+    /// nobody.
+    ///
+    /// The default, and the only one of the two that adds up. Summed
+    /// across the machine it approaches the memory actually in use,
+    /// because no page is counted twice.
+    #[default]
+    Resident,
+    /// Private commit: everything the process has been promised,
+    /// resident or paged out.
+    ///
+    /// Larger than the resident figure, and the one that answers "what
+    /// will this cost when it is all touched at once" rather than "what
+    /// is it costing now".
+    Committed,
+}
+
+impl MemoryMeasure {
+    /// Both, in the order the switch offers them.
+    pub const ALL: [Self; 2] = [Self::Resident, Self::Committed];
+
+    /// The word on the switch.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Resident => "In RAM",
+            Self::Committed => "Committed",
+        }
+    }
+
+    /// What this measure says one process is holding.
+    #[must_use]
+    pub fn of(self, row: &crate::model::ProcessRow) -> u64 {
+        match self {
+            Self::Resident => row.private_working_set,
+            Self::Committed => row.private_bytes,
         }
     }
 }
@@ -558,6 +626,8 @@ pub struct App {
     pub services: ServicesView,
     /// The Startup view's state.
     pub startup: StartupView,
+    /// The Memory view's state.
+    pub memory_view: MemoryView,
     /// A confirmation awaiting an answer, if any.
     pub pending: Option<Pending>,
     /// Whether the about panel is open.
@@ -617,6 +687,7 @@ impl App {
             performance: PerformanceView::default(),
             services: ServicesView::default(),
             startup: StartupView::default(),
+            memory_view: MemoryView::default(),
             pending: None,
             about: false,
             toast: None,

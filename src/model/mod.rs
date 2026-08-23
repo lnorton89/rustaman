@@ -110,6 +110,26 @@ pub struct ProcessRow {
     /// meaningless on 64-bit; kept because it is the one number that
     /// exposes a runaway reservation.
     pub virtual_bytes: u64,
+    /// Resident pages this process shares with nobody.
+    ///
+    /// The figure to sum across a machine, and the one the Memory view
+    /// sizes its treemap by. A plain working set counts every DLL and
+    /// mapped file against every process that has it open, so adding
+    /// working sets up gives a total far larger than the machine has.
+    pub private_working_set: u64,
+    /// The most working set this process has ever held.
+    pub peak_working_set: u64,
+    /// The most private commit it has ever held.
+    pub peak_private_bytes: u64,
+    /// Kernel paged pool charged to this process.
+    pub paged_pool: u64,
+    /// Kernel non-paged pool charged to this process.
+    pub nonpaged_pool: u64,
+    /// Page faults since it started, soft and hard together.
+    pub page_faults: u64,
+    /// The hard ones alone — the faults that had to reach the disk, and
+    /// so the ones that mean a process is thrashing rather than growing.
+    pub hard_faults: u64,
     /// Threads in the process.
     pub thread_count: u32,
     /// Open kernel handles. A number that only ever climbs is the
@@ -164,6 +184,29 @@ impl ProcessRow {
         } else {
             &self.description
         }
+    }
+
+    /// Resident pages this process shares with others — its DLLs, its
+    /// mapped files, the parts of it a sibling copy is also using.
+    ///
+    /// Derived rather than reported: the kernel gives the working set
+    /// and the private part of it, and the difference is the rest.
+    /// Saturating because the two are sampled from one buffer but
+    /// describe a process that is still running, and a private working
+    /// set momentarily larger than the total would otherwise wrap.
+    #[must_use]
+    pub fn shared_working_set(&self) -> u64 {
+        self.working_set.saturating_sub(self.private_working_set)
+    }
+
+    /// Private commit that is **not** resident — pages this process has
+    /// been promised and is not currently holding in RAM.
+    ///
+    /// A process with a large figure here has been paged out, which is
+    /// what "it went away for a moment when I came back to it" is.
+    #[must_use]
+    pub fn paged_out(&self) -> u64 {
+        self.private_bytes.saturating_sub(self.private_working_set)
     }
 
     /// Combined disk throughput, which is what the single "Disk" column

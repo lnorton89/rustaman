@@ -94,6 +94,8 @@ pub enum Icon {
     Processes,
     /// The Performance view: a rising line on an axis.
     Performance,
+    /// The Memory view: a box divided into unequal panes.
+    Memory,
     /// The Details view: a list with leading markers.
     Details,
     /// The Services view: a gear.
@@ -161,6 +163,16 @@ impl Icon {
             Self::Performance => vec![
                 Path::open(&[(2.5, 13.0), (13.5, 13.0)]),
                 Path::open(&[(3.0, 10.5), (6.0, 6.0), (9.0, 9.0), (13.0, 3.5)]),
+            ],
+            // A box cut into unequal panes — the shape of the view it
+            // opens, which is a treemap. Deliberately *not* a memory
+            // module with pins: that draws the hardware, and this view
+            // is about how the machine's memory is being spent rather
+            // than what it is plugged into.
+            Self::Memory => vec![
+                Path::closed(&[(2.5, 3.5), (13.5, 3.5), (13.5, 12.5), (2.5, 12.5)]),
+                Path::open(&[(9.0, 3.5), (9.0, 12.5)]),
+                Path::open(&[(9.0, 8.0), (13.5, 8.0)]),
             ],
             // A list with leading dots: the same rows as `Processes` but
             // marked, which is the difference between the two views.
@@ -389,9 +401,10 @@ mod tests {
     /// a variant nobody drew. This list is what makes the *tests* cover
     /// it too, and the length assertion below is what catches a variant
     /// added to the enum and not to this list.
-    const ALL: [Icon; 22] = [
+    const ALL: [Icon; 23] = [
         Icon::Processes,
         Icon::Performance,
+        Icon::Memory,
         Icon::Details,
         Icon::Services,
         Icon::Startup,

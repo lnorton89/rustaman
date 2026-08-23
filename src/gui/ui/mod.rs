@@ -41,6 +41,7 @@ pub mod details;
 pub mod dnd;
 pub mod graph;
 pub mod icon;
+pub mod memory;
 pub mod modal;
 pub mod motion;
 pub mod performance;
@@ -121,6 +122,7 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
             match app.view {
                 View::Processes => processes::draw(app, ui),
                 View::Performance => performance::draw(app, ui),
+                View::Memory => memory::draw(app, ui),
                 View::Details => details::draw(app, ui),
                 View::Services => services::draw(app, ui),
                 View::Startup => services::draw_startup(app, ui),
@@ -164,6 +166,7 @@ fn shortcuts(app: &mut App, ui: &Ui) {
                 Key::Num4,
                 Key::Num5,
                 Key::Num6,
+                Key::Num7,
             ]
             .map(|key| input.modifiers.command && input.key_pressed(key)),
         )
@@ -227,7 +230,7 @@ pub const SHORTCUTS: [(&str, &str); 5] = [
     ("F5", "Re-read services and startup entries"),
     ("Ctrl+F", "Search"),
     ("Esc", "Clear the search, then the selection"),
-    ("Ctrl+1…6", "Switch view"),
+    ("Ctrl+1…7", "Switch view"),
 ];
 
 #[cfg(test)]
@@ -245,7 +248,7 @@ mod tests {
                 "F5" => source.contains("Key::F5"),
                 "Ctrl+F" => source.contains("Key::F)"),
                 "Esc" => source.contains("Key::Escape"),
-                "Ctrl+1…6" => source.contains("Key::Num1"),
+                "Ctrl+1…7" => source.contains("Key::Num1"),
                 _ => false,
             };
             assert!(
@@ -259,7 +262,7 @@ mod tests {
     fn there_is_a_shortcut_for_every_view() {
         // Ctrl+1..6 covers the rail, so a view added later without a
         // digit would be the one view with no shortcut.
-        let digits = 6;
+        let digits = 7;
         assert_eq!(
             View::ALL.len(),
             digits,
@@ -284,10 +287,11 @@ mod tests {
     /// `icon.rs` and `motion.rs` are deliberately absent — they are where
     /// colours, shapes and durations are *made*, so a rule forbidding
     /// those things would forbid the definitions themselves.
-    const DRAWING_MODULES: [(&str, &str); 9] = [
+    const DRAWING_MODULES: [(&str, &str); 10] = [
         ("chrome.rs", include_str!("chrome.rs")),
         ("details.rs", include_str!("details.rs")),
         ("graph.rs", include_str!("graph.rs")),
+        ("memory.rs", include_str!("memory.rs")),
         ("modal.rs", include_str!("modal.rs")),
         ("performance.rs", include_str!("performance.rs")),
         ("processes.rs", include_str!("processes.rs")),

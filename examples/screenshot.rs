@@ -146,7 +146,7 @@ mod windows {
     }
 
     /// Every scene, in the order `--list` prints them.
-    const SCENES: [Scene; 18] = [
+    const SCENES: [Scene; 21] = [
         Scene {
             name: "live-network",
             about: "Performance › Network on THIS machine, really sampled",
@@ -154,6 +154,18 @@ mod windows {
             focus: PerformanceFocus::Network,
             expanded: true,
             size: Some((1280.0, 1500.0)),
+            live: true,
+            select: false,
+            modal: false,
+            hover: None,
+        },
+        Scene {
+            name: "live-memory",
+            about: "The Memory view on THIS machine, really sampled",
+            view: View::Memory,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
             live: true,
             select: false,
             modal: false,
@@ -220,8 +232,8 @@ mod windows {
             hover: None,
         },
         Scene {
-            name: "memory",
-            about: "Performance › Memory",
+            name: "perf-memory",
+            about: "Performance › Memory — the machine's own totals",
             view: View::Performance,
             focus: PerformanceFocus::Memory,
             expanded: false,
@@ -352,6 +364,30 @@ mod windows {
             hover: Some((700.0, 392.0)),
         },
         Scene {
+            name: "memory",
+            about: "The Memory view: a treemap of what is holding memory",
+            view: View::Memory,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: false,
+            modal: false,
+            hover: None,
+        },
+        Scene {
+            name: "memory-picked",
+            about: "The same, with a tile picked so its breakdown shows",
+            view: View::Memory,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: true,
+            modal: false,
+            hover: None,
+        },
+        Scene {
             name: "settings",
             about: "Theme, interval and the about panel",
             view: View::Settings,
@@ -365,7 +401,25 @@ mod windows {
         },
     ];
 
+    /// Every scene's name is the one `--scene` matches on, and matching
+    /// takes the *first*. A duplicate therefore does not collide
+    /// loudly — it silently shadows, and `--scene memory` quietly draws
+    /// a different view than the one asked for. Checked here rather than
+    /// left to whoever notices the wrong picture.
+    fn names_are_unique() -> Result<()> {
+        let mut seen: Vec<&str> = SCENES.iter().map(|scene| scene.name).collect();
+        let total = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        anyhow::ensure!(
+            seen.len() == total,
+            "two scenes share a name, so one of them cannot be reached"
+        );
+        Ok(())
+    }
+
     pub(crate) fn main() -> Result<()> {
+        names_are_unique()?;
         use clap::Parser;
         let cli = Cli::parse();
 
@@ -482,6 +536,7 @@ mod windows {
             });
             app.processes.selected = chosen;
             app.details.selected = chosen;
+            app.memory_view.selected = chosen;
         }
 
         if scene.modal {
@@ -769,6 +824,16 @@ mod windows {
                 working_set: row.memory,
                 private_bytes: row.memory / 2,
                 virtual_bytes: row.memory * 3,
+                // A shared slice that varies by row, so the Memory
+                // view's private/shared split is a real split rather
+                // than the same ratio everywhere.
+                private_working_set: row.memory / 2 + row.memory / (4 + index as u64 % 5),
+                peak_working_set: row.memory + row.memory / 8,
+                peak_private_bytes: row.memory / 2 + row.memory / 16,
+                paged_pool: u64::from(row.handles) * 512,
+                nonpaged_pool: u64::from(row.handles) * 128,
+                page_faults: u64::from(row.handles) * 97,
+                hard_faults: u64::from(row.threads) * 3,
                 thread_count: row.threads,
                 handle_count: row.handles,
                 disk_read_rate: f64::from(row.threads) * 4_096.0,

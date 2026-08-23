@@ -79,6 +79,29 @@ pub struct RawProcess {
     pub private_bytes: u64,
     /// Virtual address space, in bytes.
     pub virtual_bytes: u64,
+    /// Private working set, in bytes — the resident pages this process
+    /// does not share with any other.
+    ///
+    /// The honest answer to "how much memory is this costing the
+    /// machine": the rest of its working set is DLLs and mapped files
+    /// that every other process using them is also counted for, so
+    /// summing plain working sets across a machine counts the same
+    /// pages many times over.
+    pub private_working_set: u64,
+    /// The most working set this process has ever held.
+    pub peak_working_set: u64,
+    /// The most private commit it has ever held.
+    pub peak_private_bytes: u64,
+    /// Kernel paged pool charged to this process.
+    pub paged_pool: u64,
+    /// Kernel non-paged pool charged to this process.
+    pub nonpaged_pool: u64,
+    /// Page faults since it started — soft and hard together.
+    pub page_faults: u64,
+    /// The hard ones alone: faults that had to reach the disk. This is
+    /// the number that means a process is *thrashing* rather than merely
+    /// growing.
+    pub hard_faults: u64,
     /// Cumulative bytes read.
     pub read_bytes: u64,
     /// Cumulative bytes written.
@@ -154,6 +177,19 @@ pub fn walk(bytes: &[u8]) -> Vec<RawProcess> {
             working_set: entry.WorkingSetSize as u64,
             private_bytes: entry.PagefileUsage as u64,
             virtual_bytes: entry.VirtualSize as u64,
+            // Already in the buffer the enumeration walks, so the whole
+            // memory view costs no extra syscall — see `gui::ui::memory`.
+            // `WorkingSetPrivateSize` is signed in the kernel's own
+            // declaration and is never negative in practice; a negative
+            // reading is treated as absent rather than wrapped into an
+            // enormous unsigned one.
+            private_working_set: u64::try_from(entry.WorkingSetPrivateSize).unwrap_or(0),
+            peak_working_set: entry.PeakWorkingSetSize as u64,
+            peak_private_bytes: entry.PeakPagefileUsage as u64,
+            paged_pool: entry.QuotaPagedPoolUsage as u64,
+            nonpaged_pool: entry.QuotaNonPagedPoolUsage as u64,
+            page_faults: u64::from(entry.PageFaultCount),
+            hard_faults: u64::from(entry.HardFaultCount),
             read_bytes: entry.ReadTransferCount.max(0) as u64,
             write_bytes: entry.WriteTransferCount.max(0) as u64,
             other_bytes: entry.OtherTransferCount.max(0) as u64,
