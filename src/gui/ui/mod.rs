@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn no_table_paints_below_the_rect_it_was_given() -> anyhow::Result<()> {
+    fn no_view_paints_outside_the_pane_it_was_given() -> anyhow::Result<()> {
         // The bug this exists for is one that three rounds of looking at
         // screenshots failed to find, because it cannot appear in a list
         // short enough to fit: a row only *half* inside the scroll
@@ -335,12 +335,7 @@ mod tests {
         // than as a pixel measurement, because that is the actual
         // contract between a view and its pane, and it is the one a
         // clip that replaces rather than intersects can break.
-        for view in [
-            View::Processes,
-            View::Details,
-            View::Services,
-            View::Startup,
-        ] {
+        for view in View::ALL {
             let snapshot = a_long_list();
             let mut app = App::new(crate::config::Config::default());
             app.view = view;
@@ -395,26 +390,37 @@ mod tests {
                         View::Details => details::draw(&mut app, ui),
                         View::Services => services::draw(&mut app, ui),
                         View::Startup => services::draw_startup(&mut app, ui),
-                        // Named rather than wildcarded, so a view added
-                        // later is a compile error here and somebody has
-                        // to decide whether it belongs. The rest are not
-                        // tables and cannot exhibit this.
-                        View::Performance | View::Memory | View::System | View::Settings => {}
+                        View::Performance => performance::draw(&mut app, ui),
+                        View::Memory => memory::draw(&mut app, ui),
+                        View::System => system_info::draw(&mut app, ui),
+                        View::Settings => settings::draw(&mut app, ui),
                     });
                 },
             );
             output.textures_delta.clear();
 
-            // A point of slop for the feathering epaint adds to every
-            // edge, and for the half-spacing overhang a row's fill is
-            // deliberately widened by.
-            const SLOP: f32 = 2.0;
+            // The two axes get different tolerances, because only one
+            // of them has anything legitimate to allow.
+            //
+            // Sideways, a row's fill is *deliberately* widened past its
+            // viewport by half the item spacing — `widgets::row_clip`,
+            // covering `egui_extras`' own hover fill, which is expanded
+            // by that much and would otherwise show as a strip of the
+            // control colour down the leading edge of every hovered
+            // row. So the horizontal tolerance is that overhang plus
+            // feathering, and it is a known quantity rather than a
+            // fudge.
+            //
+            // Vertically there is no such allowance and none is wanted:
+            // painting below the pane is the whole fault, so the only
+            // tolerance is epaint's feathering.
+            const FEATHER: f32 = 2.0;
+            let bleed = 0.5 * theme::SPACE_SM + 1.0 + FEATHER;
+            let allowed = pane.expand2(egui::vec2(bleed, FEATHER));
             for visible in painted(&ctx, output.shapes) {
                 assert!(
-                    visible.bottom() <= pane.bottom() + SLOP,
-                    "the {view:?} view painted down to {} with a pane ending at {} —                      a row that is only half inside the scroll viewport is painting                      its full height through the bottom of the table",
-                    visible.bottom(),
-                    pane.bottom()
+                    allowed.contains_rect(visible),
+                    "the {view:?} view painted {visible:?}, outside the pane it                      was given ({pane:?}). Whatever is beside or below this view                      is being drawn over: the Details table did exactly that to                      its own inspector, and a half-visible row did it to the                      status bar"
                 );
             }
         }
