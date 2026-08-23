@@ -118,6 +118,16 @@ mod windows {
         /// Theme id, e.g. `light`. Defaults to the app's own default.
         #[arg(long, value_name = "ID")]
         theme: Option<String>,
+
+        /// Display scale, as Windows reports it: 1.0, 1.25, 1.5, 1.75.
+        ///
+        /// The harness draws at 1.0 by default and every machine this
+        /// app runs on does not. That gap has already hidden one defect:
+        /// a seam down a table row that appears at a fractional scale
+        /// and cannot appear at an integral one, because the thing that
+        /// causes it is how a cell's rect rounds to the pixel grid.
+        #[arg(long, value_name = "FACTOR")]
+        scale: Option<f32>,
     }
 
     /// One thing worth looking at: a view, a panel within it, and the
@@ -556,6 +566,16 @@ mod windows {
             None => None,
         };
 
+        // One by default, which is what a headless target has and what
+        // no real machine does. A scale is only useful here if it can be
+        // fractional: the defects it exposes come from a cell's rect
+        // rounding to the pixel grid, and at 1.0 or 2.0 nothing rounds.
+        let scale = match cli.scale {
+            Some(factor) if factor.is_finite() && factor > 0.0 => factor,
+            Some(factor) => anyhow::bail!("--scale {factor} is not a usable display scale"),
+            None => 1.0,
+        };
+
         let chosen: Vec<&Scene> = if cli.all {
             // The fabricated scenes only. The live ones take a second
             // each waiting on the sampler, and they draw whatever this
@@ -582,7 +602,7 @@ mod windows {
                 (Some(path), true) => path.clone(),
                 _ => PathBuf::from(DEFAULT_DIRECTORY).join(format!("{}.png", scene.name)),
             };
-            render(scene, size, cli.theme.as_deref(), &path)?;
+            render(scene, size, cli.theme.as_deref(), scale, &path)?;
             println!("wrote {}", path.display());
         }
         Ok(())
@@ -615,6 +635,7 @@ mod windows {
         scene: &Scene,
         size: Option<(f32, f32)>,
         theme: Option<&str>,
+        scale: f32,
         path: &PathBuf,
     ) -> Result<()> {
         let (width, height) = size.or(scene.size).unwrap_or(DEFAULT_SIZE);
@@ -699,6 +720,7 @@ mod windows {
 
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(width, height))
+            .with_pixels_per_point(scale)
             .with_os(egui::os::OperatingSystem::Windows)
             .wgpu()
             .build_ui(move |ui| {
