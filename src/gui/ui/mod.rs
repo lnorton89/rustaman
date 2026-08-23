@@ -760,6 +760,24 @@ mod tests {
                     number + 1,
                     line.trim()
                 );
+                // And the line that *looks* like the handle. `Panel`
+                // strokes a separator at its inner edge by default, and
+                // every panel here is padded on both sides — so the
+                // stroke lands as a pale hairline floating in a gap,
+                // touching neither side, which is precisely what a
+                // grab handle looks like. Suppressing the drag while
+                // leaving the line draws the affordance for a gesture
+                // that was just removed.
+                //
+                // Three panels still had one after the Performance pair
+                // were fixed: the navigation rail, the title bar and the
+                // status bar. This half of the check is why.
+                assert!(
+                    chain.contains(".show_separator_line(false)"),
+                    "{name}:{} sizes a panel exactly but still strokes its                      separator: {}. A fixed panel's separator reads as the                      resize handle it no longer has — say                      `.show_separator_line(false)`",
+                    number + 1,
+                    line.trim()
+                );
             }
         }
     }

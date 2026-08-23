@@ -80,9 +80,16 @@ pub fn title_bar(app: &mut App, ui: &mut Ui) -> bool {
     let theme = app.theme.clone();
     let mut closing = false;
 
+    // `show_separator_line(false)` below: `Panel` strokes a separator
+    // at its inner edge by default, and every panel here is padded on
+    // both sides — so the stroke lands as a pale hairline floating in a
+    // gap, touching neither side, which is exactly what a grab handle
+    // looks like. This panel is `resizable(false)`, so that is an
+    // affordance for a gesture it cannot answer.
     egui::Panel::top("title-bar")
         .exact_size(TITLE_BAR_HEIGHT)
         .resizable(false)
+        .show_separator_line(false)
         .frame(
             egui::Frame::new()
                 .fill(theme::rgb(theme.app))
@@ -302,9 +309,16 @@ fn resize_regions(rect: Rect) -> [(Rect, ResizeDirection, egui::CursorIcon); 8] 
 /// Draws the navigation rail.
 pub fn nav_rail(app: &mut App, ui: &mut Ui) {
     let theme = app.theme.clone();
+    // `show_separator_line(false)` below: `Panel` strokes a separator
+    // at its inner edge by default, and every panel here is padded on
+    // both sides — so the stroke lands as a pale hairline floating in a
+    // gap, touching neither side, which is exactly what a grab handle
+    // looks like. This panel is `resizable(false)`, so that is an
+    // affordance for a gesture it cannot answer.
     egui::Panel::left("nav-rail")
         .exact_size(NAV_WIDTH)
         .resizable(false)
+        .show_separator_line(false)
         .frame(
             egui::Frame::new()
                 .fill(theme::rgb(theme.app))
@@ -365,9 +379,16 @@ pub fn status_bar(app: &mut App, ui: &mut Ui) {
     /// vertical inset either side.
     const HEIGHT: f32 = 26.0;
 
+    // `show_separator_line(false)` below: `Panel` strokes a separator
+    // at its inner edge by default, and every panel here is padded on
+    // both sides — so the stroke lands as a pale hairline floating in a
+    // gap, touching neither side, which is exactly what a grab handle
+    // looks like. This panel is `resizable(false)`, so that is an
+    // affordance for a gesture it cannot answer.
     egui::Panel::bottom("status-bar")
         .exact_size(HEIGHT)
         .resizable(false)
+        .show_separator_line(false)
         .frame(
             egui::Frame::new()
                 .fill(theme::rgb(theme.panel))
