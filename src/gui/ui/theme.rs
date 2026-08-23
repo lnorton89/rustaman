@@ -293,7 +293,7 @@ pub fn card(theme: &Palette) -> egui::Frame {
 ///
 /// Rows are separated by their own fill: the stripe, the hover lift and
 /// the selection bar all run the width of the row (see
-/// [`super::widgets::row_background`]), which is what makes a row
+/// [`super::widgets::Row`]), which is what makes a row
 /// readable across eight columns. Vertical rules on top of that are a
 /// second, competing structure, and the one that wins is the one drawn
 /// in a solid colour from top to bottom.

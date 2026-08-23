@@ -265,30 +265,31 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect) {
                 let key = process.key();
                 let selected = app.details.selected == Some(key);
 
-                // `..=COLUMNS.len()`: the trailing spacer is a real
-                // column and has to be filled, or the row stops one
-                // column short of the window's edge.
-                for column in 0..=COLUMNS.len() {
-                    row.col(|ui| match column {
-                        0 => {
-                            widgets::row_background(
-                                ui,
-                                theme,
-                                viewport,
-                                egui::Id::new("detail-row").with(key),
-                                selected,
-                                position % 2 == 1,
-                            );
+                let mut row = widgets::Row::record(
+                    &mut row,
+                    theme,
+                    viewport,
+                    egui::Id::new("detail-row").with(key),
+                    selected,
+                    position % 2 == 1,
+                );
+                for column in 0..COLUMNS.len() {
+                    row.cell(|ui| {
+                        if column == 0 {
                             ui.add_space(SPACE_SM);
                             ui.label(
                                 egui::RichText::new(process.display_name())
                                     .color(theme::rgb(theme.text)),
                             );
+                        } else {
+                            cell_text(ui, theme, column, process);
                         }
-                        _ if column < COLUMNS.len() => cell_text(ui, theme, column, process),
-                        _ => {}
                     });
                 }
+                // The trailing spacer is a real column and has to be
+                // filled, or the row stops one column short of the
+                // window's edge.
+                row.spacer();
 
                 let response = row.response();
                 if response.clicked() {

@@ -53,6 +53,7 @@ use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Rect, Response, Sense, Stroke, StrokeKind,
     TextStyle, Ui, Vec2,
 };
+use egui_extras::TableRow;
 
 /// How far a hover animation has progressed, 0..=1, eased.
 ///
@@ -335,7 +336,7 @@ pub fn status_chip_width(ui: &Ui, text: &str) -> f32 {
 /// worked only for as long as a row's stripe was (wrongly) confined to
 /// its first column: the moment a row filled edge to edge, every chip on
 /// every second row lost its pill and became a coloured word floating in
-/// the middle of a table. See [`row_background`].
+/// the middle of a table. See [`Row`].
 ///
 /// Tinting with the status's own colour fixes it in the direction the
 /// design wanted anyway. A green pill for Running and an amber one for
@@ -664,8 +665,9 @@ fn row_clip(ui: &Ui, viewport: Rect) -> Rect {
 
 /// Fills a grouping row — a category heading, not a record.
 ///
-/// Called from every cell of the row, like [`row_background`].
-pub fn group_row_background(ui: &Ui, theme: &Palette, viewport: Rect) {
+/// Painted behind every cell, like [`row_background`], and for the same
+/// reason. [`Row`] is what does the painting.
+fn group_row_background(ui: &Ui, theme: &Palette, viewport: Rect) {
     let mut painter = ui.painter().clone();
     painter.set_clip_rect(row_clip(ui, viewport));
     painter.rect_filled(
@@ -683,7 +685,7 @@ pub fn group_row_background(ui: &Ui, theme: &Palette, viewport: Rect) {
 /// that secondary text on a selected row still clears WCAG AA. See
 /// [`crate::theme::Palette::derive`].
 ///
-/// ## Called from every cell, not once per row
+/// ## Painted from every cell, not once per row
 ///
 /// `egui_extras` paints its own stripe, selection and hover **per cell**,
 /// before running that cell's contents, and its hover fill comes from
@@ -697,13 +699,16 @@ pub fn group_row_background(ui: &Ui, theme: &Palette, viewport: Rect) {
 /// scrollbar handle with it. So this paints per cell as well, on top, in
 /// the same gapless rect — the app's colours win by being painted last.
 ///
+/// Which is why this is private and [`Row`] is not: three of the app's
+/// four tables called it from their first cell only, and looked it.
+///
 /// ## It works `hovered` out itself
 ///
 /// All four call sites passed `false`, so the app's own hover ramp had
 /// never been drawn at all and the highlight people saw was
 /// `egui_extras`'. A parameter that every call site gets wrong is not a
 /// parameter.
-pub fn row_background(
+fn row_background(
     ui: &Ui,
     theme: &Palette,
     viewport: Rect,
@@ -747,6 +752,124 @@ pub fn row_background(
             Vec2::new(SELECTION_BAR, row.height() * grown),
         );
         painter.rect_filled(bar, CornerRadius::ZERO, theme::rgb(theme.accent));
+    }
+}
+
+/// Which fill a [`Row`] paints behind its cells.
+#[derive(Clone, Copy)]
+enum RowFill {
+    /// A record: striped by position, lit under the pointer, and
+    /// selectable.
+    Record {
+        id: egui::Id,
+        selected: bool,
+        striped: bool,
+    },
+    /// A category heading, which is none of those things.
+    Group,
+}
+
+/// One row of a table, painting its own background behind every cell.
+///
+/// ## Why the row draws its cells rather than the view drawing them
+///
+/// A row's fill has to be painted from *every* cell — see
+/// [`row_background`] for why `egui_extras` leaves no other option. A
+/// view that writes its own `row.col(..)` calls therefore has to remember
+/// to paint the fill in each one, and what actually happened is that
+/// three of the four tables painted it in the first cell and stopped:
+/// Details, Services and Startup all shipped with the stripe, the hover
+/// lift and the selection tint confined to their Name column, so a
+/// selected row read as a selected *name* with seven unrelated numbers
+/// beside it. The process tree was the only one that got it right, and
+/// only because it had been fixed by hand once already.
+///
+/// So the cell is the thing a view is handed, and the fill is not the
+/// view's business. `row.cell(|ui| ..)` in place of `row.col(|ui| ..)` is
+/// the whole difference at a call site.
+///
+/// Drop the trailing spacer column and the row stops one column short of
+/// the window's edge, which is why [`Row::spacer`] exists and is named
+/// for what it is rather than being a `cell` with an empty body.
+pub struct Row<'a, 'b, 'r> {
+    row: &'r mut TableRow<'a, 'b>,
+    theme: &'r Palette,
+    viewport: Rect,
+    fill: RowFill,
+}
+
+impl<'a, 'b, 'r> Row<'a, 'b, 'r> {
+    /// A record row — a process, a service, a startup entry.
+    ///
+    /// `id` keys the hover animation, and it must name the *thing* rather
+    /// than the slot it is in: keyed by row index, re-sorting the table
+    /// hands every row the animation state of whatever used to be there
+    /// and the whole table flashes. See [`crate::motion`].
+    pub fn record(
+        row: &'r mut TableRow<'a, 'b>,
+        theme: &'r Palette,
+        viewport: Rect,
+        id: egui::Id,
+        selected: bool,
+        striped: bool,
+    ) -> Self {
+        // `egui_extras`' own selection fill comes from
+        // `visuals.selection.bg_fill`, which is the accent at full
+        // strength — under the app's own tint that is a solid accent slab
+        // with unreadable text on it. The app paints selection itself, so
+        // the row is never selected as far as the table is concerned.
+        row.set_selected(false);
+        Self {
+            row,
+            theme,
+            viewport,
+            fill: RowFill::Record {
+                id,
+                selected,
+                striped,
+            },
+        }
+    }
+
+    /// A grouping row — a category heading, not a record.
+    pub fn group(row: &'r mut TableRow<'a, 'b>, theme: &'r Palette, viewport: Rect) -> Self {
+        row.set_selected(false);
+        Self {
+            row,
+            theme,
+            viewport,
+            fill: RowFill::Group,
+        }
+    }
+
+    /// Adds a cell, with the row's background already painted behind it.
+    pub fn cell(&mut self, contents: impl FnOnce(&mut Ui)) {
+        // Copied out before the call: `TableRow::col` borrows the row
+        // mutably, so the closure cannot read `self` while it runs.
+        let (theme, viewport, fill) = (self.theme, self.viewport, self.fill);
+        self.row.col(|ui| {
+            match fill {
+                RowFill::Record {
+                    id,
+                    selected,
+                    striped,
+                } => row_background(ui, theme, viewport, id, selected, striped),
+                RowFill::Group => group_row_background(ui, theme, viewport),
+            }
+            contents(ui);
+        });
+    }
+
+    /// Adds the trailing spacer cell — the one that absorbs the window's
+    /// slack, and the one a row has to fill to reach the window's edge.
+    pub fn spacer(&mut self) {
+        self.cell(|_| {});
+    }
+
+    /// The row's response: the union of its cells, which is what a click
+    /// anywhere along the row lands on.
+    pub fn response(&self) -> Response {
+        self.row.response()
     }
 }
 

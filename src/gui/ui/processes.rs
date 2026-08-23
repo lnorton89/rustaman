@@ -405,15 +405,9 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         collapsed,
                     } => {
                         let mut hit = false;
-                        // `COLUMNS.len() + 1` throughout: the trailing
-                        // spacer is a real column and has to be filled,
-                        // or every row below stops one column short of
-                        // the window edge.
-                        for slot in 0..=columns.len() {
-                            row.col(|ui| {
-                                // From every cell, not just the first —
-                                // see `widgets::row_background`.
-                                widgets::group_row_background(ui, theme, viewport);
+                        let mut row = widgets::Row::group(&mut row, theme, viewport);
+                        for slot in 0..columns.len() {
+                            row.cell(|ui| {
                                 match columns.get(slot) {
                                     // The heading sits in whichever slot
                                     // the Name column has been dragged
@@ -422,11 +416,14 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                                         hit |= group_heading(ui, theme, *kind, totals, *collapsed);
                                     }
                                     Some(key) => group_cell(ui, theme, *key, totals),
-                                    // The trailing spacer.
                                     None => {}
                                 }
                             });
                         }
+                        // The trailing spacer is a real column and has to
+                        // be filled, or every row stops one column short
+                        // of the window edge.
+                        row.spacer();
                         if hit || row.response().clicked() {
                             group_toggled = Some(*kind);
                         }
@@ -443,42 +440,32 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         };
                         let key = process.key();
                         let selected = app.processes.selected == Some(key);
-                        row.set_selected(false);
 
                         let mut disclosure = false;
-                        for slot in 0..=columns.len() {
-                            row.col(|ui| {
-                                // Before anything else in the cell, so
-                                // the heat gauges and the text land on
-                                // top of it — and from every cell, which
-                                // is what puts it over `egui_extras`'
-                                // own per-cell hover fill. See
-                                // `widgets::row_background`.
-                                widgets::row_background(
-                                    ui,
-                                    theme,
-                                    viewport,
-                                    egui::Id::new("row").with(key),
-                                    selected,
-                                    index % 2 == 1,
-                                );
-                                match columns.get(slot) {
-                                    Some(SortKey::Name) => {
-                                        disclosure = name_cell(
-                                            ui, theme, process, *depth, *children, *expanded,
-                                        );
-                                    }
-                                    Some(column) => {
-                                        metric_cell(
-                                            ui, theme, *column, process, totals, *children,
-                                            *expanded,
-                                        );
-                                    }
-                                    // The trailing spacer.
-                                    None => {}
+                        let mut row = widgets::Row::record(
+                            &mut row,
+                            theme,
+                            viewport,
+                            egui::Id::new("row").with(key),
+                            selected,
+                            index % 2 == 1,
+                        );
+                        for slot in 0..columns.len() {
+                            row.cell(|ui| match columns.get(slot) {
+                                Some(SortKey::Name) => {
+                                    disclosure =
+                                        name_cell(ui, theme, process, *depth, *children, *expanded);
                                 }
+                                Some(column) => {
+                                    metric_cell(
+                                        ui, theme, *column, process, totals, *children, *expanded,
+                                    );
+                                }
+                                None => {}
                             });
                         }
+                        // The trailing spacer; see the group row above.
+                        row.spacer();
 
                         let response = row.response();
                         if disclosure {

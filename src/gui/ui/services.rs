@@ -272,15 +272,15 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                 };
                 let selected = app.services.selected.as_ref() == Some(&service.name);
 
-                row.col(|ui| {
-                    widgets::row_background(
-                        ui,
-                        theme,
-                        viewport,
-                        egui::Id::new("service-row").with(position),
-                        selected,
-                        position % 2 == 1,
-                    );
+                let mut row = widgets::Row::record(
+                    &mut row,
+                    theme,
+                    viewport,
+                    egui::Id::new("service-row").with(&service.name),
+                    selected,
+                    position % 2 == 1,
+                );
+                row.cell(|ui| {
                     ui.add_space(SPACE_SM);
                     // The display name leads: it is what a person
                     // recognises. The short name is the next column,
@@ -289,14 +289,14 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         egui::RichText::new(service_label(service)).color(theme::rgb(theme.text)),
                     );
                 });
-                row.col(|ui| {
+                row.cell(|ui| {
                     ui.label(
                         egui::RichText::new(&service.name)
                             .color(theme::rgb(theme.text_muted))
                             .text_style(egui::TextStyle::Small),
                     );
                 });
-                row.col(|ui| {
+                row.cell(|ui| {
                     let color = match service.state {
                         ServiceState::Running => theme.success,
                         ServiceState::Stopped => theme.text_muted,
@@ -305,13 +305,13 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                     };
                     widgets::status_chip(ui, service.state.label(), color);
                 });
-                row.col(|ui| {
+                row.cell(|ui| {
                     let text = service
                         .pid
                         .map_or_else(|| crate::format::DASH.to_string(), |pid| pid.to_string());
                     widgets::number(ui, theme, &text, service.pid.is_none());
                 });
-                row.col(|ui| {
+                row.cell(|ui| {
                     // A stopped service has no host, and neither has a
                     // running one whose host is outside this snapshot —
                     // a service can start between two samples. Both read
@@ -643,15 +643,15 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                 };
                 let selected = app.startup.selected.as_ref() == Some(&entry.name);
 
-                row.col(|ui| {
-                    widgets::row_background(
-                        ui,
-                        theme,
-                        viewport,
-                        egui::Id::new("startup-row").with(position),
-                        selected,
-                        position % 2 == 1,
-                    );
+                let mut row = widgets::Row::record(
+                    &mut row,
+                    theme,
+                    viewport,
+                    egui::Id::new("startup-row").with(&entry.name),
+                    selected,
+                    position % 2 == 1,
+                );
+                row.cell(|ui| {
                     ui.add_space(SPACE_SM);
                     ui.label(egui::RichText::new(&entry.name).color(theme::rgb(theme.text)));
                     if entry.all_users {
@@ -659,7 +659,7 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         widgets::status_chip(ui, "All users", theme.text_muted);
                     }
                 });
-                row.col(|ui| {
+                row.cell(|ui| {
                     let (label, color) = if entry.enabled {
                         ("Enabled", theme.success)
                     } else {
@@ -667,14 +667,14 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                     };
                     widgets::status_chip(ui, label, color);
                 });
-                row.col(|ui| {
+                row.cell(|ui| {
                     ui.label(
                         egui::RichText::new(entry.location)
                             .color(theme::rgb(theme.text_muted))
                             .text_style(egui::TextStyle::Small),
                     );
                 });
-                row.col(|ui| {
+                row.cell(|ui| {
                     // Monospace, because this is a path: a proportional
                     // font makes two entries under the same directory
                     // look like two unrelated strings, and the shared
