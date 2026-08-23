@@ -861,7 +861,7 @@ fn startup_table_body(
                 }
                 response
                     .clone()
-                    .on_hover_text(&entry.command)
+                    .on_hover_text_at_pointer(&entry.command)
                     .context_menu(|ui| {
                         if ui.button("Open file location").clicked() {
                             reveal = entry.executable().filter(|path| path.exists());

@@ -554,7 +554,7 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             unit: graph::Unit::Percent,
         },
     );
-    graph_response.on_hover_text(format!(
+    graph_response.on_hover_text_at_pointer(format!(
         "CPU history\nCurrent {}\nRecent average {}\nRecent peak {}\nKernel now {}",
         crate::format::percent(system.cpu.total_percent),
         crate::format::percent(f64::from(app.performance.cpu.mean())),
@@ -745,7 +745,7 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             unit: graph::Unit::Percent,
         },
     );
-    graph_response.on_hover_text(format!(
+    graph_response.on_hover_text_at_pointer(format!(
         "Memory load history\nCurrent {}\nRecent average {}\nRecent peak {}",
         crate::format::percent(system.memory.used_percent()),
         crate::format::percent(f64::from(app.performance.memory.mean())),
@@ -893,7 +893,7 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             },
         ],
     );
-    graph_response.on_hover_text(format!(
+    graph_response.on_hover_text_at_pointer(format!(
         "Disk throughput history\nCurrent {}\nRecent average {}\nRecent peak {}",
         crate::format::rate(app.performance.disk.latest().into()),
         crate::format::rate(app.performance.disk.mean().into()),
@@ -1186,7 +1186,7 @@ fn network_graph(
             ],
         ),
     }
-    graph_response.on_hover_text(format!(
+    graph_response.on_hover_text_at_pointer(format!(
         "Network throughput history\nCurrent {}\nRecent average {}\nRecent peak {}",
         crate::format::rate(series.latest().into()),
         crate::format::rate(series.mean().into()),
@@ -1608,7 +1608,7 @@ fn adapter_row(
     // summary by design — four facts, in a fixed place, scannable down a
     // column — and this is where the rest of them live rather than in a
     // fifth column nobody has room for.
-    let response = response.on_hover_text(format!(
+    let response = response.on_hover_text_at_pointer(format!(
         "{}\n{}\n{} · {}\nLink speed {}\nReceive {} · Send {}\nTotal in {} · out {}",
         adapter.name,
         adapter.description,
@@ -1708,7 +1708,7 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             unit: graph::Unit::Percent,
         },
     );
-    graph_response.on_hover_text(format!(
+    graph_response.on_hover_text_at_pointer(format!(
         "GPU utilisation history\nCurrent {}\nRecent average {}\nRecent peak {}",
         crate::format::percent(f64::from(app.performance.gpu.latest())),
         crate::format::percent(f64::from(app.performance.gpu.mean())),
