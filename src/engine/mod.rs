@@ -73,9 +73,23 @@ pub struct Engine {
     interval_ms: Arc<AtomicU64>,
     /// Set to ask the thread to stop.
     stopping: Arc<std::sync::atomic::AtomicBool>,
-    /// The thread, joined on drop.
+    /// Set by the thread as it returns, so [`Engine::drop`] can tell
+    /// "finished" from "wedged" without blocking to find out.
+    finished: Arc<std::sync::atomic::AtomicBool>,
+    /// The thread, joined on drop — but only once it says it is done.
     thread: Option<std::thread::JoinHandle<()>>,
 }
+
+/// How long [`Engine::drop`] waits for the sampler before giving up on
+/// it.
+///
+/// Generous next to what a stop costs when the thread is healthy: it
+/// checks the flag every [`sampler::SLEEP_SLICE`] and a sample is
+/// milliseconds, so the normal path is over long before this.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// How often the grace period re-checks.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(10);
 
 impl Engine {
     /// Starts sampling.
@@ -91,6 +105,7 @@ impl Engine {
         let interval_ms = Arc::new(AtomicU64::new(millis(interval)));
         let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let thread = std::thread::Builder::new()
             // Named so it is identifiable in this app's own process list,
             // which is a thing people will do.
@@ -98,7 +113,11 @@ impl Engine {
             .spawn({
                 let interval_ms = Arc::clone(&interval_ms);
                 let stopping = Arc::clone(&stopping);
-                move || sampler::run(&sender, &interval_ms, &stopping)
+                let finished = Arc::clone(&finished);
+                move || {
+                    sampler::run(&sender, &interval_ms, &stopping);
+                    finished.store(true, Ordering::Release);
+                }
             })
             .ok();
 
@@ -106,6 +125,7 @@ impl Engine {
             snapshots,
             interval_ms,
             stopping,
+            finished,
             thread,
         }
     }
@@ -156,15 +176,49 @@ impl Engine {
 }
 
 impl Drop for Engine {
+    /// Asks the sampler to stop, waits a bounded time for it, and
+    /// abandons it if it does not come back.
+    ///
+    /// This runs on the **UI thread**, while the window is closing. A
+    /// plain `join()` here is a promise that the sampler always returns
+    /// — and the sampler spends its life inside Win32 calls against
+    /// every process on the machine, any one of which can take
+    /// arbitrarily long on a sick box: an image on a disconnected
+    /// network share, a wedged driver behind a performance counter, a
+    /// process that will not open. If one of them stalls, an unbounded
+    /// join does not make the app close slowly. It makes it stop
+    /// responding, with no way out but the task manager the user was
+    /// already running.
+    ///
+    /// So the wait is bounded. Inside the grace period this behaves
+    /// exactly as before — the thread is joined, and its process handles
+    /// and PDH query are released in order rather than during the
+    /// runtime's own teardown, which is what the join was for. Past it,
+    /// the handle is dropped without joining and the thread is left to
+    /// the process exit that is moments away, which reclaims everything
+    /// it held regardless.
+    ///
+    /// Note what this does *not* do: it does not fix whatever stalled
+    /// the sampler. It converts "the window never closes" into "the
+    /// window closes", which is the difference between a bug and a
+    /// bug report.
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            // Joined rather than detached. The sampler holds process
-            // handles and a PDH query; letting it run on while the
-            // process tears down means those are released during exit,
-            // racing the runtime's own shutdown.
-            let _ = thread.join();
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+
+        let deadline = std::time::Instant::now() + SHUTDOWN_GRACE;
+        while !self.finished.load(Ordering::Acquire) {
+            if std::time::Instant::now() >= deadline {
+                // Deliberately not joined. `drop`ping a `JoinHandle`
+                // detaches the thread, which is the whole point here.
+                drop(thread);
+                return;
+            }
+            std::thread::sleep(SHUTDOWN_POLL);
         }
+        let _ = thread.join();
     }
 }
 
@@ -258,6 +312,7 @@ mod tests {
             snapshots,
             interval_ms: Arc::new(AtomicU64::new(1_000)),
             stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            finished: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             thread: None,
         };
         assert_eq!(
@@ -273,6 +328,64 @@ mod tests {
     }
 
     #[test]
+    fn dropping_an_engine_whose_sampler_is_wedged_still_returns() {
+        // The property the whole grace period exists for. `Drop` runs on
+        // the UI thread while the window is closing, so an unbounded
+        // `join()` there turns any stall anywhere in the Windows layer
+        // into an app that will not close — which is what was reported
+        // after a long session.
+        //
+        // The stand-in thread never observes `stopping`, the way a
+        // thread parked inside a Win32 call cannot. If `Drop` waits for
+        // it, this test hangs rather than fails, so it is bounded from
+        // the outside too: the assertion is on elapsed time, and the
+        // whole thing is over in `SHUTDOWN_GRACE` plus a poll.
+        let (sender, snapshots) = bounded::<Snapshot>(1);
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let wedged = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread = std::thread::Builder::new()
+            .name("wedged-sampler".to_string())
+            .spawn({
+                let wedged = Arc::clone(&wedged);
+                move || {
+                    // Held so the channel stays connected, exactly as a
+                    // real sampler holds it.
+                    let _sender = sender;
+                    while !wedged.load(Ordering::Acquire) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            })
+            .ok();
+
+        let engine = Engine {
+            snapshots,
+            interval_ms: Arc::new(AtomicU64::new(1_000)),
+            stopping,
+            // Never set, because the thread never finishes.
+            finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            thread,
+        };
+
+        let start = std::time::Instant::now();
+        drop(engine);
+        let waited = start.elapsed();
+
+        // Released only now, so the thread really was still running for
+        // the whole of the drop above rather than having quietly exited.
+        wedged.store(true, Ordering::Release);
+
+        assert!(
+            waited < SHUTDOWN_GRACE * 2,
+            "dropping an Engine whose sampler never returns took {waited:?},              which means the wait is not bounded — on the UI thread that is              a window that never closes"
+        );
+        assert!(
+            waited >= SHUTDOWN_GRACE,
+            "the drop returned in {waited:?}, before the grace period was              up — a healthy sampler would have been abandoned rather than              joined"
+        );
+    }
+
+    #[test]
     fn an_engine_with_no_thread_reports_that_it_is_not_running() {
         // A thread that failed to spawn means no snapshots will ever
         // arrive; the UI says so rather than showing a frozen display
@@ -282,6 +395,7 @@ mod tests {
             snapshots,
             interval_ms: Arc::new(AtomicU64::new(1_000)),
             stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            finished: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             thread: None,
         };
         assert!(!engine.is_running());
