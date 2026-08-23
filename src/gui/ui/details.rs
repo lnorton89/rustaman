@@ -380,7 +380,20 @@ fn table_body(
     //
     // Scrolled right, the cells beyond this edge are clipped away, and
     // that is correct: they are off-screen.
-    let viewport = egui::Rect::from_min_max(egui::pos2(pane.left(), ui.cursor().top()), pane.max);
+    //
+    // The right edge is the *ui's* clip rather than the pane's, and that
+    // is the half that was wrong. A scroll area's vertical scrollbar is
+    // drawn in a lane taken out of its right-hand edge, so the region a
+    // row may paint in ends where that lane begins — while `pane` runs
+    // the whole way to the inspector. Clipping to the pane put the rows
+    // under the scrollbar and left a sliver of table showing down its
+    // right-hand side, which reads as the scrollbar being in the wrong
+    // place rather than as the rows being too wide.
+    let edge = pane.right().min(ui.clip_rect().right());
+    let viewport = egui::Rect::from_min_max(
+        egui::pos2(pane.left(), ui.cursor().top()),
+        egui::pos2(edge, pane.bottom()),
+    );
 
     theme::quiet_column_rules(ui);
     let body_height = widgets::table_body_height(ui, viewport.height());
