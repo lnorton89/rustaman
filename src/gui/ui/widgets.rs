@@ -657,9 +657,17 @@ fn row_rect(ui: &Ui, viewport: Rect) -> Rect {
 /// through as a hairline along the top and bottom of every hovered row.
 fn row_clip(ui: &Ui, viewport: Rect) -> Rect {
     let gapless = gapless_cell(ui);
+    // Never *narrower* than the cell's own gapless rect, whatever the
+    // viewport says. A table that takes its viewport from
+    // `available_rect_before_wrap` gets one whose left edge is the first
+    // cell's left edge — and `egui_extras`' own hover fill is expanded
+    // half a spacing past that, so clipping ours to the viewport left
+    // four points of the *control* colour showing down the left of every
+    // hovered row in the Services list. Four points of grey, only while
+    // hovered, only on two of the four tables.
     Rect::from_min_max(
-        egui::pos2(viewport.left(), gapless.top()),
-        egui::pos2(viewport.right(), gapless.bottom()),
+        egui::pos2(viewport.left().min(gapless.left()), gapless.top()),
+        egui::pos2(viewport.right().max(gapless.right()), gapless.bottom()),
     )
 }
 
