@@ -74,6 +74,7 @@ pub fn title_bar(app: &mut App, ui: &mut Ui) -> bool {
 
     egui::Panel::top("title-bar")
         .exact_size(TITLE_BAR_HEIGHT)
+        .resizable(false)
         .frame(
             egui::Frame::new()
                 .fill(theme::rgb(theme.app))
@@ -254,6 +255,7 @@ pub fn nav_rail(app: &mut App, ui: &mut Ui) {
     let theme = app.theme.clone();
     egui::Panel::left("nav-rail")
         .exact_size(NAV_WIDTH)
+        .resizable(false)
         .frame(
             egui::Frame::new()
                 .fill(theme::rgb(theme.app))
@@ -316,6 +318,7 @@ pub fn status_bar(app: &mut App, ui: &mut Ui) {
 
     egui::Panel::bottom("status-bar")
         .exact_size(HEIGHT)
+        .resizable(false)
         .frame(
             egui::Frame::new()
                 .fill(theme::rgb(theme.panel))

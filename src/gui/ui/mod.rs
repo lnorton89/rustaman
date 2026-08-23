@@ -452,6 +452,41 @@ mod tests {
     }
 
     #[test]
+    fn no_fixed_panel_offers_a_resize_handle_that_does_nothing() {
+        // `egui::Panel` is `resizable: true` by default, and every panel
+        // in this app is `.exact_size(..)`. The two together give a panel
+        // an edge that shows a resize cursor, highlights under the
+        // pointer, and then clamps the drag straight back to the size it
+        // already was — a control that invites a gesture and cannot
+        // respond to it. The window had two of them side by side in the
+        // Performance view, and the report was exactly that: two lines to
+        // grab, neither doing anything.
+        //
+        // If a panel ever should be resizable, it will not be an
+        // `exact_size` one, so the pairing is the tell.
+        for (name, source) in DRAWING_MODULES {
+            let lines: Vec<&str> = source.lines().collect();
+            for (number, line) in lines.iter().enumerate() {
+                if is_prose(line) || !line.contains(".exact_size(") {
+                    continue;
+                }
+                // The builder call is a chain, so the setting can be on
+                // any of the next few lines rather than the very next.
+                let chain = lines[number..(number + 6).min(lines.len())].join(
+                    "
+",
+                );
+                assert!(
+                    chain.contains(".resizable(false)"),
+                    "{name}:{} sizes a panel exactly but leaves it                      resizable: {}. The edge offers a drag it will clamp                      away — say `.resizable(false)`",
+                    number + 1,
+                    line.trim()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn no_drawing_module_holds_a_colour_literal() {
         // Every colour comes from the theme. A single hard-coded grey is
         // invisible in review and then unreadable in half the themes.

@@ -134,6 +134,11 @@ mod windows {
         live: bool,
         /// Whether to raise the end-task confirmation over the view.
         modal: bool,
+        /// Where to park the pointer, in window points. Hover is a third
+        /// of a row's visual states and the one no static screenshot
+        /// shows — the app drew it in two different colours either side
+        /// of the first column for as long as nobody could see it.
+        hover: Option<(f32, f32)>,
         /// Whether to select a row — the third of the app's three row
         /// states, after resting and hovered, and the one that opens the
         /// Details view's inspector.
@@ -141,7 +146,7 @@ mod windows {
     }
 
     /// Every scene, in the order `--list` prints them.
-    const SCENES: [Scene; 17] = [
+    const SCENES: [Scene; 18] = [
         Scene {
             name: "live-network",
             about: "Performance › Network on THIS machine, really sampled",
@@ -152,6 +157,7 @@ mod windows {
             live: true,
             select: false,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "live-processes",
@@ -163,6 +169,7 @@ mod windows {
             live: true,
             select: false,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "network",
@@ -174,6 +181,7 @@ mod windows {
             live: false,
             select: false,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "network-open",
@@ -185,6 +193,7 @@ mod windows {
             live: false,
             select: false,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "network-narrow",
@@ -196,6 +205,7 @@ mod windows {
             live: false,
             select: false,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "cpu",
@@ -207,6 +217,7 @@ mod windows {
             live: false,
             select: false,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "memory",
@@ -218,6 +229,7 @@ mod windows {
             live: false,
             select: false,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "disk",
@@ -229,6 +241,7 @@ mod windows {
             live: false,
             select: false,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "gpu",
@@ -240,6 +253,7 @@ mod windows {
             live: false,
             select: false,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "processes",
@@ -251,6 +265,7 @@ mod windows {
             live: false,
             select: false,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "details",
@@ -262,6 +277,7 @@ mod windows {
             live: false,
             select: false,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "services",
@@ -273,6 +289,7 @@ mod windows {
             live: false,
             select: false,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "startup",
@@ -284,6 +301,7 @@ mod windows {
             live: false,
             select: false,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "details-selected",
@@ -295,6 +313,7 @@ mod windows {
             live: false,
             select: true,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "processes-selected",
@@ -306,6 +325,7 @@ mod windows {
             live: false,
             select: true,
             modal: false,
+            hover: None,
         },
         Scene {
             name: "modal",
@@ -317,6 +337,19 @@ mod windows {
             live: false,
             select: true,
             modal: true,
+            hover: None,
+        },
+        Scene {
+            name: "processes-hover",
+            about: "The process tree with the pointer resting on a row",
+            view: View::Processes,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: false,
+            modal: false,
+            hover: Some((700.0, 392.0)),
         },
         Scene {
             name: "settings",
@@ -328,6 +361,7 @@ mod windows {
             live: false,
             select: false,
             modal: false,
+            hover: None,
         },
     ];
 
@@ -494,10 +528,19 @@ mod windows {
             .build_ui(move |ui| {
                 rustaman::gui::ui::draw(&mut app, ui);
             });
+        if let Some((x, y)) = scene.hover {
+            harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(egui::pos2(x, y)));
+        }
         // Several frames, not one: every animation in this app starts at
         // zero — a hover fill, a meter's level, the view's own entry
         // transition — so a single frame renders the app mid-fade, at an
-        // opacity that is not what anyone will ever see.
+        // opacity that is not what anyone will ever see. A hover needs
+        // them for a second reason: `egui_extras` records which row is
+        // under the pointer and applies it on the *following* frame.
+        harness.run();
         harness.run();
         harness.run();
 

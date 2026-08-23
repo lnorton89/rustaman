@@ -313,6 +313,21 @@ pub fn truncated(
     ui.painter().layout_job(job)
 }
 
+/// How wide [`status_chip`] will draw for this text.
+///
+/// So a caller can reserve the room before laying out whatever precedes
+/// the chip — a label that consumed the whole cell first left the chip
+/// to be clipped in half by the column.
+#[must_use]
+pub fn status_chip_width(ui: &Ui, text: &str) -> f32 {
+    let font = TextStyle::Small.resolve(ui.style());
+    ui.painter()
+        .layout_no_wrap(text.to_string(), font, Color32::PLACEHOLDER)
+        .size()
+        .x
+        + SPACE_SM * 2.0
+}
+
 /// A chip carrying a **status**, tinted with the colour of that status.
 ///
 /// [`chip`] takes a flat fill, and every status chip in the app passed
@@ -591,39 +606,73 @@ pub fn meter(ui: &mut Ui, theme: &Palette, fraction: f32, fill: Rgb) -> Response
     response
 }
 
-/// Fills a table row edge to edge from inside its first cell, returning
-/// the painter and the rect it used.
+/// The rect a row's background covers for the cell being drawn.
 ///
-/// A table cell's painter is clipped to that cell, and a row's fill has
-/// to be painted while drawing the *first* cell so that everything else
-/// lands on top of it. Widening the rect is not enough — the clip is
-/// what truncates it — and `Painter::with_clip_rect` is not enough
-/// either, because it *intersects* with the clip already in force rather
-/// than replacing it. That last detail is what made every table in this
-/// app draw its stripes, its hover and its selection across the first
-/// column only, under a comment claiming otherwise.
-///
-/// The gaps `egui_extras` leaves between columns are covered too, which
-/// is the other half of a row reading as one row: a per-cell fill leaves
-/// a hairline of panel colour at every boundary, so eight filled cells
-/// read as eight cells.
-fn row_fill(ui: &Ui, viewport: Rect, fill: Color32) -> (egui::Painter, Rect) {
-    let cell = ui.max_rect();
-    let rect = Rect::from_min_max(cell.min, egui::pos2(viewport.right(), cell.bottom()));
-    let mut painter = ui.painter().clone();
-    painter.set_clip_rect(viewport);
-    painter.rect_filled(rect, CornerRadius::ZERO, fill);
-    (painter, rect)
+/// The cell's own rect grown by half the item spacing on each side — the
+/// same `gapless_rect` `egui_extras` uses — so adjacent cells' fills meet
+/// and a filled row has no hairline of panel colour at every boundary.
+fn gapless_cell(ui: &Ui) -> Rect {
+    /// A half point of slop past the half-spacing.
+    ///
+    /// `egui_extras` rounds its own gapless rect to the pixel grid and
+    /// this does not, so without the slop its rect sits outside ours and
+    /// a line of its brighter hover fill survives along the row's top
+    /// edge — which is exactly as much as a stray hairline needs.
+    ///
+    /// A whole point rather than the half the rounding can account for,
+    /// because the rounding depends on the device scale and being a
+    /// fraction short shows. The cost is that a row's fill laps a point
+    /// over its neighbour's, which nothing can see: rows are painted in
+    /// order, so the lap lands on a band boundary that moves by a point.
+    const SLOP: f32 = 1.0;
+
+    let spacing = ui.spacing().item_spacing;
+    ui.max_rect().expand2(0.5 * spacing + Vec2::splat(SLOP))
 }
 
-/// Fills a grouping row — a category heading, not a record — edge to
-/// edge.
+/// The whole row's rect: for hit-testing, not for painting.
 ///
-/// The heading and its per-column totals are separate cells of one row,
-/// and each used to fill its own rect, so the row read as a strip of
-/// tiles with the column gaps showing between them. See [`row_fill`].
+/// Taken from the cell's vertical extent and the table's horizontal one,
+/// because a row is hovered when the pointer is anywhere along it and not
+/// only over the cell being drawn at the time.
+///
+/// Deliberately *not* expanded the way [`gapless_cell`] is: two rows
+/// whose hit rects overlapped by the spacing between them would both
+/// report themselves hovered along the seam.
+fn row_rect(ui: &Ui, viewport: Rect) -> Rect {
+    let cell = ui.max_rect();
+    Rect::from_min_max(
+        egui::pos2(viewport.left(), cell.top()),
+        egui::pos2(viewport.right(), cell.bottom()),
+    )
+}
+
+/// The clip a row's fill is painted through.
+///
+/// The row's full width, and the *gapless* vertical extent — tall enough
+/// to include the half-spacing overhang above and below. Clipped to the
+/// bare row instead, that overhang is trimmed off ours while
+/// `egui_extras`' own fill keeps it, and its brighter colour shows
+/// through as a hairline along the top and bottom of every hovered row.
+fn row_clip(ui: &Ui, viewport: Rect) -> Rect {
+    let gapless = gapless_cell(ui);
+    Rect::from_min_max(
+        egui::pos2(viewport.left(), gapless.top()),
+        egui::pos2(viewport.right(), gapless.bottom()),
+    )
+}
+
+/// Fills a grouping row — a category heading, not a record.
+///
+/// Called from every cell of the row, like [`row_background`].
 pub fn group_row_background(ui: &Ui, theme: &Palette, viewport: Rect) {
-    row_fill(ui, viewport, theme::rgb(theme.raised));
+    let mut painter = ui.painter().clone();
+    painter.set_clip_rect(row_clip(ui, viewport));
+    painter.rect_filled(
+        gapless_cell(ui),
+        CornerRadius::ZERO,
+        theme::rgb(theme.raised),
+    );
 }
 
 /// Paints a row's background, its hover lift, and its selection bar.
@@ -633,43 +682,69 @@ pub fn group_row_background(ui: &Ui, theme: &Palette, viewport: Rect) {
 /// selection unmistakable — the fill itself is a light tint, chosen so
 /// that secondary text on a selected row still clears WCAG AA. See
 /// [`crate::theme::Palette::derive`].
+///
+/// ## Called from every cell, not once per row
+///
+/// `egui_extras` paints its own stripe, selection and hover **per cell**,
+/// before running that cell's contents, and its hover fill comes from
+/// `widgets.hovered.bg_fill` — which this app points at the *control*
+/// colour, because the scrollbar handle reads it. A row fill painted once
+/// from the first cell therefore lands underneath every one of those
+/// except its own, and the row comes out in two colours with the seam at
+/// the first column's edge. That is exactly how it looked.
+///
+/// Silencing `egui_extras` is not on offer: blanking that fill takes the
+/// scrollbar handle with it. So this paints per cell as well, on top, in
+/// the same gapless rect — the app's colours win by being painted last.
+///
+/// ## It works `hovered` out itself
+///
+/// All four call sites passed `false`, so the app's own hover ramp had
+/// never been drawn at all and the highlight people saw was
+/// `egui_extras`'. A parameter that every call site gets wrong is not a
+/// parameter.
 pub fn row_background(
     ui: &Ui,
     theme: &Palette,
     viewport: Rect,
     id: egui::Id,
     selected: bool,
-    hovered: bool,
     striped: bool,
 ) {
-    // The row's full width, derived here rather than by the caller.
-    //
-    // A table cell's painter is clipped to that cell, and the row fill
-    // has to be painted while drawing the *first* cell so that
-    // everything else lands on top of it. With the cell's own painter
-    // the highlight therefore covered the name column and stopped dead:
-    // a selected row read as a selected *cell* with seven unrelated
-    // cells beside it, in all four of this app's tables. Widening the
-    // rect alone does not help — the clip is what truncates it — which
-    // is why `viewport` is a parameter and why computing the rect is
-    // this function's job and not four call sites'.
+    let row = row_rect(ui, viewport);
+    // Asked of the context rather than of the `Ui`. `Ui::rect_contains_pointer`
+    // intersects the rect with the ui's own clip rect first, and a table
+    // cell's clip rect is the cell — so a row-wide rect came back clipped
+    // to one cell, and only the cell actually under the pointer lit up
+    // while the other seven stayed at rest.
+    let hovered = ui.ctx().rect_contains_pointer(ui.layer_id(), row);
+
     let base = if striped { theme.raised } else { theme.panel };
     let fill = if selected {
         theme::rgb(theme.selection)
     } else {
         hover_fill(ui, id, hovered, base, theme.hover)
     };
-    let (painter, rect) = row_fill(ui, viewport, fill);
+    // Through a painter clipped to the row rather than the cell. A
+    // column drawn with `.clip(true)` gives its cell ui a clip rect of
+    // exactly the cell, which would trim the half-spacing overhang back
+    // off again and leave the boundary showing — the very gap the
+    // overhang exists to cover. `set_clip_rect` replaces the clip;
+    // `with_clip_rect` intersects, which would keep the cell's.
+    let mut painter = ui.painter().clone();
+    painter.set_clip_rect(row_clip(ui, viewport));
+    painter.rect_filled(gapless_cell(ui), CornerRadius::ZERO, fill);
 
-    if selected {
-        // The bar animates out from the leading edge rather than
-        // appearing at full height, so moving the selection down a list
-        // reads as one marker travelling rather than as a series of
-        // unrelated flashes.
+    // The bar belongs to the row rather than to a cell, so only the
+    // leading cell draws one — otherwise every column grows its own.
+    if selected && ui.max_rect().left() <= viewport.left() + 0.5 {
+        // It animates out from the leading edge rather than appearing at
+        // full height, so moving the selection down a list reads as one
+        // marker travelling rather than as a series of unrelated flashes.
         let grown = motion::toggle(ui.ctx(), id.with("selected"), true, motion::QUICK);
         let bar = Rect::from_center_size(
-            egui::pos2(rect.left() + SELECTION_BAR / 2.0, rect.center().y),
-            Vec2::new(SELECTION_BAR, rect.height() * grown),
+            egui::pos2(row.left() + SELECTION_BAR / 2.0, row.center().y),
+            Vec2::new(SELECTION_BAR, row.height() * grown),
         );
         painter.rect_filled(bar, CornerRadius::ZERO, theme::rgb(theme.accent));
     }
@@ -1019,69 +1094,83 @@ mod tests {
     }
 
     #[test]
-    fn a_row_background_fills_the_row_and_not_just_its_first_cell() -> anyhow::Result<()> {
-        // The bug this guards survived a comment explaining that it had
-        // been fixed. `row_background` widened its rect to the row and
-        // then clipped it with `Painter::with_clip_rect`, which
-        // *intersects* with the clip already in force — the cell — so
-        // the widening was undone on the next line and every stripe,
-        // hover and selection in the app covered one column.
+    fn a_row_of_cells_tiles_its_background_with_no_gaps() -> anyhow::Result<()> {
+        // A row's background is painted per cell, so the question is
+        // whether the cells' fills *meet*. `egui_extras` puts
+        // `item_spacing.x` between columns, and a fill of each cell's own
+        // rect leaves a hairline of panel colour at every boundary — eight
+        // filled cells reading as eight cells rather than one row. Hence
+        // the gapless expansion, and hence this.
         //
-        // Checked against the painted shape rather than the arithmetic,
-        // and against the shape's own clip rect as well as its bounds:
-        // the previous version produced a correctly-sized rect that was
-        // then clipped away, so a bounds-only assertion would have
-        // passed on the broken code.
+        // The earlier version of this test asserted the opposite shape:
+        // one call from the first cell painting the whole row. That was
+        // right until `egui_extras`' own per-cell hover fill turned out to
+        // land on top of it everywhere except the first column.
         use super::super::theme;
         use super::row_background;
         use egui::{Rect, Sense, Shape, Vec2};
 
-        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 200.0));
         let theme = crate::theme::Catalog::load().get(None).clone();
         let ctx = egui::Context::default();
         theme::apply(&ctx, &theme);
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 200.0));
         let input = egui::RawInput {
             screen_rect: Some(window),
             ..Default::default()
         };
 
+        /// Four columns of this width, laid out with the app's own
+        /// spacing between them, as a table would.
+        const CELL: f32 = 180.0;
+
         let mut viewport = None;
         let mut output = ctx.run_ui(input, |ui| {
             let row = ui.available_rect_before_wrap();
             viewport = Some(row);
-            // A narrow child `Ui` standing in for a table's first cell,
-            // clipped to itself the way `egui_extras` clips one.
-            let cell = Rect::from_min_size(row.min, Vec2::new(90.0, theme::ROW_HEIGHT));
-            ui.scope_builder(egui::UiBuilder::new().max_rect(cell), |ui| {
-                ui.set_clip_rect(cell);
-                ui.allocate_exact_size(cell.size(), Sense::hover());
-                row_background(ui, &theme, row, egui::Id::new("row"), true, false, false);
-            });
+            let spacing = ui.spacing().item_spacing.x;
+            for column in 0..4 {
+                let left = row.left() + column as f32 * (CELL + spacing);
+                let cell = Rect::from_min_size(
+                    egui::pos2(left, row.top()),
+                    Vec2::new(CELL, theme::ROW_HEIGHT),
+                );
+                ui.scope_builder(egui::UiBuilder::new().max_rect(cell), |ui| {
+                    ui.set_clip_rect(cell);
+                    ui.allocate_exact_size(cell.size(), Sense::hover());
+                    row_background(ui, &theme, row, egui::Id::new("row"), true, false);
+                });
+            }
         });
         output.textures_delta.clear();
-
         let viewport = viewport.ok_or_else(|| anyhow::anyhow!("nothing was drawn"))?;
-        let painted = output
+
+        // Every filled span, clipped as it will actually be painted.
+        let mut spans: Vec<(f32, f32)> = output
             .shapes
             .iter()
             .filter_map(|clipped| {
-                // `if let` rather than a `match` with a wildcard: the
-                // crate denies `wildcard_enum_match_arm`, and naming
-                // eleven `epaint::Shape` variants to say "not a rect"
-                // would be a list this test has to maintain against a
-                // dependency's enum.
                 if let Shape::Rect(rect) = &clipped.shape {
-                    Some(rect.rect.intersect(clipped.clip_rect).width())
+                    let painted = rect.rect.intersect(clipped.clip_rect);
+                    (painted.width() > 1.0).then_some((painted.left(), painted.right()))
                 } else {
                     None
                 }
             })
-            .fold(0.0f32, f32::max);
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
 
+        let mut reach = viewport.left();
+        for (left, right) in &spans {
+            if *left > reach + 0.01 {
+                break;
+            }
+            reach = reach.max(*right);
+        }
+        let covered = reach - viewport.left();
+        let wanted = 4.0f32.mul_add(CELL, 3.0 * 8.0);
         assert!(
-            painted >= viewport.width() - 1.0,
-            "the widest painted row fill is {painted} points inside its own              clip, but the row is {} — the fill is being clipped back to              the cell it was widened out of",
-            viewport.width()
+            covered >= wanted - 0.5,
+            "the row's fills cover an unbroken {covered} points from its              left edge, but four cells and the gaps between them span              {wanted} — a gap means the column boundaries show through"
         );
         Ok(())
     }

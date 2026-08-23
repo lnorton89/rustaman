@@ -31,6 +31,7 @@
 //! *input* order for ties, and the input order here is the kernel's, which
 //! is not stable at all.
 
+use super::tree::Totals;
 use super::ProcessRow;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -175,6 +176,85 @@ impl SortKey {
             primary
         };
         primary.then_with(|| tie_break(a, b))
+    }
+
+    /// Compares two rows by **the figure the table is showing for
+    /// them**, which is not always their own.
+    ///
+    /// A collapsed parent shows its subtree's total — collapsing the
+    /// tree must not make a busy process disappear — and the row is
+    /// passed its `Totals` here when it does. Sorting on the row's own
+    /// value while the cell displays the subtree's is the bug this
+    /// exists to prevent, and it is a loud one: a CPU column sorted
+    /// descending read 15%, 0.1%, 2.5% down the page, because the
+    /// numbers on screen were never the numbers being ordered.
+    ///
+    /// Only the summable columns can differ. A PID or a status has no
+    /// subtree meaning, so those compare the row either way.
+    #[must_use]
+    pub fn compare_visible(
+        self,
+        a: (&ProcessRow, Option<&Totals>),
+        b: (&ProcessRow, Option<&Totals>),
+        descending: bool,
+    ) -> Ordering {
+        let primary = self.primary_visible(a, b);
+        let primary = if descending {
+            primary.reverse()
+        } else {
+            primary
+        };
+        // The tie-break stays ascending and stays on the row's own
+        // identity — see `compare_directed`.
+        primary.then_with(|| tie_break(a.0, b.0))
+    }
+
+    /// [`SortKey::compare_visible`]'s primary key, with no tie-break.
+    #[must_use]
+    fn primary_visible(
+        self,
+        a: (&ProcessRow, Option<&Totals>),
+        b: (&ProcessRow, Option<&Totals>),
+    ) -> Ordering {
+        match self {
+            Self::Cpu => compare_number(
+                a.1.map_or(a.0.cpu_percent, |t| t.cpu_percent),
+                b.1.map_or(b.0.cpu_percent, |t| t.cpu_percent),
+            ),
+            Self::Memory => {
+                a.1.map_or(a.0.working_set, |t| t.working_set)
+                    .cmp(&b.1.map_or(b.0.working_set, |t| t.working_set))
+            }
+            Self::PrivateBytes => {
+                a.1.map_or(a.0.private_bytes, |t| t.private_bytes)
+                    .cmp(&b.1.map_or(b.0.private_bytes, |t| t.private_bytes))
+            }
+            Self::Disk => compare_number(
+                a.1.map_or(a.0.disk_rate(), |t| t.disk_rate),
+                b.1.map_or(b.0.disk_rate(), |t| t.disk_rate),
+            ),
+            Self::Network => {
+                a.1.map_or(a.0.connections, |t| t.connections)
+                    .cmp(&b.1.map_or(b.0.connections, |t| t.connections))
+            }
+            Self::Gpu => compare_number(
+                a.1.map_or(a.0.gpu_percent, |t| t.gpu_percent),
+                b.1.map_or(b.0.gpu_percent, |t| t.gpu_percent),
+            ),
+            // No subtree meaning. Named rather than wildcarded so a
+            // column added later has to decide which of the two it is.
+            Self::Name
+            | Self::Pid
+            | Self::Status
+            | Self::User
+            | Self::Threads
+            | Self::Handles
+            | Self::CpuTime
+            | Self::Priority
+            | Self::Architecture
+            | Self::Session
+            | Self::Path => self.primary(a.0, b.0),
+        }
     }
 
     /// This column's own comparison, with no tie-break applied.

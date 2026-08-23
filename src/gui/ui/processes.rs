@@ -296,6 +296,16 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     // whatever is beside it rather than clipping or scrolling.
     ui.set_clip_rect(viewport);
     let mut builder = TableBuilder::new(ui)
+        // Keyed on the column *order*, because `egui_extras` stores the
+        // dragged widths in a `Vec` indexed by position. Reorder the
+        // headings and every stored width stays with the slot rather
+        // than the column it was dragged for — so moving Name into the
+        // third position handed it the PID column's width and gave PID
+        // Name's, and the table came out with a sixty-point name beside
+        // a three-hundred-point PID. Each arrangement gets its own
+        // remembered widths this way, and a fresh one opens at the
+        // `initial_width` its columns actually asked for.
+        .id_salt(&columns)
         .striped(false)
         .resizable(true)
         .vscroll(true)
@@ -401,13 +411,9 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         // the window edge.
                         for slot in 0..=columns.len() {
                             row.col(|ui| {
-                                // Once, across the whole row — the same
-                                // reason a process row's background is
-                                // painted from its first cell. See
-                                // `widgets::group_row_background`.
-                                if slot == 0 {
-                                    widgets::group_row_background(ui, theme, viewport);
-                                }
+                                // From every cell, not just the first —
+                                // see `widgets::row_background`.
+                                widgets::group_row_background(ui, theme, viewport);
                                 match columns.get(slot) {
                                     // The heading sits in whichever slot
                                     // the Name column has been dragged
@@ -442,29 +448,20 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         let mut disclosure = false;
                         for slot in 0..=columns.len() {
                             row.col(|ui| {
-                                // The background is painted from the
-                                // *first* cell, whichever column has been
-                                // dragged into it, across the whole row
-                                // and before anything else — so the heat
-                                // gauges and the text land on top of it.
-                                // Painting it from the Name column instead
-                                // would put it over every column dragged
-                                // to the left of Name.
-                                //
-                                // It needs `viewport` because a cell's own
-                                // painter is clipped to that cell; see
+                                // Before anything else in the cell, so
+                                // the heat gauges and the text land on
+                                // top of it — and from every cell, which
+                                // is what puts it over `egui_extras`'
+                                // own per-cell hover fill. See
                                 // `widgets::row_background`.
-                                if slot == 0 {
-                                    widgets::row_background(
-                                        ui,
-                                        theme,
-                                        viewport,
-                                        egui::Id::new("row").with(key),
-                                        selected,
-                                        false,
-                                        index % 2 == 1,
-                                    );
-                                }
+                                widgets::row_background(
+                                    ui,
+                                    theme,
+                                    viewport,
+                                    egui::Id::new("row").with(key),
+                                    selected,
+                                    index % 2 == 1,
+                                );
                                 match columns.get(slot) {
                                     Some(SortKey::Name) => {
                                         disclosure = name_cell(
@@ -472,7 +469,10 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                                         );
                                     }
                                     Some(column) => {
-                                        metric_cell(ui, theme, *column, process, totals, *expanded);
+                                        metric_cell(
+                                            ui, theme, *column, process, totals, *children,
+                                            *expanded,
+                                        );
                                     }
                                     // The trailing spacer.
                                     None => {}
@@ -647,15 +647,39 @@ fn name_cell(
         // panel's dots encode an adapter's state. A fifteenth hue down
         // the leading edge, meaning nothing, competes with all of them
         // and wins, because it is the leftmost thing in the row.
-        ui.label(egui::RichText::new(process.display_name()).color(theme::rgb(theme.text)));
+        // The name yields to its chips rather than the other way round.
+        //
+        // The Name column clips, and the chips are laid out after the
+        // label — so a name long enough to fill the column pushed them
+        // off its edge and they were cut mid-word: "Discord System
+        // Helper" beside a chip reading "Adm". A truncated *name* still
+        // identifies the process, because the beginning of a name is
+        // the part that does; a truncated chip identifies nothing and
+        // reads as a rendering fault.
+        let chips: &[(&str, crate::color::Rgb)] = match (
+            process.status == crate::model::ProcessStatus::Suspended,
+            process.elevated,
+        ) {
+            (true, true) => &[("Suspended", theme.warning), ("Admin", theme.text_muted)],
+            (true, false) => &[("Suspended", theme.warning)],
+            (false, true) => &[("Admin", theme.text_muted)],
+            (false, false) => &[],
+        };
+        let reserved: f32 = chips
+            .iter()
+            .map(|(text, _)| widgets::status_chip_width(ui, text) + SPACE_XS)
+            .sum();
 
-        if process.status == crate::model::ProcessStatus::Suspended {
+        let name_width = (ui.available_width() - reserved).max(0.0);
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let galley = widgets::truncated(ui, process.display_name(), font, theme.text, name_width);
+        let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
+        ui.painter()
+            .galley(rect.left_top(), galley, theme::rgb(theme.text));
+
+        for (text, colour) in chips {
             ui.add_space(SPACE_XS);
-            widgets::status_chip(ui, "Suspended", theme.warning);
-        }
-        if process.elevated {
-            ui.add_space(SPACE_XS);
-            widgets::status_chip(ui, "Admin", theme.text_muted);
+            widgets::status_chip(ui, text, *colour);
         }
     });
     hit
@@ -668,6 +692,7 @@ fn metric_cell(
     key: SortKey,
     process: &ProcessRow,
     totals: &Totals,
+    children: usize,
     expanded: bool,
 ) {
     let rect = ui.max_rect();
@@ -675,7 +700,15 @@ fn metric_cell(
     // A collapsed parent shows its subtree's total, or collapsing the
     // tree makes a busy process disappear — which is the single most
     // common thing a task manager is opened to find.
-    let aggregated = !expanded && totals.processes > 1;
+    //
+    // Keyed on *having children in this list*, not on the subtree's
+    // size. In the flat list every process is its own row, so a parent
+    // stands in for nobody — and keyed on `totals.processes` it showed
+    // its whole subtree's figures anyway, beside the very children it
+    // was summing, counting them twice on one screen. `children` is
+    // zero there, which is the same rule `model::tree::shows_subtree`
+    // sorts by, so the ordering and the number agree.
+    let aggregated = children > 0 && !expanded;
 
     // The continuous metrics slide to their new readings rather than
     // replacing them.

@@ -427,7 +427,23 @@ impl Forest {
             if group_roots.is_empty() {
                 continue;
             }
-            sort_indices(&mut group_roots, rows, layout.sort, layout.descending);
+            sort_indices_as_shown(
+                &mut group_roots,
+                rows,
+                layout.sort,
+                layout.descending,
+                |index| {
+                    let key = rows.get(index).map(ProcessRow::key).unwrap_or_default();
+                    let expanded = layout.visible.is_some() || layout.expanded.contains(&key);
+                    let children = self
+                        .children_of(index)
+                        .iter()
+                        .filter(|child| keep.as_ref().is_none_or(|set| set.contains(child)))
+                        .count();
+                    shows_subtree(children, expanded)
+                        .then(|| totals.get(index).copied().unwrap_or_default())
+                },
+            );
 
             let mut group_totals = Totals::default();
             for index in &group_roots {
@@ -478,7 +494,23 @@ impl Forest {
                     totals: totals.get(index).copied().unwrap_or_default(),
                 });
                 if expanded && !children.is_empty() {
-                    sort_indices(&mut children, rows, layout.sort, layout.descending);
+                    sort_indices_as_shown(
+                        &mut children,
+                        rows,
+                        layout.sort,
+                        layout.descending,
+                        |child| {
+                            let key = rows.get(child).map(ProcessRow::key).unwrap_or_default();
+                            let open = layout.visible.is_some() || layout.expanded.contains(&key);
+                            let count = self
+                                .children_of(child)
+                                .iter()
+                                .filter(|inner| keep.as_ref().is_none_or(|set| set.contains(inner)))
+                                .count();
+                            shows_subtree(count, open)
+                                .then(|| totals.get(child).copied().unwrap_or_default())
+                        },
+                    );
                     stack.extend(
                         children
                             .into_iter()
@@ -514,17 +546,66 @@ impl Forest {
     }
 }
 
+/// Whether a row is drawn showing its subtree's totals rather than its
+/// own — a parent with children that are not currently listed under it.
+///
+/// The same rule the cell renderer uses, kept here so the ordering and
+/// the rendering cannot disagree about which number a row is showing.
+/// Note it keys on **having children**, not on the subtree's size: in the
+/// flat list every process is its own row, so no row stands in for any
+/// other and none of them aggregates.
+fn shows_subtree(children: usize, expanded: bool) -> bool {
+    children > 0 && !expanded
+}
+
 /// Sorts row indices by the given column.
+///
+/// Through [`SortKey::compare_directed`], **not** by reversing
+/// [`SortKey::compare`]'s arguments. Swapping the arguments reverses the
+/// tie-break along with the column, and on any real machine the
+/// tie-break decides most of the table: sort by CPU descending and three
+/// hundred rows are level at zero, so they come out in reverse
+/// alphabetical order from `zoom.exe` upwards. That reads as a table
+/// sorted by nothing at all, and it is what the process list was doing —
+/// `compare_directed` exists for exactly this, its doc comment describes
+/// exactly this, and this was the one caller that did not use it.
 fn sort_indices(indices: &mut [usize], rows: &[ProcessRow], sort: SortKey, descending: bool) {
     indices.sort_unstable_by(|a, b| {
         let (Some(a), Some(b)) = (rows.get(*a), rows.get(*b)) else {
             return std::cmp::Ordering::Equal;
         };
-        if descending {
-            sort.compare(b, a)
-        } else {
-            sort.compare(a, b)
-        }
+        sort.compare_directed(a, b, descending)
+    });
+}
+
+/// Sorts row indices by **the figure each row is showing**, which for a
+/// collapsed parent is its subtree's total rather than its own.
+///
+/// `aggregate(index)` returns that row's totals when the row is standing
+/// in for its subtree, and `None` when it is showing itself. Ordering a
+/// column by a number it is not displaying is how the CPU column came to
+/// read 15%, 0.1%, 2.5% down the page while claiming to be sorted.
+fn sort_indices_as_shown(
+    indices: &mut [usize],
+    rows: &[ProcessRow],
+    sort: SortKey,
+    descending: bool,
+    aggregate: impl Fn(usize) -> Option<Totals>,
+) {
+    // Resolved once per row rather than inside the comparator, which runs
+    // O(n log n) times and would otherwise re-walk the expansion set for
+    // every comparison.
+    let shown: HashMap<usize, Option<Totals>> = indices
+        .iter()
+        .map(|index| (*index, aggregate(*index)))
+        .collect();
+    indices.sort_unstable_by(|a, b| {
+        let (Some(left), Some(right)) = (rows.get(*a), rows.get(*b)) else {
+            return std::cmp::Ordering::Equal;
+        };
+        let left_totals = shown.get(a).and_then(Option::as_ref);
+        let right_totals = shown.get(b).and_then(Option::as_ref);
+        sort.compare_visible((left, left_totals), (right, right_totals), descending)
     });
 }
 
@@ -595,6 +676,105 @@ mod tests {
             forest.roots().len(),
             2,
             "an equal creation time must reject the link in both directions"
+        );
+    }
+
+    #[test]
+    fn a_collapsed_parent_sorts_by_the_total_it_is_showing() {
+        // A collapsed parent draws its subtree's total, because
+        // collapsing the tree must not make a busy process vanish. It
+        // then has to *sort* by that same number, or the column orders
+        // itself by figures it is not displaying — which is what the
+        // CPU column was doing when it read 15%, 0.1%, 2.5% straight
+        // down the page while claiming to be sorted descending.
+        //
+        // Here the quiet parent is the busy one: 0.5% of its own against
+        // a child using 40%, versus a leaf sitting at 10%. Collapsed, it
+        // shows 40.5% and must lead. Expanded it shows its own 0.5% —
+        // the child is on screen in its own right — and must not.
+        let mut rows = vec![row(1, 0, 1), row(2, 1, 2), row(3, 0, 1)];
+        rows[0].name = "parent.exe".to_string();
+        rows[0].cpu_percent = 0.5;
+        rows[1].name = "child.exe".to_string();
+        rows[1].cpu_percent = 40.0;
+        rows[2].name = "loud.exe".to_string();
+        rows[2].cpu_percent = 10.0;
+
+        let forest = Forest::build(&rows);
+        let collapsed = HashSet::new();
+
+        let order = |expanded: &HashSet<ProcessKey>| -> Vec<String> {
+            forest
+                .flatten(
+                    &rows,
+                    Layout {
+                        sort: SortKey::Cpu,
+                        descending: true,
+                        grouped: true,
+                        expanded,
+                        collapsed: &collapsed,
+                        visible: None,
+                    },
+                )
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    Entry::Process {
+                        index, depth: 0, ..
+                    } => rows.get(index).map(|row| row.name.clone()),
+                    Entry::Process { .. } | Entry::Group { .. } => None,
+                })
+                .collect()
+        };
+
+        let shut = HashSet::new();
+        assert_eq!(
+            order(&shut),
+            vec!["parent.exe".to_string(), "loud.exe".to_string()],
+            "collapsed, the parent is showing 40.5% and has to lead the              row showing 10%"
+        );
+
+        let open: HashSet<ProcessKey> = std::iter::once(rows[0].key()).collect();
+        assert_eq!(
+            order(&open),
+            vec!["loud.exe".to_string(), "parent.exe".to_string()],
+            "expanded, the parent is showing its own 0.5% and the row              showing 10% has to lead"
+        );
+    }
+
+    #[test]
+    fn a_descending_sort_leaves_the_tied_rows_alphabetical() {
+        // The process list sorts through `sort_indices`, and this is the
+        // property that makes a magnitude column readable: the busy rows
+        // come to the top and everything level below them is an
+        // alphabetical list, so a name is still findable.
+        //
+        // `sort_indices` used to reverse the whole comparator by
+        // swapping its arguments, which reverses the tie-break too. On a
+        // machine where almost every process is at zero CPU that decides
+        // nearly the entire table, and the list came out backwards from
+        // `zoom.exe` up. `model::sort` already had `compare_directed`
+        // for this and already had a test for it — against the *other*
+        // sort path, which is why this went unnoticed.
+        let mut rows = vec![row(1, 0, 1), row(2, 0, 2), row(3, 0, 3), row(4, 0, 4)];
+        rows[0].name = "alpha.exe".to_string();
+        rows[1].name = "zulu.exe".to_string();
+        rows[2].name = "mike.exe".to_string();
+        // One row that is not tied, so the primary key is exercised too.
+        rows[3].name = "busy.exe".to_string();
+        rows[3].cpu_percent = 40.0;
+
+        let mut indices: Vec<usize> = (0..rows.len()).collect();
+        sort_indices(&mut indices, &rows, SortKey::Cpu, true);
+        let order: Vec<&str> = indices
+            .iter()
+            .filter_map(|index| rows.get(*index))
+            .map(|row| row.name.as_str())
+            .collect();
+
+        assert_eq!(
+            order,
+            vec!["busy.exe", "alpha.exe", "mike.exe", "zulu.exe"],
+            "descending by CPU must put the busy row first and leave the              rows tied at zero in ascending name order"
         );
     }
 

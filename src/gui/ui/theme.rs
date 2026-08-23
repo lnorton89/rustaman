@@ -173,6 +173,20 @@ pub fn apply(ctx: &egui::Context, theme: &Palette) {
         style.spacing.scroll = egui::style::ScrollStyle::solid();
         style.spacing.scroll.bar_width = SPACE_SM;
 
+        // Labels are not text fields. egui makes every `ui.label`
+        // selectable by default, which in a table of four hundred rows
+        // means the pointer carries an I-beam everywhere, a drag across
+        // a row paints a text selection instead of doing nothing, and
+        // the cursor flickers between arrow and beam as it crosses each
+        // cell — the whole surface reads as a document rather than as a
+        // list of controls.
+        //
+        // Nothing is lost: a value worth copying is copied through the
+        // row's context menu, which can put the *whole* row on the
+        // clipboard rather than whichever characters a drag happened to
+        // catch.
+        style.interaction.selectable_labels = false;
+
         // Slightly larger body text than egui's default. The default is
         // 12.5 at 1.0 scaling, which on a 1440p monitor is genuinely hard
         // to read in a dense table — and a dense table is what this app

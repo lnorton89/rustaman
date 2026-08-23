@@ -62,30 +62,55 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
         return;
     };
 
+    picker_panel().show(ui, |ui| {
+        picker(app, ui, &theme, &snapshot);
+    });
+    gutter_panel().show(ui, |_| {});
+    detail(app, ui, &theme, &snapshot);
+}
+
+/// The picker's docked column.
+///
+/// A constructor rather than a chain written out at the call site,
+/// because the tests below have to reproduce this layout exactly to
+/// measure the seam it creates — and a replica is a thing that drifts.
+/// Three copies of this chain had already been written by hand.
+///
+/// No separator line. The gutter beside it *is* the separation, and the
+/// line drew a second boundary a few points from the panel's own edge —
+/// two rules with a sliver between them, which reads as a doubled border
+/// rather than as a gap.
+///
+/// Not resizable, because it cannot be: `exact_size` pins the width, so
+/// egui's default `resizable: true` leaves an edge that takes a drag,
+/// shows a resize cursor, and clamps straight back. See
+/// `no_fixed_panel_offers_a_resize_handle_that_does_nothing`.
+fn picker_panel() -> egui::Panel {
     egui::Panel::left("performance-picker")
         .exact_size(PICKER_WIDTH)
+        .resizable(false)
+        .show_separator_line(false)
         .frame(egui::Frame::new().inner_margin(theme::margin_xy(0.0, 0.0)))
-        .show(ui, |ui| {
-            picker(app, ui, &theme, &snapshot);
-        });
+}
 
-    // A second, empty docked panel, purely to reserve a horizontal
-    // gutter — not `ui.add_space(SPACE_LG)`, which reads as the right
-    // call and does nothing at all here. `add_space` advances the
-    // cursor along the *current layout's* axis, and the layout `ui`
-    // carries past a docked `Panel::left` is still the page's own
-    // top-down one; the panel changes what area remains, not which
-    // direction spacing moves in. So the two columns had no gap between
-    // them beyond how each rounded off its own edge, however each of
-    // those was written — which is what made this so easy to miss: both
-    // sides could be independently correct and the seam still read as
-    // touching.
+/// The empty column between the picker and the detail pane.
+///
+/// A second docked panel, holding nothing, purely to reserve a
+/// horizontal gutter — not `ui.add_space(SPACE_LG)`, which reads as the
+/// right call and does nothing at all here. `add_space` advances the
+/// cursor along the *current layout's* axis, and the layout `ui` carries
+/// past a docked `Panel::left` is still the page's own top-down one; the
+/// panel changes what area remains, not which direction spacing moves
+/// in. So the two columns had no gap between them beyond how each
+/// rounded off its own edge, however each of those was written — which
+/// is what made it so easy to miss: both sides could be independently
+/// correct and the seam still read as touching.
+fn gutter_panel() -> egui::Panel {
     egui::Panel::left("performance-picker-gap")
         .exact_size(SPACE_LG)
+        .resizable(false)
         .frame(egui::Frame::new())
         .show_separator_line(false)
-        .show(ui, |_| {});
-    detail(app, ui, &theme, &snapshot);
 }
 
 /// The resource list down the left.
@@ -1456,17 +1481,10 @@ mod tests {
             egui::CentralPanel::default()
                 .frame(theme::content(&theme))
                 .show(ui, |ui| {
-                    egui::Panel::left("performance-picker")
-                        .exact_size(PICKER_WIDTH)
-                        .frame(egui::Frame::new().inner_margin(theme::margin_xy(0.0, 0.0)))
-                        .show(ui, |ui| {
-                            picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
-                        });
-                    egui::Panel::left("performance-picker-gap")
-                        .exact_size(SPACE_LG)
-                        .frame(egui::Frame::new())
-                        .show_separator_line(false)
-                        .show(ui, |_| {});
+                    picker_panel().show(ui, |ui| {
+                        picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
+                    });
+                    gutter_panel().show(ui, |_| {});
                     detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
                 });
         });
@@ -1484,15 +1502,21 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_detail_seam_draws_exactly_one_separator_line() -> anyhow::Result<()> {
-        // The spacer panel that carves out the seam's gap is itself a
-        // `Panel::left`, and a `Panel::left` draws its own separator
-        // line by default — right next to the picker panel's own,
-        // already-correct one. The two lines sit only a few pixels
-        // apart, which reads as a single doubled border hugging
-        // whichever column is on the near side, not as a gap. A rect
-        // check can't see this: neither panel's content rect moves, so
-        // the fix has to be verified against what actually gets
+    fn the_picker_detail_seam_draws_no_separator_line_at_all() -> anyhow::Result<()> {
+        // Both panels that meet at this seam are `Panel::left`, and a
+        // `Panel::left` draws a separator line by default. Two of them a
+        // few points apart read as one doubled border hugging whichever
+        // column is on the near side — not as a gap — so the spacer's
+        // was turned off first.
+        //
+        // The remaining one was still wrong, and was reported as such:
+        // a line the pointer could grab, on a panel pinned by
+        // `exact_size` that could never move. The gutter between the two
+        // columns *is* the separation; a rule drawn inside it is a
+        // second boundary a few points from the first.
+        //
+        // A rect check cannot see any of this — neither panel's content
+        // rect moves — so it is verified against what actually gets
         // painted at the seam.
         let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1024.0, 768.0));
         let mut app = App::new(crate::config::Config::default());
@@ -1510,17 +1534,10 @@ mod tests {
             egui::CentralPanel::default()
                 .frame(theme::content(&theme))
                 .show(ui, |ui| {
-                    egui::Panel::left("performance-picker")
-                        .exact_size(PICKER_WIDTH)
-                        .frame(egui::Frame::new().inner_margin(theme::margin_xy(0.0, 0.0)))
-                        .show(ui, |ui| {
-                            picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
-                        });
-                    egui::Panel::left("performance-picker-gap")
-                        .exact_size(SPACE_LG)
-                        .frame(egui::Frame::new())
-                        .show_separator_line(false)
-                        .show(ui, |_| {});
+                    picker_panel().show(ui, |ui| {
+                        picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
+                    });
+                    gutter_panel().show(ui, |_| {});
                     detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
                 });
         });
@@ -1554,8 +1571,8 @@ mod tests {
             .count();
 
         assert_eq!(
-            seam_lines, 1,
-            "expected exactly one separator line at the picker/detail seam, found {seam_lines}"
+            seam_lines, 0,
+            "the picker/detail seam is a gutter, not a border: expected no              separator line drawn in it, found {seam_lines}"
         );
         Ok(())
     }
@@ -1718,17 +1735,10 @@ mod tests {
             egui::CentralPanel::default()
                 .frame(theme::content(&theme))
                 .show(ui, |ui| {
-                    egui::Panel::left("performance-picker")
-                        .exact_size(PICKER_WIDTH)
-                        .frame(egui::Frame::new().inner_margin(theme::margin_xy(0.0, 0.0)))
-                        .show(ui, |ui| {
-                            picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
-                        });
-                    egui::Panel::left("performance-picker-gap")
-                        .exact_size(SPACE_LG)
-                        .frame(egui::Frame::new())
-                        .show_separator_line(false)
-                        .show(ui, |_| {});
+                    picker_panel().show(ui, |ui| {
+                        picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
+                    });
+                    gutter_panel().show(ui, |_| {});
                     detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
                 });
         });

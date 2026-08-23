@@ -279,7 +279,6 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         viewport,
                         egui::Id::new("service-row").with(position),
                         selected,
-                        false,
                         position % 2 == 1,
                     );
                     ui.add_space(SPACE_SM);
@@ -340,6 +339,29 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                     }
                     if service.state.can_stop() && ui.button("Stop").clicked() {
                         action = Some(Action::StopService(service.name.clone()));
+                        ui.close();
+                    }
+                    // Rows are not selectable text — see
+                    // `theme::apply` — so every view that shows a value
+                    // worth having needs a way to lift it out. This is
+                    // the Services view's.
+                    if ui.button("Copy details").clicked() {
+                        let host = service
+                            .pid
+                            .and_then(|pid| hosts.get(&pid).cloned())
+                            .unwrap_or_else(|| crate::format::DASH.to_string());
+                        ui.ctx().copy_text(format!(
+                            "Name	Service	Status	PID	Host process
+{}	{}	{}	{}	{}",
+                            service_label(service),
+                            service.name,
+                            service.state.label(),
+                            service.pid.map_or_else(
+                                || crate::format::DASH.to_string(),
+                                |pid| pid.to_string()
+                            ),
+                            host,
+                        ));
                         ui.close();
                     }
                     // The link back to the process list, which is the
@@ -628,7 +650,6 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         viewport,
                         egui::Id::new("startup-row").with(position),
                         selected,
-                        false,
                         position % 2 == 1,
                     );
                     ui.add_space(SPACE_SM);

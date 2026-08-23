@@ -277,7 +277,6 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect) {
                                 viewport,
                                 egui::Id::new("detail-row").with(key),
                                 selected,
-                                false,
                                 position % 2 == 1,
                             );
                             ui.add_space(SPACE_SM);
