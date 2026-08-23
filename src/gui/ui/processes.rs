@@ -306,8 +306,8 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     // one that decides the state the view opens in, and a table dragged
     // wider than its pane already scrolls by having been dragged.
     let columns = app.processes.columns.as_slice();
-    let wanted: f32 = columns.iter().copied().map(initial_width).sum::<f32>()
-        + spacing * columns.len() as f32;
+    let wanted: f32 =
+        columns.iter().copied().map(initial_width).sum::<f32>() + spacing * columns.len() as f32;
 
     if wanted <= pane.width() - bar {
         table_body(app, ui, theme, pane, true);
