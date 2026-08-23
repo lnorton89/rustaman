@@ -90,6 +90,30 @@ impl Unit {
     }
 }
 
+/// A painter that cannot draw outside `rect`.
+///
+/// Every graph here paints its data through one of these. Clamping the
+/// *values* is not enough, and that is the part that is easy to get
+/// wrong: `plot_points` already clamps every sample to the rect, and
+/// the line still escaped the frame.
+///
+/// It escapes at the joins. A stroke is tessellated by offsetting each
+/// vertex along the average of its two adjacent segment normals, scaled
+/// by the reciprocal of the half-angle's cosine — and a spike that goes
+/// up and immediately back down is very nearly a 180 degree reversal, so
+/// that reciprocal is very nearly a division by zero. The join is
+/// projected tens of points past a vertex that is sitting correctly on
+/// the axis maximum. A rate graph is mostly flat with occasional spikes,
+/// which is precisely the shape that produces them.
+///
+/// Note `Painter::with_clip_rect` *intersects* with the clip already in
+/// force rather than replacing it, which is what is wanted here: the
+/// graph must not escape its own rect, and it must not escape whatever
+/// the panel had already restricted it to either.
+fn clipped(ui: &Ui, rect: Rect) -> egui::Painter {
+    ui.painter().with_clip_rect(rect)
+}
+
 /// Draws a filled area graph into `rect`.
 pub fn area(ui: &Ui, theme: &Palette, rect: Rect, graph: &Graph<'_>) {
     area_with(ui, theme, rect, graph, Axis::Labelled);
@@ -126,8 +150,9 @@ fn area_with(ui: &Ui, theme: &Palette, rect: Rect, graph: &Graph<'_>, axis: Axis
         return;
     }
 
-    fill_under(painter, rect, &points, graph.color);
-    painter.add(Shape::line(
+    let plot = clipped(ui, rect);
+    fill_under(&plot, rect, &points, graph.color);
+    plot.add(Shape::line(
         points,
         Stroke::new(1.5, theme::rgb(graph.color)),
     ));
@@ -156,20 +181,21 @@ pub fn banded(ui: &Ui, theme: &Palette, rect: Rect, total: &Graph<'_>, under: &G
     let total_points = plot_points(total.series, rect, scale);
     let under_points = plot_points(under.series, rect, scale);
 
+    let plot = clipped(ui, rect);
     if total_points.len() >= 2 {
-        fill_under(painter, rect, &total_points, total.color);
+        fill_under(&plot, rect, &total_points, total.color);
     }
     if under_points.len() >= 2 {
-        fill_under(painter, rect, &under_points, under.color);
+        fill_under(&plot, rect, &under_points, under.color);
     }
     if total_points.len() >= 2 {
-        painter.add(Shape::line(
+        plot.add(Shape::line(
             total_points,
             Stroke::new(1.5, theme::rgb(total.color)),
         ));
     }
     if under_points.len() >= 2 {
-        painter.add(Shape::line(
+        plot.add(Shape::line(
             under_points,
             Stroke::new(1.0, theme::rgb(under.color)),
         ));
@@ -177,6 +203,69 @@ pub fn banded(ui: &Ui, theme: &Palette, rect: Rect, total: &Graph<'_>, under: &G
 
     frame(ui, theme, rect);
     axis_label(ui, theme, rect, total.unit.label(scale));
+}
+
+/// Draws several independent series into one rect, on one shared axis.
+///
+/// For a quantity that is really two — disk read against disk write,
+/// bytes sent against bytes received. The single combined line these
+/// replace answered "is the disk busy" and hid the only thing worth
+/// knowing about a busy disk, which is *which way* the traffic is
+/// going: a machine paging is reading, a machine writing a backup is
+/// writing, and summed they are the same graph.
+///
+/// Two graphs side by side do not fix it either. Each would be scaled
+/// to its own maximum, so 2 MB/s of write and 200 MB/s of read draw the
+/// identical shape at the identical height — the reader compares them
+/// because they are adjacent, and every such comparison is wrong. One
+/// axis is the entire point of drawing them together.
+///
+/// Distinct from [`banded`], which draws a *part* underneath its
+/// *whole* and so takes the whole's scale. These series are independent
+/// of each other, so the scale is the largest any one of them needs.
+pub fn layered(ui: &Ui, theme: &Palette, rect: Rect, series: &[Graph<'_>]) {
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(RADIUS), theme::rgb(theme.app));
+    grid(ui, theme, rect);
+
+    let Some(first) = series.first() else {
+        // No series at all still gets its frame, so the panel keeps its
+        // shape rather than showing a hole where a graph should be.
+        frame(ui, theme, rect);
+        return;
+    };
+
+    // One scale, taken from whichever series needs the most room.
+    let scale = series
+        .iter()
+        .map(|graph| graph.series.scale(graph.floor))
+        .fold(first.floor, f32::max);
+
+    let plotted: Vec<(&Graph<'_>, Vec<Pos2>)> = series
+        .iter()
+        .map(|graph| (graph, plot_points(graph.series, rect, scale)))
+        .collect();
+
+    // Every fill, then every line. Interleaving them buries the first
+    // series' line under the second series' fill exactly where the two
+    // cross — which is the moment the graph exists to show.
+    let plot = clipped(ui, rect);
+    for (graph, points) in &plotted {
+        if points.len() >= 2 {
+            fill_under(&plot, rect, points, graph.color);
+        }
+    }
+    for (graph, points) in &plotted {
+        if points.len() >= 2 {
+            plot.add(Shape::line(
+                points.clone(),
+                Stroke::new(1.5, theme::rgb(graph.color)),
+            ));
+        }
+    }
+
+    frame(ui, theme, rect);
+    axis_label(ui, theme, rect, first.unit.label(scale));
 }
 
 /// Draws a grid of small per-core graphs.
@@ -386,9 +475,11 @@ pub fn sparkline(ui: &Ui, rect: Rect, series: &Series, color: Rgb, floor: f32) {
     if points.len() < 2 {
         return;
     }
-    fill_under(ui.painter(), rect, &points, color);
-    ui.painter()
-        .add(Shape::line(points, Stroke::new(1.0, theme::rgb(color))));
+    // A row's sparkline is 16 points tall and sits inches from the row
+    // above it, so an unclipped join lands in a neighbour's text.
+    let plot = clipped(ui, rect);
+    fill_under(&plot, rect, &points, color);
+    plot.add(Shape::line(points, Stroke::new(1.0, theme::rgb(color))));
 }
 
 /// A colour at the opacity a graph's fill uses, for a legend swatch that
@@ -415,6 +506,86 @@ mod tests {
 
     fn panel() -> Rect {
         Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(200.0, 100.0))
+    }
+
+    /// Every rect actually painted on screen, in the order drawn.
+    ///
+    /// A primitive's mesh is *not* clipped geometrically — epaint hands
+    /// the clip to the GPU as a scissor and leaves the vertices where
+    /// they are. So what reaches the screen is the mesh's bounds
+    /// intersected with its own clip rect, and a test that checks either
+    /// one alone passes on the broken version.
+    fn painted(ctx: &egui::Context, shapes: Vec<egui::epaint::ClippedShape>) -> Vec<Rect> {
+        ctx.tessellate(shapes, 1.0)
+            .into_iter()
+            .filter_map(|primitive| {
+                let egui::epaint::Primitive::Mesh(mesh) = primitive.primitive else {
+                    return None;
+                };
+                let bounds = mesh.vertices.iter().fold(Rect::NOTHING, |bounds, vertex| {
+                    bounds.union(Rect::from_min_size(vertex.pos, Vec2::ZERO))
+                });
+                let visible = bounds.intersect(primitive.clip_rect);
+                visible.is_positive().then_some(visible)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_spike_cannot_paint_outside_the_graph() -> anyhow::Result<()> {
+        // A rate graph is flat with occasional spikes, and that is the
+        // one shape that escapes: see `clipped`.
+        let mut series = Series::new(64);
+        for index in 0..64 {
+            series.push(if index % 8 == 0 { 100.0 } else { 0.0 });
+        }
+
+        let app = crate::gui::app::App::new(crate::config::Config::default());
+        let theme = app.theme.clone();
+        // Well inside the window, so an escape has somewhere to go and
+        // the test can see it.
+        let window = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 400.0));
+        let plot = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(200.0, 100.0));
+
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, &theme);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(window),
+                ..Default::default()
+            },
+            |ui| {
+                area(
+                    ui,
+                    &theme,
+                    plot,
+                    &Graph {
+                        series: &series,
+                        color: theme.series(0, 5),
+                        // A percentage axis is pinned at exactly 100
+                        // with no headroom — deliberately, so two CPU
+                        // graphs are comparable — so a process at 100%
+                        // puts the line *on* `rect.top()`. That is the
+                        // only configuration where a join has anywhere
+                        // to escape to, and so the only one worth
+                        // testing.
+                        floor: 100.0,
+                        unit: Unit::Percent,
+                    },
+                );
+            },
+        );
+        output.textures_delta.clear();
+
+        // Feathering widens every edge by about a pixel either side.
+        let allowed = plot.expand(2.0);
+        for visible in painted(&ctx, output.shapes) {
+            assert!(
+                allowed.contains_rect(visible),
+                "the graph painted {visible:?}, outside its own rect {plot:?} —                  a spike's join is projected past the vertex, so clamping the                  sample is not enough on its own"
+            );
+        }
+        Ok(())
     }
 
     #[test]

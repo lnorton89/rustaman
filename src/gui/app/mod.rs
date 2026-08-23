@@ -241,13 +241,33 @@ pub struct PerformanceView {
     /// Physical memory in use, as a percentage.
     pub memory: Series,
     /// Combined disk throughput, in bytes per second.
+    ///
+    /// Kept alongside the two halves below because the disk *tile* in
+    /// the picker is forty points tall and has room for one line, and
+    /// the question it answers there is only "is this disk busy".
     pub disk: Series,
+    /// Bytes read per second, across every disk.
+    pub disk_read: Series,
+    /// Bytes written per second, across every disk.
+    ///
+    /// Read and write are held apart because summing them discards the
+    /// one thing that distinguishes a machine that is paging from a
+    /// machine that is writing a backup — and those want opposite
+    /// responses from whoever is looking at the graph.
+    pub disk_write: Series,
     /// Combined network throughput, in bytes per second. See
     /// [`crate::model::SystemSample::network_rate`] on what "combined"
     /// means here — it is not the sum of the list.
     pub network: Series,
-    /// The send half of it, drawn as a band beneath.
+    /// The send half of it.
     pub network_send: Series,
+    /// The receive half.
+    ///
+    /// Stored rather than derived as total-minus-send: the total is
+    /// hardware adapters only, so on a machine whose send traffic goes
+    /// over a virtual adapter the subtraction is negative, and a
+    /// negative rate plots below the axis.
+    pub network_receive: Series,
     /// One ring per adapter, keyed by interface LUID.
     ///
     /// Keyed rather than indexed, and keyed on the LUID rather than the
@@ -292,8 +312,11 @@ impl Default for PerformanceView {
             cores: Vec::new(),
             memory: Series::new(HISTORY),
             disk: Series::new(HISTORY),
+            disk_read: Series::new(HISTORY),
+            disk_write: Series::new(HISTORY),
             network: Series::new(HISTORY),
             network_send: Series::new(HISTORY),
+            network_receive: Series::new(HISTORY),
             adapters: HashMap::new(),
             gpu: Series::new(HISTORY),
             focus: PerformanceFocus::default(),
@@ -745,20 +768,25 @@ impl App {
         performance
             .memory
             .push(snapshot.system.memory.used_percent() as f32);
-        performance.disk.push(
-            snapshot
-                .system
-                .disks
-                .iter()
-                .map(crate::model::DiskSample::total_rate)
-                .sum::<f64>() as f32,
-        );
+        let (read, write) = snapshot
+            .system
+            .disks
+            .iter()
+            .fold((0.0, 0.0), |(read, write), disk| {
+                (read + disk.read_rate, write + disk.write_rate)
+            });
+        performance.disk.push((read + write) as f32);
+        performance.disk_read.push(read as f32);
+        performance.disk_write.push(write as f32);
+
+        let network = snapshot.system.network_rate();
+        let sent = snapshot.system.network_send_rate();
+        performance.network.push(network as f32);
+        performance.network_send.push(sent as f32);
+        // Clamped at zero rather than trusted: see the field's docs.
         performance
-            .network
-            .push(snapshot.system.network_rate() as f32);
-        performance
-            .network_send
-            .push(snapshot.system.network_send_rate() as f32);
+            .network_receive
+            .push((network - sent).max(0.0) as f32);
 
         // One ring per adapter, so the Network panel can graph a single
         // adapter rather than only the machine's total — and so a row
