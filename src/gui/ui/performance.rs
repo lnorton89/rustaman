@@ -1661,7 +1661,27 @@ fn sort_busiest_first<T>(items: &mut [T], rate: impl Fn(&T) -> f64, name: impl F
 
 /// The GPU panel.
 fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
-    widgets::section(ui, theme, "GPU");
+    // The adapter's name in the heading when the machine has one, the
+    // bare label when it has several.
+    //
+    // The CPU panel already heads itself with the processor's name, and
+    // this read as an oversight beside it. It is only done for a single
+    // adapter because the heading describes the *panel*, and a panel
+    // covering two cards cannot be headed with one of their names — the
+    // per-adapter cards below carry the names in that case, which is
+    // where they belong once there is more than one.
+    //
+    // Distinct adapters, not distinct LUIDs: a machine can present one
+    // physical GPU under two LUIDs, and heading the panel "GPU" because
+    // of that would be answering a question nobody asked.
+    let mut names: Vec<&str> = system.gpus.iter().map(|gpu| gpu.name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    let heading_names_the_adapter = names.len() == 1;
+    match names.as_slice() {
+        [only] => widgets::section(ui, theme, only),
+        _ => widgets::section(ui, theme, "GPU"),
+    }
 
     let (rect, graph_response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), graph_height(ui, GPU)),
@@ -1739,12 +1759,18 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             return;
         };
         chrome::panel_card(ui, theme, |ui| {
-            ui.label(
-                egui::RichText::new(&adapter.name)
-                    .color(theme::rgb(theme.text))
-                    .strong(),
-            );
-            ui.add_space(SPACE_XS);
+            // The card names itself only when the heading cannot. With a
+            // single adapter the panel heading already carries the name,
+            // and repeating it two lines below is the kind of duplication
+            // that reads as a layout mistake rather than as emphasis.
+            if !heading_names_the_adapter {
+                ui.label(
+                    egui::RichText::new(&adapter.name)
+                        .color(theme::rgb(theme.text))
+                        .strong(),
+                );
+                ui.add_space(SPACE_XS);
+            }
             // Per engine, because the busiest engine is the headline and
             // *which* engine is busy is the diagnosis: a machine at 100%
             // video-decode is playing a video, and one at 100% 3D is

@@ -84,7 +84,18 @@ fn embed_resources() {
     // The version-info block Explorer's properties dialog reads. Taken
     // from Cargo.toml so it cannot disagree with the crate's own version.
     resource.set("ProductName", "Rustaman");
-    resource.set("FileDescription", env!("CARGO_PKG_DESCRIPTION"));
+    // `FileDescription`, not the crate description — and this app is the
+    // one place where getting that wrong is self-evident.
+    //
+    // The field is nominally a description, but every shipping Windows
+    // binary puts a short product name in it ("Google Chrome"), because
+    // it is what Task Manager and Explorer show as the program's name.
+    // This one held the whole sentence from Cargo.toml, so Rustaman's own
+    // row in its own process list read "A modern Windows task manager:
+    // proces..." while every neighbouring row read a name. `win::identity`
+    // resolves a display name from exactly this field.
+    resource.set("FileDescription", "Rustaman");
+    resource.set("Comments", env!("CARGO_PKG_DESCRIPTION"));
     resource.set("LegalCopyright", "MIT licensed");
 
     if let Err(error) = resource.compile() {
