@@ -38,6 +38,12 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // Clearance before the scrollbar, as in the Performance,
+            // Memory and System panes. The theme cards run the full
+            // width here, so without it every one of them ends flush
+            // against the scrollbar's lane.
+            let width = (ui.available_width() - SPACE_MD).max(0.0);
+            ui.set_max_width(width);
             appearance(app, ui, &theme);
             ui.add_space(chrome::SECTION_GAP);
             sampling(app, ui, &theme);

@@ -34,6 +34,14 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // A step of clearance before the scrollbar, the same one
+            // the Performance and Memory panes take. Without it the
+            // cards end flush against the scrollbar's lane and the view
+            // reads as though it were cut off there rather than as
+            // having a margin — and this view is nothing but cards, so
+            // every one of them ends on that edge.
+            let width = (ui.available_width() - SPACE_MD).max(0.0);
+            ui.set_max_width(width);
             heading(ui, &theme, system);
             ui.add_space(chrome::SECTION_GAP);
             overview(ui, &theme, system);
