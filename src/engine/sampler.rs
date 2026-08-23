@@ -595,6 +595,27 @@ impl Sampler {
     /// Built from the engine map the process pass already read, so the
     /// counters are not collected twice — PDH would return the same
     /// values for a second collection in the same interval anyway.
+    /// What to call an engine the counter did not name.
+    ///
+    /// Not every instance carries an `engtype_` field — Intel's driver
+    /// omits it on some engines — and the label was built straight from
+    /// it, so those came out as a bare "· 0:5" with nothing in front of
+    /// the separator. That reads as a rendering fault rather than as a
+    /// fact about the engine.
+    ///
+    /// Dropping them was the other option and it is worse: the counter
+    /// reports a real utilisation figure for that engine, and a panel
+    /// that silently omits a busy engine is lying by a larger margin
+    /// than one that admits it does not know the engine's type. "Engine"
+    /// is exactly what is known.
+    fn engine_name(engine: &str) -> &str {
+        if engine.is_empty() {
+            "Engine"
+        } else {
+            engine
+        }
+    }
+
     fn sample_gpus(reading: Option<&win::gpu::Reading>) -> Vec<GpuSample> {
         let Some(reading) = reading else {
             return Vec::new();
@@ -639,7 +660,10 @@ impl Sampler {
                 let engines: Vec<(String, f64)> = engines
                     .into_iter()
                     .map(|(engine, physical, index, value)| {
-                        (format!("{engine} · {physical}:{index}"), value)
+                        (
+                            format!("{} · {physical}:{index}", Self::engine_name(&engine)),
+                            value,
+                        )
                     })
                     .collect();
                 let memory_used = reading.memory_by_adapter.get(&luid).copied().unwrap_or(0);
@@ -686,6 +710,17 @@ pub fn priority_from_base(base: i32) -> Priority {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_engine_the_counter_did_not_name_still_gets_one() {
+        // Intel's driver omits `engtype_` on some engines, so the label
+        // was built from an empty string and came out as a bare
+        // "· 0:5" — a separator with nothing in front of it, which
+        // reads as a rendering fault rather than as a fact.
+        assert_eq!(Sampler::engine_name(""), "Engine");
+        assert_eq!(Sampler::engine_name("3D"), "3D");
+        assert_eq!(Sampler::engine_name("VideoDecode"), "VideoDecode");
+    }
     use super::*;
 
     /// A row with nothing but an identity, for the sweep's bookkeeping.
