@@ -281,7 +281,56 @@ fn refresh_rows(app: &mut App, context: &egui::Context) {
 }
 
 /// Draws the table.
+/// Draws the process table, scrolling it sideways if it does not fit.
+///
+/// The module docs above have promised this since they were written —
+/// "no column ever disappears at a narrow width", "narrow windows scroll
+/// horizontally instead" — and until now the table clipped instead. A
+/// clip does not shorten the overflowing column, it removes whole
+/// columns: at the smallest window the app allows the eight default
+/// columns want about 924 points against a pane of about 588, so four of
+/// them were simply not there, with no scrollbar and nothing to say they
+/// existed.
+///
+/// See [`super::details`], which has the same arrangement and the
+/// reasoning for each part of it — in particular why the scroll area is
+/// named, and why only one of them may own an axis.
 fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
+    let pane = ui.available_rect_before_wrap();
+    let spacing = ui.spacing().item_spacing.x;
+    let bar = ui.spacing().scroll.allocated_width();
+
+    // The columns' *initial* widths, which is an estimate: `egui_extras`
+    // owns whatever the user has since dragged them to, and does not
+    // publish it. It is the right estimate to make, because it is the
+    // one that decides the state the view opens in, and a table dragged
+    // wider than its pane already scrolls by having been dragged.
+    let columns = app.processes.columns.as_slice();
+    let wanted: f32 = columns.iter().copied().map(initial_width).sum::<f32>()
+        + spacing * columns.len() as f32;
+
+    if wanted <= pane.width() - bar {
+        table_body(app, ui, theme, pane, true);
+        return;
+    }
+
+    egui::ScrollArea::both()
+        .id_salt("process-table")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.set_width(wanted);
+            table_body(app, ui, theme, pane, false);
+        });
+}
+
+/// The table proper, once [`table`] has decided whether it fits.
+///
+/// `fills_pane` is false when a scroll area above already owns both
+/// axes. It governs the vertical scroll and the trailing spacer
+/// together, because they are the same question: a table filling the
+/// pane scrolls itself and has slack to absorb, and a table inside a
+/// scroll area does neither.
+fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fills_pane: bool) {
     let entries = app.processes.rows.shared_entries();
     let Some(snapshot) = app.snapshot.clone() else {
         return;
@@ -299,7 +348,7 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     // edge: a table cell's painter is clipped to that cell, and the row
     // fill has to be painted while drawing the first one so that
     // everything else lands on top of it.
-    let viewport = ui.available_rect_before_wrap();
+    let viewport = pane;
 
     // The user's column order, taken by value so the table can draw while
     // `app` is borrowed mutably by the row closures.
@@ -334,7 +383,7 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
         .id_salt(&columns)
         .striped(false)
         .resizable(true)
-        .vscroll(true)
+        .vscroll(fills_pane)
         // `TableBuilder` otherwise defaults to an infinite maximum scroll
         // height. With hundreds of rows it allocates through the status bar
         // and places its scrollbar at the physical window edge instead of
@@ -377,7 +426,15 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     // width it was given, the row backgrounds run to the window's edge,
     // and the one column nobody can drag is the one that has nothing in
     // it to drag.
-    builder = builder.column(Column::remainder().clip(true));
+    //
+    // Only when the table is filling its pane. Inside a scroll area
+    // there is no slack to absorb, and a `remainder()` there sizes
+    // itself from an available width that the scrollbars change — which
+    // is a width that argues with the scroll area about how wide the
+    // content is.
+    if fills_pane {
+        builder = builder.column(Column::remainder().clip(true));
+    }
 
     builder
         .header(HEADER_HEIGHT, |mut header| {
@@ -423,7 +480,9 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
             }
             // The spacer's heading, which is empty. Skipping it leaves
             // the header one cell short of the body.
-            header.col(|_| {});
+            if fills_pane {
+                header.col(|_| {});
+            }
         })
         .body(|body| {
             body.rows(ROW_HEIGHT, entries.len(), |mut row| {
@@ -456,7 +515,9 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         // The trailing spacer is a real column and has to
                         // be filled, or every row stops one column short
                         // of the window edge.
-                        row.spacer();
+                        if fills_pane {
+                            row.spacer();
+                        }
                         if hit || row.response().clicked() {
                             group_toggled = Some(*kind);
                         }
@@ -505,7 +566,9 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                             });
                         }
                         // The trailing spacer; see the group row above.
-                        row.spacer();
+                        if fills_pane {
+                            row.spacer();
+                        }
 
                         let response = row.response();
                         if disclosure {
