@@ -291,11 +291,14 @@ fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fil
                     if widgets::sortable_header(
                         ui,
                         theme,
-                        key.label(),
-                        sorted,
-                        index == 0,
-                        index == 3,
-                        false,
+                        widgets::Heading {
+                            label: key.label(),
+                            mark: None,
+                            sorted,
+                            claims_width: index == 0,
+                            right_aligned: index == 3,
+                            lifted: false,
+                        },
                     )
                     .clicked()
                     {
@@ -781,11 +784,14 @@ fn startup_table_body(
                     if widgets::sortable_header(
                         ui,
                         theme,
-                        key.label(),
-                        sorted,
-                        index == 0,
-                        false,
-                        false,
+                        widgets::Heading {
+                            label: key.label(),
+                            mark: None,
+                            sorted,
+                            claims_width: index == 0,
+                            right_aligned: false,
+                            lifted: false,
+                        },
                     )
                     .clicked()
                     {

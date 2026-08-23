@@ -445,11 +445,14 @@ fn table_body(
                     if widgets::sortable_header(
                         ui,
                         theme,
-                        key.label(),
-                        sorted,
-                        false,
-                        index > 0,
-                        false,
+                        widgets::Heading {
+                            label: key.label(),
+                            mark: key.mark(),
+                            sorted,
+                            claims_width: false,
+                            right_aligned: index > 0,
+                            lifted: false,
+                        },
                     )
                     .clicked()
                     {

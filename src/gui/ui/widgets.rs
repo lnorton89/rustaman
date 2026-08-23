@@ -514,15 +514,39 @@ pub fn plain_header(ui: &mut Ui, theme: &Palette, label: &str) {
 /// then narrowing the window leaves the table with a scrollbar over space
 /// it gave back. So the header *senses* across the whole cell but
 /// *allocates* only what its text needs.
-pub fn sortable_header(
-    ui: &mut Ui,
-    theme: &Palette,
-    label: &str,
-    sorted: Option<bool>,
-    claims_width: bool,
-    right_aligned: bool,
-    lifted: bool,
-) -> Response {
+pub struct Heading<'a> {
+    /// The column's name.
+    pub label: &'a str,
+    /// The glyph before it, if the column has earned one and can afford
+    /// the width. See [`crate::model::sort::SortKey::mark`].
+    pub mark: Option<Icon>,
+    /// `Some(descending)` when this is the column being sorted on.
+    pub sorted: Option<bool>,
+    /// Whether the heading claims its cell's whole width.
+    pub claims_width: bool,
+    /// Whether the column's values are right-aligned, which the heading
+    /// follows so a number sits under its own name.
+    pub right_aligned: bool,
+    /// Whether a drag is carrying this heading.
+    pub lifted: bool,
+}
+
+/// A column heading: its name, its sort arrow, and the click and drag
+/// that sort and reorder it.
+///
+/// Takes a [`Heading`] rather than seven arguments. Four of them are
+/// booleans, and four booleans in a row is a call nobody can read at the
+/// call site — `false, index > 0, false` says nothing about which
+/// question each answers.
+pub fn sortable_header(ui: &mut Ui, theme: &Palette, heading: Heading<'_>) -> Response {
+    let Heading {
+        label,
+        mark,
+        sorted,
+        claims_width,
+        right_aligned,
+        lifted,
+    } = heading;
     let font = TextStyle::Small.resolve(ui.style());
     let color = if sorted.is_some() {
         theme.text
@@ -548,10 +572,24 @@ pub fn sortable_header(
         .layout_no_wrap(label.to_string(), font, theme::rgb(color));
 
     let cell = ui.available_rect_before_wrap();
+
+    // The mark is an enhancement and is dropped when the column cannot
+    // afford it, which is the same rule the Startup toolbar's note
+    // follows. That is not fastidiousness: these tables are already
+    // wider than the pane at the smallest window the app allows — the
+    // Details table wants about 838 points against 588 — and a mark on
+    // every heading would add sixteen points a column and undo the work
+    // that made them scroll instead of losing a column. An enhancement
+    // that costs a column is not an enhancement.
+    let mark_column = icons::DISCLOSURE + SPACE_XS;
+    let needed = galley.size().x + SPACE_SM + arrow_column + mark_column;
+    let mark = mark.filter(|_| needed <= cell.width());
+
+    let leading = if mark.is_some() { mark_column } else { 0.0 };
     let wanted = if claims_width {
         Vec2::new(cell.width(), galley.size().y + SPACE_XS)
     } else {
-        galley.size() + Vec2::new(SPACE_SM + arrow_column, SPACE_XS)
+        galley.size() + Vec2::new(SPACE_SM + arrow_column + leading, SPACE_XS)
     };
     // `click_and_drag`, so the same control sorts on a click and reorders
     // on a drag. egui reports `clicked()` as false once the pointer has
@@ -577,10 +615,27 @@ pub fn sortable_header(
         )
     } else {
         (
-            rect.left(),
-            rect.left() + text_width + SPACE_XS + icons::DISCLOSURE / 2.0,
+            rect.left() + leading,
+            rect.left() + leading + text_width + SPACE_XS + icons::DISCLOSURE / 2.0,
         )
     };
+
+    // Ahead of the label in a left-aligned heading, behind it in a
+    // right-aligned one — the same side the text starts from, so the
+    // heading reads as one object rather than as a glyph and a word that
+    // happen to share a cell.
+    if let Some(mark) = mark {
+        let centre = if right_aligned {
+            rect.right() - text_width - SPACE_XS - arrow_column - mark_column / 2.0
+        } else {
+            rect.left() + mark_column / 2.0
+        };
+        let box_ = Rect::from_center_size(
+            egui::pos2(centre, rect.center().y),
+            Vec2::splat(icons::DISCLOSURE),
+        );
+        icons::paint(ui.painter(), box_, mark, theme::rgb(color));
+    }
     ui.painter().galley(
         egui::pos2(text_left, rect.center().y - galley.size().y / 2.0),
         galley,

@@ -109,6 +109,42 @@ impl SortKey {
         }
     }
 
+    /// The mark this column's heading carries, if it has earned one.
+    ///
+    /// **Only the columns that name a resource.** The five that do are
+    /// the five the Performance view has panels for, and using the same
+    /// glyph in both places is the whole return on this: a person who
+    /// has seen the Disk panel recognises the Disk column without
+    /// reading it.
+    ///
+    /// Everything else is `None` on purpose. A mark against "PID" or
+    /// "Session" would have to be invented rather than recognised, and
+    /// an invented glyph is a second thing to learn in a column heading
+    /// that already says the word — noise dressed as information, which
+    /// is the same argument that keeps colour off the process rows.
+    #[must_use]
+    pub fn mark(self) -> Option<crate::icon::Icon> {
+        match self {
+            Self::Cpu | Self::CpuTime => Some(crate::icon::Icon::Cpu),
+            Self::Memory | Self::PrivateBytes => Some(crate::icon::Icon::Memory),
+            Self::Disk => Some(crate::icon::Icon::Disk),
+            Self::Network => Some(crate::icon::Icon::Network),
+            Self::Gpu => Some(crate::icon::Icon::Gpu),
+            // Named rather than wildcarded, so a column added later is a
+            // compile error here and somebody has to decide.
+            Self::Name
+            | Self::Pid
+            | Self::Status
+            | Self::User
+            | Self::Threads
+            | Self::Handles
+            | Self::Priority
+            | Self::Architecture
+            | Self::Session
+            | Self::Path => None,
+        }
+    }
+
     /// Which way this column sorts when it is first clicked.
     ///
     /// A magnitude — CPU, memory, disk — opens descending, because the

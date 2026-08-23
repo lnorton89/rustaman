@@ -148,6 +148,14 @@ pub enum Icon {
     /// row it sits on carries meaning through colour already, and a
     /// second, fixed green on the same row would compete with it.
     Leaf,
+    /// Processor time. A die with its carrier.
+    Cpu,
+    /// Storage. A platter seen edge-on.
+    Disk,
+    /// Network throughput. Traffic in both directions.
+    Network,
+    /// The graphics adapter. A board with its fan.
+    Gpu,
     /// A program the Shell had no icon for.
     ///
     /// A window outline: the most neutral shape that still says "a
@@ -197,6 +205,41 @@ impl Icon {
             // module with pins: that draws the hardware, and this view
             // is about how the machine's memory is being spent rather
             // than what it is plugged into.
+            // A die inside its carrier. Square-in-square is the one
+            // processor shape that survives twelve points — pins along
+            // the edges are four separate one-pixel marks at this size
+            // and read as noise on the outline.
+            Self::Cpu => vec![
+                Path::closed(&[(3.0, 3.0), (13.0, 3.0), (13.0, 13.0), (3.0, 13.0)]),
+                Path::closed(&[(6.0, 6.0), (10.0, 6.0), (10.0, 10.0), (6.0, 10.0)]),
+            ],
+            // A platter from above, not a cylinder from the side. The
+            // cylinder was drawn first and it does not survive: at
+            // twelve points the ellipse flattens into a straight line
+            // and the whole thing reads as a plain pill, which says
+            // nothing about storage. Two concentric circles keep their
+            // shape at any size — it is the one storage image that is
+            // still legible when it is nine pixels across.
+            Self::Disk => vec![Path::circle(8.0, 8.0, 5.2), Path::circle(8.0, 8.0, 1.4)],
+            // Two arrows passing. Up and down rather than a globe or a
+            // plug: this column is *throughput*, and the only fact worth
+            // carrying at this size is that it runs both ways.
+            Self::Network => vec![
+                Path::open(&[(5.5, 12.5), (5.5, 3.5)]),
+                Path::open(&[(3.0, 6.0), (5.5, 3.5), (8.0, 6.0)]),
+                Path::open(&[(10.5, 3.5), (10.5, 12.5)]),
+                Path::open(&[(8.0, 10.0), (10.5, 12.5), (13.0, 10.0)]),
+            ],
+            // A board with its fan, and nothing else on it. The first
+            // version also carried two connector stubs at the far end,
+            // which at this size were two more one-pixel marks inside an
+            // already-busy outline — the card stopped reading as a card
+            // and started reading as a smudge. The fan alone is what
+            // separates it from `Cpu`, so the fan alone is what it has.
+            Self::Gpu => vec![
+                Path::closed(&[(2.5, 4.5), (13.5, 4.5), (13.5, 11.5), (2.5, 11.5)]),
+                Path::circle(8.0, 8.0, 2.4),
+            ],
             // A window: a frame with its title bar ruled off. Not a
             // gear, a box or a document — a program the Shell could not
             // describe is still a *program*, and a frame is the one
@@ -498,7 +541,7 @@ mod tests {
     /// Kept in the enum's own declaration order, which is not
     /// decoration: the check below reads each entry's discriminant, and
     /// the order is what makes a missing entry show up as a gap.
-    const ALL: [Icon; 27] = [
+    const ALL: [Icon; 31] = [
         Icon::Processes,
         Icon::Performance,
         Icon::Memory,
@@ -526,6 +569,10 @@ mod tests {
         Icon::Leaf,
         Icon::Windows,
         Icon::Application,
+        Icon::Cpu,
+        Icon::Disk,
+        Icon::Network,
+        Icon::Gpu,
     ];
 
     // `ALL` names each icon exactly once, checked when the tests are

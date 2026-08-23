@@ -462,15 +462,19 @@ fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fil
                     let response = widgets::sortable_header(
                         ui,
                         theme,
-                        key.label(),
-                        sorted,
-                        false,
-                        index > 0,
-                        // The heading a drag is carrying is dimmed in
-                        // place, so it reads as lifted out of the row
-                        // rather than duplicated by the ghost.
-                        lane.as_ref()
-                            .is_some_and(|lane| lane.is_dragging(ui, index)),
+                        widgets::Heading {
+                            label: key.label(),
+                            mark: key.mark(),
+                            sorted,
+                            claims_width: false,
+                            right_aligned: index > 0,
+                            // The heading a drag is carrying is dimmed
+                            // in place, so it reads as lifted out of the
+                            // row rather than duplicated by the ghost.
+                            lifted: lane
+                                .as_ref()
+                                .is_some_and(|lane| lane.is_dragging(ui, index)),
+                        },
                     );
                     if let Some(lane) = lane.as_mut() {
                         lane.item(index, ui.max_rect(), key.label(), &response);
