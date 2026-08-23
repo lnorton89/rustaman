@@ -605,13 +605,21 @@ impl Sampler {
         let registry = win::gpu::adapters();
 
         // Group exact physical engines by adapter.
-        let mut by_adapter: HashMap<String, Vec<(String, f64)>> = HashMap::new();
+        //
+        // Keyed on the *numbers* rather than the formatted label, because
+        // the label is what the sort used to run on and a label sorts as
+        // text: "0:10" came before "0:2", so an adapter with more than
+        // ten engines listed them 0, 1, 10, 11, 12, 13, 14, 15, 16, 2, 3.
+        // A GPU with twenty 3D engines — a virtual adapter, and this
+        // machine has one — showed that in full.
+        let mut by_adapter: HashMap<String, Vec<(String, u32, u32, f64)>> = HashMap::new();
         for ((luid, physical, index, engine), value) in &reading.engines {
-            let label = format!("{engine} · {physical}:{index}");
-            by_adapter
-                .entry(luid.clone())
-                .or_default()
-                .push((label, *value));
+            by_adapter.entry(luid.clone()).or_default().push((
+                engine.clone(),
+                *physical,
+                *index,
+                *value,
+            ));
         }
 
         let mut samples: Vec<GpuSample> = by_adapter
@@ -622,10 +630,18 @@ impl Sampler {
                 // playing a video while it renders. See `win::gpu`.
                 let utilisation = engines
                     .iter()
-                    .map(|(_, value)| *value)
+                    .map(|(_, _, _, value)| *value)
                     .fold(0.0f64, f64::max)
                     .clamp(0.0, 100.0);
-                engines.sort_by(|a, b| a.0.cmp(&b.0));
+                // Type first so engines of a kind stay together, then the
+                // two numbers *as numbers*.
+                engines.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+                let engines: Vec<(String, f64)> = engines
+                    .into_iter()
+                    .map(|(engine, physical, index, value)| {
+                        (format!("{engine} · {physical}:{index}"), value)
+                    })
+                    .collect();
                 let memory_used = reading.memory_by_adapter.get(&luid).copied().unwrap_or(0);
                 // The counters name an adapter by LUID and carry neither
                 // a description nor a capacity; the registry has both.

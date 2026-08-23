@@ -151,7 +151,7 @@ mod windows {
     }
 
     /// Every scene, in the order `--list` prints them.
-    const SCENES: [Scene; 27] = [
+    const SCENES: [Scene; 30] = [
         Scene {
             name: "live-system",
             about: "System Information on THIS machine, really sampled",
@@ -171,6 +171,42 @@ mod windows {
             focus: PerformanceFocus::Network,
             expanded: true,
             size: Some((1280.0, 1500.0)),
+            live: true,
+            select: false,
+            modal: false,
+            hover: None,
+        },
+        Scene {
+            name: "live-gpu",
+            about: "Performance › GPU on THIS machine, really sampled",
+            view: View::Performance,
+            focus: PerformanceFocus::Gpu,
+            expanded: true,
+            size: Some((1280.0, 1100.0)),
+            live: true,
+            select: false,
+            modal: false,
+            hover: None,
+        },
+        Scene {
+            name: "live-cpu",
+            about: "Performance › CPU on THIS machine, really sampled",
+            view: View::Performance,
+            focus: PerformanceFocus::Cpu,
+            expanded: true,
+            size: Some((1280.0, 1400.0)),
+            live: true,
+            select: false,
+            modal: false,
+            hover: None,
+        },
+        Scene {
+            name: "live-disk",
+            about: "Performance › Disk on THIS machine, really sampled",
+            view: View::Performance,
+            focus: PerformanceFocus::Disk,
+            expanded: true,
+            size: Some((1280.0, 1200.0)),
             live: true,
             select: false,
             modal: false,

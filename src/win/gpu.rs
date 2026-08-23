@@ -506,7 +506,9 @@ pub fn adapters() -> Vec<Adapter> {
             // without one is not a device at all — the class key also
             // carries `Configuration` and `Properties`.
             let description = string_value(&key, "DriverDesc")?;
-            let memory_total = qword_value(&key, "HardwareInformation.qwMemorySize").unwrap_or(0);
+            let memory_total = qword_value(&key, "HardwareInformation.qwMemorySize")
+                .or_else(|| binary_size(&key, "HardwareInformation.MemorySize"))
+                .unwrap_or(0);
             Some(Adapter {
                 description,
                 memory_total,
@@ -615,12 +617,6 @@ fn string_value(key: &OwnedKey, name: &str) -> Option<String> {
 }
 
 /// A `REG_QWORD` value, or `None` if it is absent or another type.
-///
-/// `HardwareInformation.qwMemorySize` is the only value read this way.
-/// Older drivers wrote a `REG_BINARY` `HardwareInformation.MemorySize`
-/// instead; that one is deliberately not read, because it is four bytes
-/// on some drivers and eight on others with nothing to distinguish them,
-/// and a capacity guessed wrong is worse than a capacity left at zero.
 fn qword_value(key: &OwnedKey, name: &str) -> Option<u64> {
     /// `REG_QWORD`.
     const QWORD: u32 = 11;
@@ -663,6 +659,55 @@ pub fn describe(luid: &str, registry: &[Adapter]) -> (String, u64) {
     match registry {
         [only] if !only.description.is_empty() => (only.description.clone(), only.memory_total),
         _ => (format!("GPU {luid}"), 0),
+    }
+}
+
+/// A capacity written as `REG_BINARY`, in bytes.
+///
+/// The fallback for drivers that never wrote `qwMemorySize`, and it
+/// exists because a real machine proved the reasoning that excluded it
+/// wrong. An Intel UHD 620 on the 2021 driver writes no `qwMemorySize`
+/// at all and a four-byte `MemorySize` of `00 00 00 40` — 1 GB, which
+/// `Win32_VideoController.AdapterRAM` independently agrees with. Without
+/// this the panel reported that adapter as "0 B", which is not a
+/// cautious answer, it is a wrong one.
+///
+/// The objection this replaces was that the value is four bytes on some
+/// drivers and eight on others "with nothing to distinguish them". That
+/// was not true: the registry reports the value's length, so the width
+/// *is* the discriminator and it arrives in a parameter the call already
+/// fills in. Anything that is neither width is refused rather than
+/// guessed at.
+fn binary_size(key: &OwnedKey, name: &str) -> Option<u64> {
+    /// `REG_BINARY`.
+    const BINARY: u32 = 3;
+    let wide = strings::to_wide(name);
+    let mut buffer = [0u8; 8];
+    let mut kind = 0u32;
+    let mut bytes = u32::try_from(buffer.len()).ok()?;
+    // SAFETY: `wide` is a live NUL-terminated name. `buffer` is a live
+    // eight-byte array and `bytes` states its size exactly, so the callee
+    // cannot write past it; it updates `bytes` with what it wrote. `kind`
+    // is a live out-parameter for the value's type.
+    let status = unsafe {
+        RegQueryValueExW(
+            key.raw(),
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::addr_of_mut!(kind),
+            buffer.as_mut_ptr(),
+            std::ptr::addr_of_mut!(bytes),
+        )
+    };
+    if status != 0 || kind != BINARY {
+        return None;
+    }
+    match bytes {
+        4 => Some(u64::from(u32::from_le_bytes([
+            buffer[0], buffer[1], buffer[2], buffer[3],
+        ]))),
+        8 => Some(u64::from_le_bytes(buffer)),
+        _ => None,
     }
 }
 
