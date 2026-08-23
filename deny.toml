@@ -1,8 +1,13 @@
 # cargo-deny configuration. Enforced in CI by the `deny` job in
-# .github/workflows/ci.yml; `cargo install cargo-deny && cargo deny check
-# --all-features` locally gives the same answer before you push. The point
-# is that a bad advisory or a surprising licence shows up as a reviewable
-# event, not a release-day surprise.
+# .github/workflows/ci.yml; `cargo install cargo-deny && cargo deny check`
+# locally gives the same answer before you push. The point is that a bad
+# advisory or a surprising licence shows up as a reviewable event, not a
+# release-day surprise.
+#
+# Not `check --all-features`, which is what this said and which current
+# cargo-deny rejects as an unknown argument — features are `[graph]
+# all-features` below, and it is already set. A command in a comment that
+# errors out is worse than no command: it reads as the tool being broken.
 #
 # Dependabot is the other half of this: .github/dependabot.yml opens the
 # version-update PRs, and the `deny` job runs against each one.
@@ -66,7 +71,17 @@ allow = [
     "BSL-1.0",
     "MPL-2.0",
     "OFL-1.1",
-    "LicenseRef-UFL-1.0",
+    # The Ubuntu Font Licence, on `epaint_default_fonts` — the fonts egui
+    # bundles, and the reason the nav rail has letters in it.
+    #
+    # Spelled `LicenseRef-UFL-1.0` until SPDX gave the licence an
+    # identifier of its own. `epaint_default_fonts` moved to the real one
+    # and this list did not, so cargo-deny rejected a licence this file
+    # has always intended to allow — the allowance was still here, under
+    # a name nothing declares any more, which is why it failed as
+    # "not explicitly allowed" while also warning that the old spelling
+    # was never encountered.
+    "Ubuntu-font-1.0",
 ]
 # A crate whose licence cannot be determined at all is a stop, not a
 # warning: "unknown" in a dependency audit is the answer you least want
