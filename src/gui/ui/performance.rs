@@ -160,7 +160,17 @@ fn record_below(ui: &Ui, panel: &'static str, graph_bottom: f32) {
     /// — which is a *taller* tail, which asks for another pass, which
     /// takes the scrollbar away again. A point of slack costs nothing
     /// visible and cannot oscillate.
-    const SLACK: f32 = 1.0;
+    ///
+    /// One point was not enough, and the reason is not rounding. A
+    /// panel's tail is independent of its graph for only one of the
+    /// five: the CPU panel derives its core grid's height *from* the
+    /// graph's, and the card panels rewrap on a width that the graph
+    /// height can change. So the measure-and-redraw fixed point does not
+    /// land exactly, and four of the five settled three points *past*
+    /// the pane's bottom edge — inside the plus-or-minus four the panel
+    /// test allows, and precisely enough to give each of them a
+    /// full-height scrollbar with nothing to scroll to.
+    const SLACK: f32 = 4.0;
 
     // `chrome::SECTION_GAP` for the gap `detail` leaves after the last
     // thing a panel draws, which is as much a part of what the pane owes
