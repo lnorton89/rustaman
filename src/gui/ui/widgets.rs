@@ -1087,6 +1087,29 @@ pub fn empty_state(ui: &mut Ui, theme: &Palette, message: &str) {
     ui.allocate_space(rect.size());
 }
 
+/// A one-line note where a *section* has nothing to list.
+///
+/// [`empty_state`] takes the whole of the pane that is left, which is
+/// right for the message a view shows when it has nothing at all: the
+/// message belongs in the middle of the empty space, and there is
+/// nothing after it to push down. Partway down a panel it is wrong, and
+/// silently so — the Network panel's "every adapter is virtual" note
+/// claimed the rest of the page and pushed the virtual-adapter list, the
+/// only list such a machine has, off the bottom of it.
+///
+/// So this one is a line, and the panel goes on underneath.
+pub fn empty_note(ui: &mut Ui, theme: &Palette, message: &str) {
+    let height = ui.text_style_height(&TextStyle::Body) + SPACE_SM * 2.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        message,
+        TextStyle::Body.resolve(ui.style()),
+        theme::rgb(theme.text_faint),
+    );
+}
+
 /// A key/value line for a details pane.
 pub fn detail_row(ui: &mut Ui, theme: &Palette, key: &str, value: &str) {
     /// The label column's width, so every value starts on one column.

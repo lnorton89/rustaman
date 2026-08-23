@@ -42,8 +42,136 @@ const PICKER_WIDTH: f32 = 200.0;
 /// The height of a picker entry.
 const PICKER_ROW: f32 = 52.0;
 
-/// The height the main graph gets.
-const GRAPH_HEIGHT: f32 = 220.0;
+/// The least height the main graph may shrink to.
+///
+/// It was the height the graph always got, and on a tall window that
+/// left the bottom third of the pane empty under a panel whose whole
+/// content is one chart. It is a floor now: see [`graph_height`].
+const GRAPH_MINIMUM: f32 = 220.0;
+
+/// The height one row of the per-core grid wants.
+///
+/// Enough for a core's own miniature chart to show a shape rather than a
+/// band of colour. The grid is given more than this when the window has
+/// it to spare — see [`cpu`].
+const CORE_ROW: f32 = 46.0;
+
+/// The least height the whole core grid may shrink to.
+///
+/// A four-core machine gets one row, and one row of [`CORE_ROW`] is a
+/// strip too short to read a shape out of at all.
+const CORE_GRID_MINIMUM: f32 = 90.0;
+
+// Relations between the heights above, checked when the crate is
+// compiled. A `const` block rather than a test: clippy's
+// `assertions_on_constants` fires on the test form.
+const _: () = {
+    assert!(
+        CORE_GRID_MINIMUM > CORE_ROW,
+        "a core grid floored below one row's height cannot show its         one row"
+    );
+    assert!(
+        GRAPH_MINIMUM > CORE_GRID_MINIMUM,
+        "the main graph is the panel's headline and the core grid is its         detail; a floor that inverts them inverts the panel"
+    );
+};
+
+/// The keys the five panels measure themselves under.
+///
+/// One per panel rather than one for the view: the panels have very
+/// different tails, and a shared key would have each of them asking for
+/// a re-layout every time the picker moved to another.
+const CPU: &str = "performance-below-cpu";
+/// See [`CPU`].
+const MEMORY: &str = "performance-below-memory";
+/// See [`CPU`].
+const DISK: &str = "performance-below-disk";
+/// See [`CPU`].
+const NETWORK: &str = "performance-below-network";
+/// See [`CPU`].
+const GPU: &str = "performance-below-gpu";
+
+/// What a panel drew below its graph when it was last drawn, if it has
+/// been drawn.
+fn measured_below(ui: &Ui, panel: &'static str) -> Option<f32> {
+    ui.data(|data| data.get_temp::<f32>(egui::Id::new(panel)))
+}
+
+/// The height a panel's main graph takes: the pane's own remainder, once
+/// whatever the panel draws below the graph has been measured out of it.
+///
+/// ## Measured rather than reserved
+///
+/// The obvious way to write this is a constant per panel saying how much
+/// room its readouts need. Three of the five panels do not have one: the
+/// disk panel's tail is a card per physical disk, the GPU panel's is a
+/// card per adapter with a line per engine, and the network panel's is a
+/// row per adapter, of which this machine has twenty-one. A constant
+/// that has to cover those either strands a band of empty pane under the
+/// short ones or pushes the long ones into a scroll they did not need.
+///
+/// So the panel measures itself instead. It draws once with the graph at
+/// its floor, [`record_below`] notes how far the content below the graph
+/// actually reached, and — because that is a *different* answer than the
+/// one this pass drew with — asks egui for another pass over the same
+/// frame. The second pass gives the graph the remainder, and the panel
+/// is laid out correctly before anything reaches the screen: egui runs
+/// both passes inside one `Context::run` and only the last one is
+/// painted, which is exactly what [`egui::Context::request_discard`] is
+/// for.
+///
+/// The extra pass is not per frame. What sits under the graph is text
+/// and cards, whose height changes when a disk is plugged in or a panel
+/// is switched to and not otherwise, so the second pass costs one
+/// re-layout of five widgets on those frames and nothing on the rest.
+fn graph_height(ui: &Ui, panel: &'static str) -> f32 {
+    let Some(below) = measured_below(ui, panel) else {
+        // Nothing has been measured yet, so the graph draws at its floor
+        // — today's layout — and `record_below` corrects it before the
+        // frame is painted.
+        return GRAPH_MINIMUM;
+    };
+    (ui.available_height() - below).max(GRAPH_MINIMUM)
+}
+
+/// Notes how much room the panel needs under its graph, and asks for
+/// another pass if that is not what this one assumed.
+///
+/// Called with the bottom of the graph's own rect, at the point where
+/// everything that has to fit *under* the graph has been drawn — which
+/// for the CPU panel is before the core grid rather than at the end of
+/// the panel, because the grid takes its own share of the remainder and
+/// so must not be counted as part of what the remainder is spent on.
+fn record_below(ui: &Ui, panel: &'static str, graph_bottom: f32) {
+    /// How far the measurement may move before it is worth another pass.
+    ///
+    /// Not zero: text metrics land on fractional points, and a
+    /// measurement that disagrees with itself by a hundredth of a point
+    /// would ask for a second pass on every frame forever.
+    const TOLERANCE: f32 = 0.5;
+
+    /// A point held back from the graph, so that the content lands just
+    /// inside the pane rather than exactly on its edge.
+    ///
+    /// Filling the pane to the last fractional point risks tipping the
+    /// scroll area into showing a scrollbar, and a scrollbar narrows the
+    /// pane, and a narrower pane rewraps the card grids into another row
+    /// — which is a *taller* tail, which asks for another pass, which
+    /// takes the scrollbar away again. A point of slack costs nothing
+    /// visible and cannot oscillate.
+    const SLACK: f32 = 1.0;
+
+    // `chrome::SECTION_GAP` for the gap `detail` leaves after the last
+    // thing a panel draws, which is as much a part of what the pane owes
+    // the tail as the tail itself.
+    let below = ui.min_rect().bottom() - graph_bottom + chrome::SECTION_GAP + SLACK;
+    let settled = measured_below(ui, panel).is_some_and(|old| (old - below).abs() <= TOLERANCE);
+    if !settled {
+        ui.data_mut(|data| data.insert_temp(egui::Id::new(panel), below));
+        ui.ctx()
+            .request_discard("a Performance panel measured what sits under its graph");
+    }
+}
 
 /// The narrowest a per-device card may be before the grid drops a column.
 ///
@@ -361,10 +489,20 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     };
     widgets::section(ui, theme, &name);
 
-    let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), GRAPH_HEIGHT),
-        Sense::hover(),
-    );
+    // The graph and the core grid split the pane between them, in the
+    // proportion their own floors give them. A tall window makes both
+    // bigger rather than making the chart enormous and leaving the grid
+    // the size it is on a laptop — and because the split of a pane that
+    // is exactly `GRAPH_MINIMUM + grid` tall hands each of them its own
+    // floor, the same arithmetic covers the short window too.
+    let grid_floor = core_grid_floor(app.performance.cores.len());
+    let visuals = match measured_below(ui, CPU) {
+        Some(below) => (ui.available_height() - below).max(GRAPH_MINIMUM + grid_floor),
+        None => GRAPH_MINIMUM + grid_floor,
+    };
+    let height = visuals * GRAPH_MINIMUM / (GRAPH_MINIMUM + grid_floor);
+
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
     graph::banded(
         ui,
         theme,
@@ -449,18 +587,34 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
                 system.cpu.logical_cores, system.cpu.physical_cores, system.cpu.megahertz
             ),
         );
-        // Height scaled to the core count so a 4-core machine does not
-        // get a grid of four tall boxes and a 64-core one does not get a
-        // grid too short to see anything in. `core_grid_layout` rather
-        // than a squareness formula of its own — see that function's
-        // docs on why keeping a separate copy here is the bug, not just
-        // duplication.
-        let (_, rows) = graph::core_grid_layout(app.performance.cores.len());
-        let height = (rows as f32 * 46.0).clamp(90.0, 320.0);
-        let (rect, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-        graph::core_grid(ui, theme, rect, &app.performance.cores);
+        // Measured here rather than at the end of the panel: the grid
+        // below takes its own share of the remainder, so it is not one
+        // of the things the remainder has to be spent on.
+        record_below(ui, CPU, rect.bottom());
+        let (grid, _) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), visuals - height),
+            Sense::hover(),
+        );
+        graph::core_grid(ui, theme, grid, &app.performance.cores);
+    } else {
+        record_below(ui, CPU, rect.bottom());
     }
+}
+
+/// The height the per-core grid falls back to when the pane has nothing
+/// spare, and the share of a taller pane it takes.
+///
+/// Scaled to the core count so a 4-core machine does not get a grid of
+/// four tall boxes and a 64-core one does not get a grid too short to
+/// see anything in. `core_grid_layout` rather than a squareness formula
+/// of its own — see that function's docs on why keeping a separate copy
+/// here is the bug, not just duplication.
+fn core_grid_floor(cores: usize) -> f32 {
+    if cores == 0 {
+        return 0.0;
+    }
+    let (_, rows) = graph::core_grid_layout(cores);
+    (rows as f32 * CORE_ROW).max(CORE_GRID_MINIMUM)
 }
 
 /// The memory panel.
@@ -475,7 +629,7 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     );
 
     let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), GRAPH_HEIGHT),
+        Vec2::new(ui.available_width(), graph_height(ui, MEMORY)),
         Sense::hover(),
     );
     graph::area(
@@ -556,6 +710,7 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             &crate::format::bytes(system.memory.nonpaged_pool),
         );
     });
+    record_below(ui, MEMORY, rect.bottom());
 }
 
 /// The disk panel.
@@ -563,7 +718,7 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     widgets::section(ui, theme, "Disk");
 
     let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), GRAPH_HEIGHT),
+        Vec2::new(ui.available_width(), graph_height(ui, DISK)),
         Sense::hover(),
     );
     graph::area(
@@ -579,8 +734,12 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     );
     ui.add_space(SPACE_MD);
 
+    // `if`/`else` rather than an early return: the panel has to measure
+    // itself on the way out of *either* branch, and a `return` above the
+    // measurement is how a panel silently stops filling its pane.
     if system.disks.is_empty() {
         widgets::empty_state(ui, theme, "No physical disks reported");
+        record_below(ui, DISK, rect.bottom());
         return;
     }
     // A grid rather than a stack. A machine with three disks used to get
@@ -661,6 +820,7 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             });
         });
     });
+    record_below(ui, DISK, rect.bottom());
 }
 
 /// The network panel: one graph, its readouts, and the machine's
@@ -705,14 +865,17 @@ fn network(app: &mut App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     app.performance.network_selected = selected;
     let focused = selected.and_then(|luid| adapters.iter().find(|a| a.luid == luid));
 
-    network_graph(app, ui, theme, system, focused);
+    let graph = network_graph(app, ui, theme, system, focused);
     ui.add_space(chrome::SECTION_GAP);
 
     if adapters.is_empty() {
         widgets::empty_state(ui, theme, "This machine reports no network adapters");
-        return;
+    } else {
+        adapter_list(app, ui, theme, &adapters, selected);
     }
-    adapter_list(app, ui, theme, &adapters, selected);
+    // The graph is drawn by `network_graph` and the list under it by
+    // this function, so this is the only place that can see both.
+    record_below(ui, NETWORK, graph.bottom());
 }
 
 /// The Network panel's graph, its legend, and the four readouts under it.
@@ -728,7 +891,7 @@ fn network_graph(
     theme: &Palette,
     system: &SystemSample,
     focused: Option<&crate::model::AdapterSample>,
-) {
+) -> Rect {
     let total_color = theme.series(3, 5);
     // The send band is `info` rather than another ramp hue for the same
     // reason the CPU panel's kernel band is `danger`: it is not a second
@@ -743,7 +906,7 @@ fn network_graph(
     widgets::section(ui, theme, &heading);
 
     let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), GRAPH_HEIGHT),
+        Vec2::new(ui.available_width(), graph_height(ui, NETWORK)),
         Sense::hover(),
     );
     let scoped = focused.and_then(|adapter| app.performance.adapters.get(&adapter.luid));
@@ -857,6 +1020,9 @@ fn network_graph(
             ),
         );
     });
+    // Handed back so `network` can measure the list it draws below it
+    // against the graph's own extent.
+    rect
 }
 
 /// The adapter inventory: every adapter the machine has, hardware first.
@@ -896,7 +1062,10 @@ fn adapter_list(
 
     let mut clicked = None;
     if physical.is_empty() {
-        widgets::empty_state(ui, theme, "No hardware adapters — every adapter is virtual");
+        // A note rather than an empty state: the virtual-adapter list
+        // below is the only list this machine has, and an empty state
+        // would take the pane it is drawn in.
+        widgets::empty_note(ui, theme, "No hardware adapters — every adapter is virtual");
     } else {
         chrome::panel_card(ui, theme, |ui| {
             for (index, adapter) in physical.iter().enumerate() {
@@ -1217,7 +1386,7 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     widgets::section(ui, theme, "GPU");
 
     let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), GRAPH_HEIGHT),
+        Vec2::new(ui.available_width(), graph_height(ui, GPU)),
         Sense::hover(),
     );
     graph::area(
@@ -1239,6 +1408,7 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             theme,
             "This machine's display driver does not publish GPU counters",
         );
+        record_below(ui, GPU, rect.bottom());
         return;
     }
     // Busiest first, same reasoning as the disk grid above: on a hybrid-
@@ -1283,6 +1453,7 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             }
         });
     });
+    record_below(ui, GPU, rect.bottom());
 }
 
 /// The width [`stat_column`] gives each of a row's columns.
@@ -1402,6 +1573,103 @@ mod tests {
             "a full-width rect inside the detail column left only {margin} \
              from the window edge, wanted at least {SPACE_MD}"
         );
+        Ok(())
+    }
+
+    /// A machine with enough of everything that every panel has a tail
+    /// worth measuring: sixteen cores, two disks, an adapter and a GPU.
+    fn a_machine() -> Snapshot {
+        let mut snapshot = Snapshot::default();
+        snapshot.system.cpu.logical_cores = 16;
+        snapshot.system.cpu.physical_cores = 8;
+        snapshot.system.disks = vec![
+            crate::model::DiskSample {
+                name: "NVMe boot".to_string(),
+                ..Default::default()
+            },
+            crate::model::DiskSample {
+                name: "Archive".to_string(),
+                ..Default::default()
+            },
+        ];
+        snapshot.system.adapters = vec![crate::model::AdapterSample {
+            name: "Ethernet".to_string(),
+            ..Default::default()
+        }];
+        snapshot.system.gpus = vec![crate::model::GpuSample {
+            name: "Radeon".to_string(),
+            engines: vec![("3D".to_string(), 12.0)],
+            ..Default::default()
+        }];
+        snapshot
+    }
+
+    #[test]
+    fn every_panel_fills_the_pane_it_is_given() -> anyhow::Result<()> {
+        // The bug this guards: every panel's graph was a flat 220 points
+        // whatever the window, so on anything taller than a laptop
+        // screen the CPU panel drew a chart, four numbers, a core grid,
+        // and then a third of a pane of nothing — on a page whose entire
+        // content is one chart, which is the one thing that could have
+        // used the room.
+        //
+        // Stated as "the content reaches the bottom of the pane" rather
+        // than as an expected height, because an expected height is the
+        // arithmetic being tested written down twice. It also catches
+        // the opposite failure: a panel that reserves too little
+        // overshoots and pushes its own readouts into a scroll.
+        //
+        // A tall window on purpose. At the size the app opens at these
+        // panels are already full, and a test that passes because there
+        // was no spare room to misplace is not testing anything.
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1440.0, 1600.0));
+        /// What the content may miss the pane's bottom edge by: the
+        /// point [`record_below`] holds back, and the rounding either
+        /// side of it.
+        const TOLERANCE: f32 = 4.0;
+
+        for focus in [
+            PerformanceFocus::Cpu,
+            PerformanceFocus::Memory,
+            PerformanceFocus::Disk,
+            PerformanceFocus::Network,
+            PerformanceFocus::Gpu,
+        ] {
+            let snapshot = a_machine();
+            let mut app = App::new(crate::config::Config::default());
+            let theme = app.theme.clone();
+            app.performance.focus = focus;
+            app.performance.cores = (0..snapshot.system.cpu.logical_cores)
+                .map(|_| crate::model::history::Series::new(60))
+                .collect();
+
+            let ctx = egui::Context::default();
+            theme::apply(&ctx, &theme);
+            let input = egui::RawInput {
+                screen_rect: Some(window),
+                ..Default::default()
+            };
+            let mut content = None;
+            // `run_ui` runs the pass loop, which is what gives a panel
+            // its second pass — the one it lays itself out on. A single
+            // pass would measure the panel before it knew its own tail.
+            let mut output = ctx.run_ui(input, |ui| {
+                content = Some(detail(&mut app, ui, &theme, &snapshot));
+            });
+            output.textures_delta.clear();
+
+            let content = content.ok_or_else(|| anyhow::anyhow!("{focus:?} drew nothing"))?;
+            let empty = window.bottom() - content.bottom();
+            assert!(
+                empty <= TOLERANCE,
+                "the {focus:?} panel left {empty} points of the pane empty                  below its content; a panel takes the pane it is given"
+            );
+            assert!(
+                empty >= -TOLERANCE,
+                "the {focus:?} panel overran its pane by {} points, which                  puts its own readouts into a scroll",
+                -empty
+            );
+        }
         Ok(())
     }
 
