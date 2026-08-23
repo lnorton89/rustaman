@@ -148,6 +148,13 @@ pub enum Icon {
     /// row it sits on carries meaning through colour already, and a
     /// second, fixed green on the same row would compete with it.
     Leaf,
+    /// A program the Shell had no icon for.
+    ///
+    /// A window outline: the most neutral shape that still says "a
+    /// program" rather than "a file" or "a document". It is a
+    /// placeholder and is drawn as one, in the faint text colour, so it
+    /// holds the column without competing with the real icons beside it.
+    Application,
     /// A process that is part of Windows itself.
     ///
     /// Four panes: the shape the platform has used for its own mark
@@ -190,6 +197,14 @@ impl Icon {
             // module with pins: that draws the hardware, and this view
             // is about how the machine's memory is being spent rather
             // than what it is plugged into.
+            // A window: a frame with its title bar ruled off. Not a
+            // gear, a box or a document — a program the Shell could not
+            // describe is still a *program*, and a frame is the one
+            // shape that says so without claiming anything more.
+            Self::Application => vec![
+                Path::closed(&[(2.5, 3.5), (13.5, 3.5), (13.5, 12.5), (2.5, 12.5)]),
+                Path::open(&[(2.5, 6.5), (13.5, 6.5)]),
+            ],
             // Four panes with a gap between them, which is what makes
             // it read as the platform's mark rather than as a window or
             // a grid — `Memory` is already a divided box, and the two
@@ -483,7 +498,7 @@ mod tests {
     /// Kept in the enum's own declaration order, which is not
     /// decoration: the check below reads each entry's discriminant, and
     /// the order is what makes a missing entry show up as a gap.
-    const ALL: [Icon; 26] = [
+    const ALL: [Icon; 27] = [
         Icon::Processes,
         Icon::Performance,
         Icon::Memory,
@@ -510,6 +525,7 @@ mod tests {
         Icon::Folder,
         Icon::Leaf,
         Icon::Windows,
+        Icon::Application,
     ];
 
     // `ALL` names each icon exactly once, checked when the tests are

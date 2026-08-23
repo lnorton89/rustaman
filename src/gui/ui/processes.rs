@@ -787,19 +787,25 @@ fn name_cell(
             ui.add(image);
         } else {
             let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(ICON), Sense::hover());
-            // Windows' own processes get the platform's mark. Everything
-            // else gets the space and no mark: a background program the
-            // Shell had no icon for is not a fact worth drawing a symbol
-            // for, and inventing one would say something this does not
-            // know.
-            if process.kind == ProcessKind::System {
-                icons::paint(
-                    ui.painter(),
-                    rect,
-                    crate::icon::Icon::Windows,
-                    theme::rgb(theme.text_faint),
-                );
-            }
+            // Windows' own processes get the platform's mark; everything
+            // else gets a neutral window outline.
+            //
+            // The blank this replaces was a deliberate choice and it was
+            // the wrong one. The argument was that a program the Shell
+            // could not describe is not a fact worth drawing a symbol
+            // for — but the column is drawn for every row regardless, so
+            // the choice was never between a symbol and nothing, it was
+            // between a symbol and a hole. A hole beside fifteen rows
+            // that have icons reads as those rows having failed to load
+            // one, which says something false, where a placeholder says
+            // only what is true: this is a program and we have no
+            // picture of it.
+            let mark = if process.kind == ProcessKind::System {
+                crate::icon::Icon::Windows
+            } else {
+                crate::icon::Icon::Application
+            };
+            icons::paint(ui.painter(), rect, mark, theme::rgb(theme.text_faint));
         }
         ui.add_space(SPACE_XS);
 
