@@ -56,6 +56,9 @@ const CORNER_PREFERENCE: u32 = 33;
 /// `DWMWCP_ROUND`: the standard rounded corner.
 const CORNER_ROUND: u32 = 2;
 
+/// `DWMWA_BORDER_COLOR`. Windows 11 (build 22000) only.
+const BORDER_COLOR: u32 = 34;
+
 /// Asks DWM to draw a window's title bar dark.
 ///
 /// Returns whether the attribute was accepted. See the module docs on why
@@ -72,6 +75,39 @@ pub fn set_dark_titlebar(window: HWND, dark: bool) -> bool {
 /// always `false`. The caller ignores it.
 pub fn set_rounded_corners(window: HWND) -> bool {
     set_attribute(window, CORNER_PREFERENCE, CORNER_ROUND)
+}
+
+/// Asks DWM to paint the window's outer border in a given colour.
+///
+/// **Windows 11 only**, and the reason it is worth asking for is the
+/// undecorated window rather than the decorated one. With the app's own
+/// title bar the window has no frame of its own, so on a dark desktop it
+/// ends where its background stops and nothing separates it from the
+/// window behind it. The one-pixel border DWM draws is what gives it an
+/// edge, and left at the system default that edge is whatever the
+/// user's accent colour is — the one part of the window the theme does
+/// not reach.
+///
+/// The colour is passed as `COLORREF`, which is **`0x00BBGGRR`** and not
+/// the RGB order every other colour in this app is written in. Getting
+/// that backwards produces a plausible-looking border in the wrong hue,
+/// which is exactly the kind of thing nobody notices in review.
+///
+/// This paints a border; it does not remove one. DWM reserves
+/// `0xFFFFFFFE` to mean "no border at all", which no colour can reach —
+/// so a caller that wants none needs its own function rather than a
+/// clever argument to this one.
+///
+/// Returns whether the attribute was accepted, which on Windows 10 is
+/// always `false`.
+pub fn set_border_colour(window: HWND, red: u8, green: u8, blue: u8) -> bool {
+    set_attribute(window, BORDER_COLOR, colorref(red, green, blue))
+}
+
+/// Packs a colour the way `COLORREF` wants it: blue high, red low.
+#[must_use]
+fn colorref(red: u8, green: u8, blue: u8) -> u32 {
+    u32::from(red) | (u32::from(green) << 8) | (u32::from(blue) << 16)
 }
 
 /// Sets one DWM attribute to a `u32` value.
@@ -103,6 +139,25 @@ mod tests {
         let null: HWND = std::ptr::null_mut();
         assert!(!set_dark_titlebar(null, true));
         assert!(!set_rounded_corners(null));
+        assert!(!set_border_colour(null, 1, 2, 3));
+    }
+
+    #[test]
+    fn a_border_colour_is_packed_blue_high_and_red_low() {
+        // `COLORREF` is 0x00BBGGRR, which is the reverse of how every
+        // other colour in this app is written. A swapped pair produces a
+        // border in a plausible wrong hue rather than an error.
+        assert_eq!(colorref(0x12, 0x34, 0x56), 0x0056_3412);
+        assert_eq!(
+            colorref(0xFF, 0x00, 0x00),
+            0x0000_00FF,
+            "red is the low byte"
+        );
+        assert_eq!(
+            colorref(0x00, 0x00, 0xFF),
+            0x00FF_0000,
+            "blue is the high one"
+        );
     }
 
     #[test]

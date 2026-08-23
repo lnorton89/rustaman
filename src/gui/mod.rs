@@ -137,6 +137,9 @@ pub fn run(config: Config) -> Result<()> {
             if !custom_chrome {
                 darken_system_caption(cc, instance.theme.mode);
             }
+            // The Windows 11 treatment, asked for on every build and
+            // granted on that one. See `dress_window_for_windows_11`.
+            dress_window_for_windows_11(instance.native_window, &instance.theme, custom_chrome);
             Ok(Box::new(instance))
         }),
     )
@@ -153,6 +156,47 @@ fn native_window_handle(cc: &eframe::CreationContext<'_>) -> Option<isize> {
         return None;
     };
     Some(window.hwnd.get())
+}
+
+/// Applies the two window attributes Windows 11 has and Windows 10 does
+/// not: rounded corners, and a border in the theme's own colour.
+///
+/// Both are asked for unconditionally and both fail harmlessly on 10 —
+/// no version check, for the reason [`crate::win::dwm`] gives: probing
+/// costs one refused call, and a version check costs `RtlGetVersion`
+/// plus a manifest that has to be right for the answer to be true.
+///
+/// ## Why the corners have to be asked for at all
+///
+/// Windows 11 rounds a window's corners for you — but only a window
+/// with a frame. The app's own title bar means an *undecorated* window,
+/// and those keep their square corners unless the preference is set
+/// explicitly. So the setting that looks like it should matter least is
+/// the one that matters here: without it the app is the one square
+/// window on an otherwise rounded desktop.
+///
+/// The border is the other half of the same problem. An undecorated
+/// window has no frame of its own, so on a dark desktop it ends where
+/// its background stops; the one-pixel line DWM draws is what separates
+/// it from whatever is behind it, and left alone that line is the user's
+/// accent colour — the only part of the window the theme cannot reach.
+fn dress_window_for_windows_11(
+    window: Option<isize>,
+    theme: &crate::theme::Palette,
+    custom_chrome: bool,
+) {
+    let Some(handle) = window else {
+        return;
+    };
+    let hwnd = handle as *mut core::ffi::c_void;
+    let _ = crate::win::dwm::set_rounded_corners(hwnd);
+    // Only with the app's own chrome. A decorated window's border is the
+    // system's to draw, and repainting it in the app's colours would put
+    // one window in the stack wearing a frame unlike every other.
+    if custom_chrome {
+        let edge = theme.border;
+        let _ = crate::win::dwm::set_border_colour(hwnd, edge.r, edge.g, edge.b);
+    }
 }
 
 /// Asks DWM to draw the system caption dark, for a dark theme.
