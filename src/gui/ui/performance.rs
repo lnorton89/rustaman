@@ -578,7 +578,7 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             ui,
             theme,
             width,
-            "Current load",
+            "Current",
             &crate::format::percent(system.cpu.total_percent),
         );
         stat_column(
@@ -594,14 +594,14 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             ui,
             theme,
             width,
-            "Recent average",
+            "Average",
             &crate::format::percent(f64::from(app.performance.cpu.mean())),
         );
         stat_column(
             ui,
             theme,
             width,
-            "Recent peak",
+            "Peak",
             &crate::format::percent(f64::from(app.performance.cpu.max())),
         );
     });
@@ -810,14 +810,14 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             ui,
             theme,
             width,
-            "Recent average",
+            "Average",
             &crate::format::percent(f64::from(app.performance.memory.mean())),
         );
         stat_column(
             ui,
             theme,
             width,
-            "Recent peak",
+            "Peak",
             &crate::format::percent(f64::from(app.performance.memory.max())),
         );
     });
@@ -932,14 +932,14 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             ui,
             theme,
             width,
-            "Recent average",
+            "Average",
             &crate::format::rate(app.performance.disk.mean().into()),
         );
         stat_column(
             ui,
             theme,
             width,
-            "Recent peak",
+            "Peak",
             &crate::format::rate(app.performance.disk.max().into()),
         );
         stat_column(
@@ -1709,21 +1709,21 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             ui,
             theme,
             width,
-            "Recent average",
+            "Average",
             &crate::format::percent(f64::from(app.performance.gpu.mean())),
         );
         stat_column(
             ui,
             theme,
             width,
-            "Recent peak",
+            "Peak",
             &crate::format::percent(f64::from(app.performance.gpu.max())),
         );
         stat_column(
             ui,
             theme,
             width,
-            "Dedicated in use",
+            "Dedicated",
             &crate::format::bytes(dedicated),
         );
     });
@@ -1764,7 +1764,7 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
                     ui,
                     theme,
                     stat_column_width(ui.available_width(), 1),
-                    "Dedicated memory in use",
+                    "Dedicated",
                     &crate::format::bytes(adapter.memory_used),
                 );
             }
