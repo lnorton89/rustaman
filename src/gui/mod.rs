@@ -40,7 +40,15 @@ use anyhow::Result;
 /// Wide enough for the process table's eight columns without a horizontal
 /// scrollbar, and tall enough for around thirty rows — the number that
 /// makes scrolling feel like navigating rather than hunting.
-const DEFAULT_SIZE: [f32; 2] = [1180.0, 760.0];
+///
+/// **Public because it is a fact other code has to agree with, and did
+/// not.** A layout test and the screenshot harness had each written
+/// their own idea of the default window down — both as `1440.0`, which
+/// is not this number and never was; it is a value out of a config
+/// round-trip *test fixture*. So the test protected a budget the app
+/// does not have, and every screenshot was taken 260 points wider than
+/// the window anyone opens. Take the width from here.
+pub const DEFAULT_SIZE: [f32; 2] = [1180.0, 760.0];
 
 /// The smallest the window may be dragged to.
 ///

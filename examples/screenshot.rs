@@ -79,12 +79,17 @@ mod windows {
 
     /// The window size a scene is drawn at unless `--size` says otherwise.
     ///
-    /// The size the app itself opens at — `config::Config::default`'s
-    /// `window_size`. Any other number here tests a window nobody has:
-    /// a screenshot taken at 2560 points wide makes every crowded panel
-    /// look spacious, and one taken narrower invents crowding that is
-    /// not there.
-    const DEFAULT_SIZE: (f32, f32) = (1440.0, 900.0);
+    /// Taken from `gui::DEFAULT_SIZE` rather than written down again.
+    /// This used to say `(1440.0, 900.0)` on the belief that it was the
+    /// app's default — it is not, and never was: 1440x900 appears in
+    /// `config.rs` only inside a round-trip *test fixture*. Every
+    /// screenshot taken against it was 260 points wider than the window
+    /// the app actually opens, which is exactly the direction that hides
+    /// a crowding bug rather than showing one.
+    const DEFAULT_SIZE: (f32, f32) = (
+        rustaman::gui::DEFAULT_SIZE[0],
+        rustaman::gui::DEFAULT_SIZE[1],
+    );
 
     #[derive(clap::Parser, Debug)]
     #[command(name = "screenshot", about = "Render a view of the app to a PNG")]
@@ -146,7 +151,7 @@ mod windows {
     }
 
     /// Every scene, in the order `--list` prints them.
-    const SCENES: [Scene; 21] = [
+    const SCENES: [Scene; 25] = [
         Scene {
             name: "live-network",
             about: "Performance › Network on THIS machine, really sampled",
@@ -362,6 +367,62 @@ mod windows {
             select: false,
             modal: false,
             hover: Some((700.0, 392.0)),
+        },
+        // The three tables that paint their row background from the
+        // first cell only, one scene each. `egui_extras` paints its own
+        // hover fill per cell *underneath* the app's, so a row filled
+        // once from the leading cell comes out in two colours with the
+        // seam at that column's edge — and it is only visible while the
+        // pointer is on the row, which is why it survived so long.
+        Scene {
+            name: "details-hover",
+            about: "The flat table with the pointer resting on a row",
+            view: View::Details,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: false,
+            modal: false,
+            hover: Some((700.0, 392.0)),
+        },
+        Scene {
+            name: "services-hover",
+            about: "The services list with the pointer resting on a row",
+            view: View::Services,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: false,
+            modal: false,
+            hover: Some((700.0, 302.0)),
+        },
+        Scene {
+            name: "startup-hover",
+            about: "The startup list with the pointer resting on a row",
+            view: View::Startup,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: false,
+            modal: false,
+            hover: Some((700.0, 212.0)),
+        },
+        // A window tall enough that a panel sizing its graphs by a
+        // constant leaves a third of the pane empty below them.
+        Scene {
+            name: "cpu-tall",
+            about: "Performance › CPU on a tall window, where fixed heights show",
+            view: View::Performance,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: Some((1440.0, 1600.0)),
+            live: false,
+            select: false,
+            modal: false,
+            hover: None,
         },
         Scene {
             name: "memory",
