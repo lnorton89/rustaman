@@ -50,13 +50,25 @@ use crate::model::{ProcessKey, ProcessRow, Snapshot};
 use crate::theme::Palette;
 use egui::{Rect, Sense, Ui, Vec2};
 
-/// The least height the treemap gets, whatever else is on screen.
+/// The least height the treemap gets.
 ///
-/// A treemap's whole value is that the small tiles stay big enough to
-/// see. Under about this the tail of the machine — the hundreds of
-/// processes holding a megabyte each — collapses into a band of slivers,
-/// and the map stops answering anything the Processes view could not.
-const MAP_MINIMUM: f32 = 380.0;
+/// Deliberately small, and much smaller than it was. This used to be
+/// 380 on the grounds that a shorter map collapses its tail into
+/// slivers — which is not true, and the reason it is not true is two
+/// screens down: the fold-in threshold is a share of the *map's area*,
+/// not a byte count, so a shorter map folds more of the tail into the
+/// one "N smaller" tile on its own. The tiles that remain stay above
+/// `TILE_MINIMUM` at any size.
+///
+/// What the old floor did instead was force 380 points into a pane that
+/// had about 300, at the smallest window the app allows — so the map
+/// overflowed into a scroll area and was cut off mid-tile. That is
+/// worse than a short map in a way that is specific to this drawing: a
+/// treemap encodes quantity as *area*, so a tile shown at half its
+/// height misstates its own value, and two areas that cannot be seen at
+/// once cannot be compared. A treemap that has to be scrolled has
+/// stopped being one.
+const MAP_MINIMUM: f32 = LABEL_MINIMUM;
 
 /// What the map leaves below itself for the machine's own summary and
 /// the key, when no tile is picked.
@@ -83,7 +95,7 @@ const _: () = {
         "a tile has to be allowed to carry a label at some width"
     );
     assert!(
-        MAP_MINIMUM > LABEL_MINIMUM,
+        MAP_MINIMUM >= LABEL_MINIMUM,
         "a map shorter than one label is wide cannot show a labelled tile          at all"
     );
     assert!(
@@ -701,6 +713,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_map_never_asks_for_more_room_than_the_pane_has() -> anyhow::Result<()> {
+        // The map used to carry a 380-point floor, which at the smallest
+        // window the app allows was more than the whole pane had left
+        // after the summary — so it overflowed into a scroll area and
+        // was cut off mid-tile.
+        //
+        // That matters more here than it would in a list. A treemap
+        // encodes quantity as area: a tile shown at half its height
+        // misstates its own value, and two areas that cannot be seen at
+        // once cannot be compared, which is the only thing the drawing
+        // is for. A short map is a compromise; a scrolled one is not a
+        // treemap.
+        //
+        // The scrollable height this view gets at `MIN_SIZE`, which is
+        // 480 less the title bar, the status bar, the content padding
+        // and this view's own toolbar. Stated conservatively — the real
+        // figure is a little larger — so the test is not tracking the
+        // status bar's private height constant.
+        const SMALLEST_PANE: f32 = 480.0 - theme::TITLE_BAR_HEIGHT - 26.0 - theme::PAD * 2.0 - 44.0;
+        let smallest = SMALLEST_PANE;
+
+        for selected in [false, true] {
+            let reserved = if selected {
+                BREAKDOWN_HEIGHT
+            } else {
+                SUMMARY_HEIGHT
+            };
+            let height = map_height(smallest, selected);
+            assert!(
+                height + reserved <= smallest,
+                "with {} the map asks for {height} on top of {reserved}                  reserved, in a {smallest}-point pane — so it scrolls, and a                  treemap that scrolls is a list with the labels taken off",
+                if selected { "a tile picked" } else { "nothing picked" }
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn a_roomy_memory_view_does_not_manufacture_scroll_overflow() {
         let viewport = 700.0;
         assert_eq!(map_height(viewport, false), viewport - SUMMARY_HEIGHT);
@@ -708,9 +758,20 @@ mod tests {
     }
 
     #[test]
-    fn a_short_memory_view_preserves_the_readable_map_floor() {
-        assert_eq!(map_height(320.0, false), MAP_MINIMUM);
-        assert_eq!(map_height(320.0, true), MAP_MINIMUM);
+    fn a_short_view_gives_the_map_what_is_left_rather_than_a_fixed_floor() {
+        // This used to assert the opposite — that a short pane still got
+        // `MAP_MINIMUM`, then 380 points — and the assertion was the bug
+        // written down. In a 320-point pane, 380 points of map plus 204
+        // of summary is 264 points of overflow, which became a scroll
+        // area with the map cut off inside it.
+        //
+        // The floor it was defending does not need defending: the
+        // fold-in threshold is a share of the map's *area*, so a shorter
+        // map folds more of the tail into the one "N smaller" tile by
+        // itself, and every tile that remains is still above
+        // `TILE_MINIMUM`.
+        assert_eq!(map_height(320.0, false), 320.0 - SUMMARY_HEIGHT);
+        assert_eq!(map_height(320.0, true), 320.0 - BREAKDOWN_HEIGHT);
     }
 
     #[test]
