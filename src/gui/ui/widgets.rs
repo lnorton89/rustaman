@@ -85,6 +85,100 @@ pub fn table_body_height(ui: &Ui, pane_height: f32) -> f32 {
     (pane_height - theme::HEADER_HEIGHT - ui.spacing().item_spacing.y).max(0.0)
 }
 
+/// Where a selection bar sits, which follows from what it marks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Bar {
+    /// A table row, which runs from one edge of its pane to the other.
+    ///
+    /// Square and the row's full height. The row has no corners of its
+    /// own to round against, and a bar shorter than the row reads as
+    /// marking something *inside* the row rather than the row itself.
+    Flush,
+    /// A rounded card: a rail entry, a picker tile, an adapter row.
+    ///
+    /// Inset and rounded, because a square bar drawn flush inside a
+    /// rounded card pokes its corners out through the card's own.
+    Inset,
+}
+
+/// The bar's corner radius in the [`Bar::Inset`] case.
+///
+/// Deliberately much tighter than [`RADIUS`]: it is a three-point bar,
+/// and at the card's own radius it would be a lozenge.
+const BAR_RADIUS: u8 = 2;
+
+impl Bar {
+    /// How far the bar is held back from the top and bottom.
+    fn inset(self) -> f32 {
+        match self {
+            Self::Flush => 0.0,
+            Self::Inset => SPACE_XS,
+        }
+    }
+
+    /// Its corner radius.
+    fn radius(self) -> CornerRadius {
+        match self {
+            Self::Flush => CornerRadius::ZERO,
+            Self::Inset => CornerRadius::same(BAR_RADIUS),
+        }
+    }
+}
+
+/// Paints the bar down the leading edge of a selected row or card.
+///
+/// Every one in the app comes through here, and that is the point. There
+/// were five, and no two agreed: three points wide or two, `SELECTION_BAR`
+/// or a literal, inset or flush, rounded or square, animated in one place
+/// and appearing at full height in the other four. Nobody chose that —
+/// each was written next to the thing it marked, and each was reasonable
+/// on its own.
+///
+/// It animates out from the centre rather than appearing whole, so moving
+/// a selection down a list reads as one marker travelling rather than as
+/// a series of unrelated flashes. **Key `id` on the thing selected**, not
+/// on its position: an id built from a row index animates the *slot*, so
+/// re-sorting a table hands every row the animation state of whatever
+/// used to sit there.
+pub fn accent_bar(
+    ui: &Ui,
+    painter: &egui::Painter,
+    id: egui::Id,
+    rect: Rect,
+    bar: Bar,
+    color: Rgb,
+) {
+    let grown = motion::toggle(ui.ctx(), id.with("selected"), true, motion::QUICK);
+    let height = (rect.height() - bar.inset() * 2.0).max(0.0) * grown;
+    let painted = Rect::from_center_size(
+        egui::pos2(rect.left() + SELECTION_BAR / 2.0, rect.center().y),
+        Vec2::new(SELECTION_BAR, height),
+    );
+    painter.rect_filled(painted, bar.radius(), theme::rgb(color));
+}
+
+/// The fill behind a selectable row or card.
+///
+/// One place, so "selected" looks the same in the rail, the process
+/// tables, the Performance picker and the adapter list. A view that
+/// reached for `theme.selection` itself got the colour right and the
+/// hover ramp underneath it subtly wrong, every time.
+#[must_use]
+pub fn selection_fill(
+    ui: &Ui,
+    theme: &Palette,
+    id: egui::Id,
+    selected: bool,
+    hovered: bool,
+    rest: Rgb,
+) -> Color32 {
+    if selected {
+        theme::rgb(theme.selection)
+    } else {
+        hover_fill(ui, id, hovered, rest, theme.hover)
+    }
+}
+
 /// A navigation-rail entry: icon, label, and an accent bar when active.
 ///
 /// The bar rather than a filled background because the rail is narrow and
@@ -94,8 +188,6 @@ pub fn nav_item(ui: &mut Ui, theme: &Palette, icon: Icon, label: &str, active: b
     /// The rail entry's height. Taller than a table row — this is a
     /// primary destination, not a list item.
     const HEIGHT: f32 = 36.0;
-    /// The accent bar's width when the entry is active.
-    const BAR: f32 = 3.0;
     /// The icon column's width, so every label starts on one column
     /// whatever shape the icon beside it draws.
     const ICON_COLUMN: f32 = 22.0;
@@ -104,19 +196,23 @@ pub fn nav_item(ui: &mut Ui, theme: &Palette, icon: Icon, label: &str, active: b
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::click());
     let painter = ui.painter();
 
-    let fill = if active {
-        theme::rgb(theme.selection)
-    } else {
-        hover_fill(ui, response.id, response.hovered(), theme.app, theme.hover)
-    };
+    // Keyed on the label rather than on `response.id`, which an
+    // `allocate_exact_size` derives from the slot: the rail is a fixed
+    // list today, and would hand one destination another's animation
+    // the day a view is added in the middle.
+    let id = egui::Id::new(("nav", label));
+    let fill = selection_fill(
+        ui,
+        theme,
+        response.id,
+        active,
+        response.hovered(),
+        theme.app,
+    );
     painter.rect_filled(rect, CornerRadius::same(RADIUS), fill);
 
     if active {
-        let bar = Rect::from_min_size(
-            rect.left_top() + Vec2::new(0.0, SPACE_XS),
-            Vec2::new(BAR, rect.height() - SPACE_XS * 2.0),
-        );
-        painter.rect_filled(bar, CornerRadius::same(2), theme::rgb(theme.accent));
+        accent_bar(ui, painter, id, rect, Bar::Inset, theme.accent);
     }
 
     let text_color = if active {
@@ -685,10 +781,29 @@ fn row_clip(ui: &Ui, viewport: Rect) -> Rect {
     // is the only thing holding them, because the fill is painted
     // through `set_clip_rect`, which *replaces* the clip in force rather
     // than intersecting it.
+    //
+    // Horizontally that widening is the whole purpose. *Vertically*
+    // there must be none of it, and this is the half that was missing:
+    // the extent came from the cell, so a row only half inside the
+    // scroll viewport — which is every list scrolled anywhere but the
+    // top — was clipped to its own full height and painted straight
+    // through the bottom of the table. `set_clip_rect` replaces the
+    // clip in force, so the scroll area's own was simply gone. The
+    // result is a list that visibly runs past its own last row and into
+    // the status bar, and it only appears once there are enough rows to
+    // scroll, which is why no fabricated scene showed it.
+    //
+    // So the vertical extent is intersected back with whatever clip the
+    // ui already had, which inside a table body is the scroll
+    // viewport's.
     let bleed = 0.5 * ui.spacing().item_spacing.x + 1.0;
+    let existing = ui.clip_rect();
     Rect::from_min_max(
-        egui::pos2(viewport.left() - bleed, gapless.top()),
-        egui::pos2(viewport.right() + bleed, gapless.bottom()),
+        egui::pos2(viewport.left() - bleed, gapless.top().max(existing.top())),
+        egui::pos2(
+            viewport.right() + bleed,
+            gapless.bottom().min(existing.bottom()),
+        ),
     )
 }
 
@@ -758,11 +873,7 @@ fn row_background(
     if let Some(accent) = accent {
         base = base.lerp(accent, 0.07);
     }
-    let fill = if selected {
-        theme::rgb(theme.selection)
-    } else {
-        hover_fill(ui, id, hovered, base, theme.hover)
-    };
+    let fill = selection_fill(ui, theme, id, selected, hovered, base);
     // Through a painter clipped to the row rather than the cell. A
     // column drawn with `.clip(true)` gives its cell ui a clip rect of
     // exactly the cell, which would trim the half-spacing overhang back
@@ -775,19 +886,15 @@ fn row_background(
 
     // The bar belongs to the row rather than to a cell, so only the
     // leading cell draws one — otherwise every column grows its own.
-    if selected && ui.max_rect().left() <= viewport.left() + 0.5 {
-        // It animates out from the leading edge rather than appearing at
-        // full height, so moving the selection down a list reads as one
-        // marker travelling rather than as a series of unrelated flashes.
-        let grown = motion::toggle(ui.ctx(), id.with("selected"), true, motion::QUICK);
-        let bar = Rect::from_center_size(
-            egui::pos2(row.left() + SELECTION_BAR / 2.0, row.center().y),
-            Vec2::new(SELECTION_BAR, row.height() * grown),
-        );
-        painter.rect_filled(bar, CornerRadius::ZERO, theme::rgb(theme.accent));
-    } else if let Some(accent) = accent.filter(|_| ui.max_rect().left() <= viewport.left() + 0.5) {
-        let bar = Rect::from_min_size(row.min, Vec2::new(2.0, row.height()));
-        painter.rect_filled(bar, CornerRadius::ZERO, theme::rgb(accent));
+    if ui.max_rect().left() <= viewport.left() + 0.5 {
+        // Selection outranks the identity hue: a row that is both
+        // selected and accented is being *pointed at*, and the hue is
+        // then the less urgent of the two things the bar could say.
+        if selected {
+            accent_bar(ui, &painter, id, row, Bar::Flush, theme.accent);
+        } else if let Some(accent) = accent {
+            accent_bar(ui, &painter, id, row, Bar::Flush, accent);
+        }
     }
 }
 

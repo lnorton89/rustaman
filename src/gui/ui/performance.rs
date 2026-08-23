@@ -343,26 +343,28 @@ fn picker_entry(
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), PICKER_ROW), Sense::click());
 
-    let fill = if active {
-        theme::rgb(theme.selection)
-    } else {
-        widgets::hover_fill(
-            ui,
-            response.id,
-            response.hovered(),
-            theme.panel,
-            theme.hover,
-        )
-    };
+    // Keyed on the panel this entry selects, not on its place in the
+    // list: an id from the loop index animates the slot.
+    let id = ui.id().with(("picker", focus));
+    let fill = widgets::selection_fill(
+        ui,
+        theme,
+        response.id,
+        active,
+        response.hovered(),
+        theme.panel,
+    );
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(theme::RADIUS), fill);
     if active {
-        let bar = Rect::from_min_size(
-            rect.left_top() + Vec2::new(0.0, SPACE_XS),
-            Vec2::new(3.0, rect.height() - SPACE_XS * 2.0),
+        widgets::accent_bar(
+            ui,
+            ui.painter(),
+            id,
+            rect,
+            widgets::Bar::Inset,
+            theme.accent,
         );
-        ui.painter()
-            .rect_filled(bar, egui::CornerRadius::same(2), theme::rgb(theme.accent));
     }
 
     // The sparkline fills the entry's right half, behind the value — so
@@ -1446,20 +1448,18 @@ fn adapter_row(
     // appearing above another one hands its hover state to whatever now
     // sits where it did.
     let id = ui.id().with(("adapter", adapter.luid));
-    let fill = if selected {
-        theme::rgb(theme.selection)
-    } else {
-        widgets::hover_fill(ui, id, response.hovered(), theme.raised, theme.hover)
-    };
+    let fill = widgets::selection_fill(ui, theme, id, selected, response.hovered(), theme.raised);
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(theme::RADIUS), fill);
     if selected {
-        let bar = Rect::from_min_size(
-            rect.left_top() + Vec2::new(0.0, SPACE_XS),
-            Vec2::new(theme::SELECTION_BAR, rect.height() - SPACE_XS * 2.0),
+        widgets::accent_bar(
+            ui,
+            ui.painter(),
+            id,
+            rect,
+            widgets::Bar::Inset,
+            theme.accent,
         );
-        ui.painter()
-            .rect_filled(bar, egui::CornerRadius::same(2), theme::rgb(theme.accent));
     }
 
     let online = adapter.state.is_online();

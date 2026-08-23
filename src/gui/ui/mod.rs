@@ -240,6 +240,161 @@ pub const SHORTCUTS: [(&str, &str); 5] = [
 mod tests {
     use super::*;
 
+    /// Every rect a pass actually painted on screen.
+    ///
+    /// A mesh is not clipped geometrically — epaint hands the clip to
+    /// the GPU as a scissor and leaves the vertices alone — so what
+    /// reaches the screen is the mesh's bounds intersected with its own
+    /// clip rect. Checking either alone passes on the broken version.
+    fn painted(ctx: &egui::Context, shapes: Vec<egui::epaint::ClippedShape>) -> Vec<egui::Rect> {
+        ctx.tessellate(shapes, 1.0)
+            .into_iter()
+            .filter_map(|primitive| {
+                let egui::epaint::Primitive::Mesh(mesh) = primitive.primitive else {
+                    return None;
+                };
+                let bounds = mesh
+                    .vertices
+                    .iter()
+                    .fold(egui::Rect::NOTHING, |bounds, vertex| {
+                        bounds.union(egui::Rect::from_min_size(vertex.pos, egui::Vec2::ZERO))
+                    });
+                let visible = bounds.intersect(primitive.clip_rect);
+                visible.is_positive().then_some(visible)
+            })
+            .collect()
+    }
+
+    /// A machine with more processes than any window can show.
+    fn a_long_list() -> crate::model::Snapshot {
+        crate::model::Snapshot {
+            processes: (0..400)
+                .map(|index| crate::model::ProcessRow {
+                    pid: index + 4,
+                    name: format!("process-{index}.exe"),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_drawing_module_paints_its_own_selection() {
+        // "Selected" has to look the same everywhere, and the way it
+        // stops looking the same is not that anybody decides otherwise.
+        // Each bar gets written next to the thing it marks, each is
+        // reasonable there, and the app ends up with five. It did: the
+        // rail entry, a table row, a row's identity accent, the
+        // Performance picker tile and the adapter row, at three
+        // different widths — `3.0`, `SELECTION_BAR` and `2.0` — square
+        // in two places and rounded in three, inset in three and flush
+        // in two, and animated in exactly one.
+        //
+        // `theme.selection` is the tell rather than `theme.accent`,
+        // which several modules paint for good reasons — `dnd` draws
+        // the drop indicator in it, `memory` the picked tile. But a
+        // module reaching for the *selection* colour is deciding for
+        // itself what a selected thing looks like, and that belongs to
+        // `widgets::selection_fill` and `widgets::accent_bar`.
+        //
+        // `SELECTION_BAR` counts too: a module that needs the bar's
+        // width is building its own bar.
+        for (name, source) in DRAWING_MODULES {
+            if name == "widgets.rs" {
+                continue;
+            }
+            for (number, line) in source.lines().enumerate() {
+                if is_prose(line) {
+                    continue;
+                }
+                assert!(
+                    !line.contains("theme.selection") && !line.contains("SELECTION_BAR"),
+                    "{name}:{} decides for itself what a selected row looks                      like: {}. Use widgets::selection_fill for the surface                      and widgets::accent_bar for the marker, so every list                      in the app agrees",
+                    number + 1,
+                    line.trim()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_table_paints_below_the_rect_it_was_given() -> anyhow::Result<()> {
+        // The bug this exists for is one that three rounds of looking at
+        // screenshots failed to find, because it cannot appear in a list
+        // short enough to fit: a row only *half* inside the scroll
+        // viewport painted its background at full height, straight
+        // through the bottom of the table and into the status bar.
+        //
+        // It survived because a row's fill is painted through
+        // `Painter::set_clip_rect`, which replaces the clip in force
+        // rather than intersecting it — so the scroll area's own clip,
+        // the thing that would have cut the row off, was simply gone.
+        //
+        // Stated as "paints nothing below the rect it was given" rather
+        // than as a pixel measurement, because that is the actual
+        // contract between a view and its pane, and it is the one a
+        // clip that replaces rather than intersects can break.
+        for view in [View::Processes, View::Details] {
+            let snapshot = a_long_list();
+            let mut app = App::new(crate::config::Config::default());
+            app.view = view;
+            app.snapshot = Some(std::sync::Arc::new(snapshot));
+
+            let window =
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1180.0, 760.0));
+            // Deliberately short of the window, standing in for the
+            // status bar: room below the pane for an escape to show up
+            // in, which a view drawn to the window's own edge would not
+            // give this test.
+            let pane = egui::Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(window.right(), window.bottom() - 120.0),
+            );
+
+            let ctx = egui::Context::default();
+            theme::apply(&ctx, &app.theme.clone());
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(window),
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| match view {
+                        View::Processes => processes::draw(&mut app, ui),
+                        View::Details => details::draw(&mut app, ui),
+                        // Named rather than wildcarded, so a view added
+                        // later is a compile error here and somebody has
+                        // to decide whether it belongs in this test.
+                        // Services and Startup want a fabricated service
+                        // list; the rest are not tables.
+                        View::Performance
+                        | View::Memory
+                        | View::Services
+                        | View::Startup
+                        | View::System
+                        | View::Settings => {}
+                    });
+                },
+            );
+            output.textures_delta.clear();
+
+            // A point of slop for the feathering epaint adds to every
+            // edge, and for the half-spacing overhang a row's fill is
+            // deliberately widened by.
+            const SLOP: f32 = 2.0;
+            for visible in painted(&ctx, output.shapes) {
+                assert!(
+                    visible.bottom() <= pane.bottom() + SLOP,
+                    "the {view:?} view painted down to {} with a pane ending at {} —                      a row that is only half inside the scroll viewport is painting                      its full height through the bottom of the table",
+                    visible.bottom(),
+                    pane.bottom()
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn there_is_a_shortcut_for_every_view() {
         // Ctrl+1..8 covers the rail, so a view added later without a

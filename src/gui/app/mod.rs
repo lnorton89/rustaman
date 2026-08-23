@@ -401,7 +401,7 @@ impl MemoryMeasure {
 }
 
 /// Which resource the Performance view is showing in detail.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum PerformanceFocus {
     /// Processor.
     #[default]
