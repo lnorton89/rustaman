@@ -148,6 +148,15 @@ pub enum Icon {
     /// row it sits on carries meaning through colour already, and a
     /// second, fixed green on the same row would compete with it.
     Leaf,
+    /// A process that is part of Windows itself.
+    ///
+    /// Four panes: the shape the platform has used for its own mark
+    /// since it stopped being a flag. Geometry rather than the real
+    /// logo, and stroked in the theme's colour like every other icon
+    /// here — this says "the operating system", it is not a badge, and
+    /// a mark that kept its own colours under a dark theme would be the
+    /// one thing on the row that ignores the theme.
+    Windows,
 }
 
 impl Icon {
@@ -181,6 +190,16 @@ impl Icon {
             // module with pins: that draws the hardware, and this view
             // is about how the machine's memory is being spent rather
             // than what it is plugged into.
+            // Four panes with a gap between them, which is what makes
+            // it read as the platform's mark rather than as a window or
+            // a grid — `Memory` is already a divided box, and the two
+            // have to stay distinguishable at eighteen points.
+            Self::Windows => vec![
+                Path::closed(&[(2.5, 3.0), (7.2, 3.0), (7.2, 7.5), (2.5, 7.5)]),
+                Path::closed(&[(8.8, 3.0), (13.5, 3.0), (13.5, 7.5), (8.8, 7.5)]),
+                Path::closed(&[(2.5, 8.5), (7.2, 8.5), (7.2, 13.0), (2.5, 13.0)]),
+                Path::closed(&[(8.8, 8.5), (13.5, 8.5), (13.5, 13.0), (8.8, 13.0)]),
+            ],
             Self::Memory => vec![
                 Path::closed(&[(2.5, 3.5), (13.5, 3.5), (13.5, 12.5), (2.5, 12.5)]),
                 Path::open(&[(9.0, 3.5), (9.0, 12.5)]),
@@ -438,7 +457,8 @@ mod tests {
     /// a variant nobody drew. This list is what makes the *tests* cover
     /// it too, and the length assertion below is what catches a variant
     /// added to the enum and not to this list.
-    const ALL: [Icon; 24] = [
+    const ALL: [Icon; 25] = [
+        Icon::Windows,
         Icon::Processes,
         Icon::Performance,
         Icon::Memory,

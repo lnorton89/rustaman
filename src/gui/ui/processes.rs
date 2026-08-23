@@ -768,12 +768,40 @@ fn name_cell(
             ui.add_space(SPACE_XS + icons::DISCLOSURE);
         }
 
+        // The icon column is drawn for *every* row, whether or not the
+        // Shell had a picture for it.
+        //
+        // Two things were wrong when it was not. Windows' own processes
+        // — csrss, wininit, Registry, Secure System — have no shell icon
+        // and got nothing, so the column read as a rendering fault
+        // rather than as a fact about them. And because nothing was
+        // drawn, nothing reserved the width either: their names started
+        // where the icons ended on every other row, so the one column a
+        // person scans down had two left edges.
+        /// The icon's edge. Matches the pixels `win::app_icon` extracts,
+        /// so a shell icon is drawn at its own size rather than resampled.
+        const ICON: f32 = 18.0;
         if let Some(texture) = texture {
-            let image = egui::Image::new((texture.id(), egui::Vec2::splat(18.0)))
+            let image = egui::Image::new((texture.id(), egui::Vec2::splat(ICON)))
                 .corner_radius(egui::CornerRadius::same(3));
             ui.add(image);
-            ui.add_space(SPACE_XS);
+        } else {
+            let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(ICON), Sense::hover());
+            // Windows' own processes get the platform's mark. Everything
+            // else gets the space and no mark: a background program the
+            // Shell had no icon for is not a fact worth drawing a symbol
+            // for, and inventing one would say something this does not
+            // know.
+            if process.kind == ProcessKind::System {
+                icons::paint(
+                    ui.painter(),
+                    rect,
+                    crate::icon::Icon::Windows,
+                    theme::rgb(theme.text_faint),
+                );
+            }
         }
+        ui.add_space(SPACE_XS);
 
         // There used to be a coloured dot here, hashed from the process
         // key. It was stable across a re-sort, which was the property it
