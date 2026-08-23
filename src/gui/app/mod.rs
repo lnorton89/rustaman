@@ -707,6 +707,16 @@ pub struct App {
     /// Whether the window is maximised, tracked so the title bar's own
     /// button can show the right glyph.
     pub maximised: bool,
+    /// The border colour last handed to DWM, so a theme change can be
+    /// noticed.
+    ///
+    /// The Windows 11 border is set once when the window is created. It
+    /// is not a property the window keeps in step with anything — DWM
+    /// holds whatever colour it was last given — so switching theme left
+    /// a dark border framing a light window until the app was restarted.
+    /// Only a *change* re-applies it; this is a system call and it has no
+    /// business running on a frame where nothing about the theme moved.
+    dressed_border: Option<crate::color::Rgb>,
     /// Numeric Win32 window handle, attached by the native launcher.
     pub(crate) native_window: Option<isize>,
     /// Whether `SeDebugPrivilege` was granted, which the Settings view
@@ -790,6 +800,7 @@ impl App {
             // wearing someone else's hat.
             custom_chrome: config.custom_chrome.unwrap_or(true),
             maximised: false,
+            dressed_border: None,
             native_window: None,
             elevated,
             last_snapshot_at: None,
@@ -1083,6 +1094,17 @@ impl eframe::App for App {
                 let _ = crate::win::window::fit_to_work_area(window);
             }
         }
+        // The Windows 11 border follows the theme, which it cannot do on
+        // its own: DWM keeps whatever colour it was last given, so a
+        // theme switched at runtime left the old border framing the new
+        // window until a restart. Gated on the colour actually changing —
+        // this is a system call, and a frame where the theme did not move
+        // has no business making one.
+        if self.dressed_border != Some(self.theme.border) {
+            super::dress_window_for_windows_11(self.native_window, &self.theme, self.custom_chrome);
+            self.dressed_border = Some(self.theme.border);
+        }
+
         self.poll();
         super::ui::draw(self, ui);
 

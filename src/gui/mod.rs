@@ -237,7 +237,7 @@ fn native_window_handle(cc: &eframe::CreationContext<'_>) -> Option<isize> {
 /// its background stops; the one-pixel line DWM draws is what separates
 /// it from whatever is behind it, and left alone that line is the user's
 /// accent colour — the only part of the window the theme cannot reach.
-fn dress_window_for_windows_11(
+pub(crate) fn dress_window_for_windows_11(
     window: Option<isize>,
     theme: &crate::theme::Palette,
     custom_chrome: bool,
