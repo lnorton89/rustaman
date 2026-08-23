@@ -265,6 +265,46 @@ mod tests {
             .collect()
     }
 
+    /// An app showing `view` against a list longer than any window.
+    ///
+    /// A row is selected on purpose. The Details view only draws its
+    /// inspector when something is, and the inspector is where the
+    /// second scroll area lives — so an unselected Details view has one
+    /// scroll area, cannot collide with itself, and quietly fails to
+    /// exercise the thing these tests exist for.
+    fn an_app_showing(view: View) -> App {
+        let snapshot = a_long_list();
+        let mut app = App::new(crate::config::Config::default());
+        app.view = view;
+        let selected = snapshot
+            .processes
+            .first()
+            .map(crate::model::ProcessRow::key);
+        app.details.selected = selected;
+        app.processes.selected = selected;
+        app.snapshot = Some(std::sync::Arc::new(snapshot));
+        app.services.services = (0..400)
+            .map(|index| crate::win::services::Service {
+                name: format!("svc{index}"),
+                display_name: format!("Service {index}"),
+                state: crate::win::services::ServiceState::Running,
+                pid: Some(index + 4),
+            })
+            .collect();
+        app.services.refreshed = Some(std::time::Instant::now());
+        app.startup.entries = (0..400)
+            .map(|index| crate::win::startup::StartupEntry {
+                name: format!("entry{index}"),
+                command: format!(r"C:\Program Files\App{index}\app.exe"),
+                location: "HKCU Run",
+                all_users: false,
+                enabled: true,
+            })
+            .collect();
+        app.startup.refreshed = app.services.refreshed;
+        app
+    }
+
     /// A machine with more processes than any window can show.
     fn a_long_list() -> crate::model::Snapshot {
         crate::model::Snapshot {
@@ -318,6 +358,97 @@ mod tests {
         }
     }
 
+    /// Draws one view's own body, without the window chrome around it.
+    ///
+    /// Named rather than wildcarded, so a view added later is a compile
+    /// error here and somebody has to decide what it does.
+    fn draw_view(app: &mut App, view: View, ui: &mut Ui) {
+        match view {
+            View::Processes => processes::draw(app, ui),
+            View::Details => details::draw(app, ui),
+            View::Services => services::draw(app, ui),
+            View::Startup => services::draw_startup(app, ui),
+            View::Performance => performance::draw(app, ui),
+            View::Memory => memory::draw(app, ui),
+            View::System => system_info::draw(app, ui),
+            View::Settings => settings::draw(app, ui),
+        }
+    }
+
+    #[test]
+    fn every_view_settles_instead_of_repainting_for_ever() -> anyhow::Result<()> {
+        // egui redraws on demand. A view that asks for another frame on
+        // every frame pins a core for as long as it is on screen, and
+        // nothing about it is visible: the picture is correct, the app
+        // just never stops drawing it. On a task manager the irony is
+        // that it shows up in the app's own process list.
+        //
+        // This has happened once already and took three wrong theories
+        // to find. Two `ScrollArea`s in one view collided on the id they
+        // key their stored state by — an id derived from the parent `Ui`
+        // — so one state entry was written twice a frame with different
+        // values. egui requests a repaint whenever a scrollbar's
+        // visibility disagrees with that state, and the two sat flipping
+        // it at each other. It was caught by the screenshot harness
+        // running out of steps, which only happens when somebody renders
+        // that scene.
+        //
+        // Animations legitimately ask for frames, so this asks whether a
+        // view *settles*, not whether it ever requests one.
+        const PASSES: usize = 12;
+
+        for view in View::ALL {
+            let mut app = an_app_showing(view);
+
+            let window =
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1180.0, 760.0));
+            let ctx = egui::Context::default();
+            theme::apply(&ctx, &app.theme.clone());
+
+            let mut settled = None;
+            for pass in 0..PASSES {
+                // The clock has to advance, or nothing ever settles and
+                // this reports every view as looping. egui's animations
+                // progress with `RawInput::time`, so passing the default
+                // repeatedly leaves every one of them frozen part-way
+                // and asking for the frame that would finish it — which
+                // is indistinguishable from the bug being looked for.
+                // A tenth of a second a pass clears `motion::SETTLE`
+                // several times over within `PASSES`.
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(window),
+                        time: Some(pass as f64 * 0.1),
+                        ..Default::default()
+                    },
+                    |ui| draw_view(&mut app, view, ui),
+                );
+                output.textures_delta.clear();
+                let immediate = output
+                    .viewport_output
+                    .values()
+                    .any(|viewport| viewport.repaint_delay.is_zero());
+                if !immediate {
+                    settled = Some(pass);
+                    break;
+                }
+            }
+
+            // egui records who asked, which turns "something loops"
+            // into a file and a line.
+            let causes: Vec<String> = ctx
+                .repaint_causes()
+                .into_iter()
+                .map(|cause| cause.to_string())
+                .collect();
+            assert!(
+                settled.is_some(),
+                "the {view:?} view still wanted an immediate repaint after                  {PASSES} passes with no input. Something in it disagrees with                  its own stored state every frame — two scroll areas sharing                  an id is the way this has happened before. Causes: {causes:#?}"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn no_view_paints_outside_the_pane_it_was_given() -> anyhow::Result<()> {
         // The bug this exists for is one that three rounds of looking at
@@ -336,35 +467,7 @@ mod tests {
         // contract between a view and its pane, and it is the one a
         // clip that replaces rather than intersects can break.
         for view in View::ALL {
-            let snapshot = a_long_list();
-            let mut app = App::new(crate::config::Config::default());
-            app.view = view;
-            app.snapshot = Some(std::sync::Arc::new(snapshot));
-
-            // Both of these lists are read on their view's own schedule
-            // rather than by the sampler, and a view that has never
-            // refreshed starts a background read on its first frame and
-            // draws its empty state — which paints nothing and would
-            // pass this test without testing anything.
-            app.services.services = (0..400)
-                .map(|index| crate::win::services::Service {
-                    name: format!("svc{index}"),
-                    display_name: format!("Service {index}"),
-                    state: crate::win::services::ServiceState::Running,
-                    pid: Some(index + 4),
-                })
-                .collect();
-            app.services.refreshed = Some(std::time::Instant::now());
-            app.startup.entries = (0..400)
-                .map(|index| crate::win::startup::StartupEntry {
-                    name: format!("entry{index}"),
-                    command: format!(r"C:\Program Files\App{index}\app.exe"),
-                    location: "HKCU Run",
-                    all_users: false,
-                    enabled: true,
-                })
-                .collect();
-            app.startup.refreshed = app.services.refreshed;
+            let mut app = an_app_showing(view);
 
             let window =
                 egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1180.0, 760.0));
@@ -385,15 +488,8 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| match view {
-                        View::Processes => processes::draw(&mut app, ui),
-                        View::Details => details::draw(&mut app, ui),
-                        View::Services => services::draw(&mut app, ui),
-                        View::Startup => services::draw_startup(&mut app, ui),
-                        View::Performance => performance::draw(&mut app, ui),
-                        View::Memory => memory::draw(&mut app, ui),
-                        View::System => system_info::draw(&mut app, ui),
-                        View::Settings => settings::draw(&mut app, ui),
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
+                        draw_view(&mut app, view, ui);
                     });
                 },
             );
