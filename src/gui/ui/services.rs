@@ -502,15 +502,36 @@ pub fn draw_startup(app: &mut App, ui: &mut Ui) {
             theme.raised,
             theme.text_muted,
         );
-        chrome::toolbar_dot(ui, &theme);
-        ui.label(
-            egui::RichText::new(
-                "Rustaman reports what is registered to run at logon. \
-                 Changing it is done in the location each entry names.",
-            )
-            .color(theme::rgb(theme.text_faint))
-            .text_style(egui::TextStyle::Small),
-        );
+        // The note is the first thing to go when the toolbar runs out
+        // of room. It is prose rather than data — unlike a column,
+        // which must never silently disappear — and a sentence sliced
+        // off at the window's edge explains less than no sentence does.
+        // At the smallest window the app allows it ran a hundred and
+        // eighty points past the edge.
+        //
+        // Measured rather than compared against a hand-picked width,
+        // because the width of this sentence is not a property of the
+        // sentence: the UI face is whatever the machine has installed
+        // (see `crate::gui::font`), so a number written here would be
+        // right for one font and wrong for the next.
+        let note = "Rustaman reports what is registered to run at logon.                     Changing it is done in the location each entry names.";
+        let font = egui::TextStyle::Small.resolve(ui.style());
+        let colour = theme::rgb(theme.text_faint);
+        let needed = ui
+            .painter()
+            .layout_no_wrap(note.to_owned(), font, colour)
+            .size()
+            .x;
+        // Plus the separator it would be introduced by, which is not
+        // worth drawing on its own.
+        if ui.available_width() >= needed + SPACE_MD {
+            chrome::toolbar_dot(ui, &theme);
+            ui.label(
+                egui::RichText::new(note)
+                    .color(colour)
+                    .text_style(egui::TextStyle::Small),
+            );
+        }
     });
     ui.add_space(chrome::TOOLBAR_GAP);
 
