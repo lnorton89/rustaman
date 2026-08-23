@@ -37,14 +37,18 @@ use egui_extras::{Column, TableBuilder};
 
 /// The columns, with the width each starts at.
 ///
-/// Sized so that all ten fit **beside an open inspector** at the
-/// window size the app opens at (`config::Config::default`, 1440 points
-/// wide). `every_details_column_fits_the_default_window` checks the sum
-/// against that budget, because the failure mode is not a warning: an
-/// `egui_extras` column keeps its stated width whatever the pane can
-/// afford, so a table that overruns simply paints over whatever is to
-/// its right — which is exactly what this one was doing to the
-/// inspector.
+/// Sized so that all ten fit at the window size the app opens at with
+/// the inspector closed, which is the state the view is usually in.
+/// Opening the inspector takes about 300 points and the columns then do
+/// not fit — that case scrolls, and `content_width` is where the two
+/// are decided between.
+///
+/// This used to claim the columns fit *beside an open inspector* at a
+/// 1440-point window. Both halves were wrong: the app opens at
+/// [`crate::gui::DEFAULT_SIZE`], 1180 points, and 1440 came from a
+/// config round-trip fixture. The test built on it passed because the
+/// budget it computed was 260 points more generous than any window the
+/// app actually opens.
 const COLUMNS: [(SortKey, f32); 10] = [
     (SortKey::Name, 210.0),
     (SortKey::Pid, 56.0),
@@ -66,6 +70,20 @@ const COLUMNS: [(SortKey, f32); 10] = [
     (SortKey::Architecture, 50.0),
     (SortKey::Session, 68.0),
 ];
+
+/// How wide the table's content is, in a pane of `pane` points.
+///
+/// The columns' own width when the pane cannot afford them, so the
+/// surplus becomes scroll; the pane's width when it can, so the
+/// trailing spacer absorbs the slack and no scrollbar appears. Split
+/// out from the drawing so the three cases below can be stated as
+/// arithmetic rather than as a screenshot.
+fn content_width(pane: f32, spacing: f32, scrollbar: f32) -> f32 {
+    let wanted: f32 = COLUMNS.iter().map(|(_, width)| width).sum::<f32>()
+        + spacing * COLUMNS.len() as f32
+        + scrollbar;
+    wanted.max(pane)
+}
 
 /// The width of the inspector pane.
 const INSPECTOR_WIDTH: f32 = 280.0;
@@ -185,7 +203,7 @@ fn refresh_rows(app: &mut App) {
 
 /// The table.
 fn table(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect) {
-    let entries: Vec<Entry> = app.details.rows.entries().to_vec();
+    let entries = app.details.rows.shared_entries();
     let Some(snapshot) = app.snapshot.clone() else {
         return;
     };
@@ -193,22 +211,83 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect) {
     let mut sort_clicked: Option<SortKey> = None;
     let mut action: Option<Action> = None;
 
-    // The pane `draw` split off, not `available_rect_before_wrap` — see
-    // there. A row's background is painted to this edge; see
-    // `widgets::row_background`.
-    let viewport = egui::Rect::from_min_max(egui::pos2(pane.left(), ui.cursor().top()), pane.max);
+    // What the columns actually need, against what the pane has.
+    //
+    // Ten columns want about 838 points and the pane at the window size
+    // the app opens at — with the inspector out — is about 592. The
+    // previous answer was to clip, which did not drop the *overflow*, it
+    // dropped four whole columns: Threads, Handles, Arch and Session
+    // vanished with no scrollbar, no ellipsis and nothing to say they
+    // existed. A table cannot answer "too narrow" by silently showing
+    // less than it was asked for.
+    //
+    // So it scrolls, which is what this module's own docs have claimed
+    // all along. Note this is not a case that can be designed away by
+    // choosing better widths: `MIN_SIZE` lets the window down to 780
+    // points, so *no* fixed column set fits every size the app allows.
+    let content = content_width(
+        pane.width(),
+        ui.spacing().item_spacing.x,
+        ui.spacing().scroll.allocated_width(),
+    );
+
+    egui::ScrollArea::horizontal()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // The content is at least the pane, so a wide window has no
+            // scrollbar and the trailing spacer below takes up the
+            // slack exactly as it used to. Narrower, and the surplus
+            // becomes scroll rather than loss.
+            ui.set_min_width(content);
+            table_body(
+                app,
+                ui,
+                theme,
+                pane,
+                content,
+                &entries,
+                &snapshot,
+                &mut clicked,
+                &mut sort_clicked,
+                &mut action,
+            );
+        });
+}
+
+/// The table proper, inside the horizontal scroll area.
+///
+/// Split out only so [`table`] can stay readable: the scroll wrapper and
+/// the twelve-argument body do not belong in one function.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pieces one table body needs, threaded through the               scroll-area closure that owns the borrow of `ui`"
+)]
+fn table_body(
+    app: &mut App,
+    ui: &mut Ui,
+    theme: &Palette,
+    pane: egui::Rect,
+    content: f32,
+    entries: &[Entry],
+    snapshot: &crate::model::Snapshot,
+    clicked: &mut Option<ProcessKey>,
+    sort_clicked: &mut Option<SortKey>,
+    action: &mut Option<Action>,
+) {
+    // Spans the content rather than the visible pane, so a row hovered
+    // while scrolled right is still hovered along its whole length.
+    let viewport = egui::Rect::from_min_max(
+        egui::pos2(pane.left(), ui.cursor().top()),
+        egui::pos2(pane.left() + content, pane.bottom()),
+    );
 
     theme::quiet_column_rules(ui);
-    // An `egui_extras` column keeps its stated width whatever the pane
-    // can afford, and the table does not clip itself — so a table wider
-    // than its pane paints straight over whatever sits beside it. This
-    // one was drawing its last three columns across the inspector, and
-    // over the inspector's own "Select a process". The clip is the
-    // backstop; `COLUMNS` is sized so it should never be reached.
-    ui.set_clip_rect(viewport);
     let mut builder = TableBuilder::new(ui)
         .resizable(true)
         .vscroll(true)
+        .min_scrolled_height(0.0)
+        .max_scroll_height((viewport.height() - HEADER_HEIGHT).max(0.0))
+        .auto_shrink([true, false])
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .sense(Sense::click());
 
@@ -245,7 +324,7 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect) {
                     )
                     .clicked()
                     {
-                        sort_clicked = Some(*key);
+                        *sort_clicked = Some(*key);
                     }
                 });
             }
@@ -293,20 +372,20 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect) {
 
                 let response = row.response();
                 if response.clicked() {
-                    clicked = Some(key);
+                    *clicked = Some(key);
                 }
                 response.context_menu(|ui| {
                     if !process.is_pseudo() {
                         if ui.button("End task").clicked() {
-                            action = Some(Action::EndTask(key));
+                            *action = Some(Action::EndTask(key));
                             ui.close();
                         }
                         if ui.button("Open file location").clicked() {
-                            action = Some(Action::Reveal(key));
+                            *action = Some(Action::Reveal(key));
                             ui.close();
                         }
                         if ui.button("Copy details").clicked() {
-                            action = Some(Action::Copy(key));
+                            *action = Some(Action::Copy(key));
                             ui.close();
                         }
                     }
@@ -314,7 +393,7 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect) {
             });
         });
 
-    if let Some(key) = sort_clicked {
+    if let Some(key) = *sort_clicked {
         if app.details.sort == key {
             app.details.descending = !app.details.descending;
         } else {
@@ -322,10 +401,10 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect) {
             app.details.descending = key.defaults_descending();
         }
     }
-    if let Some(key) = clicked {
+    if let Some(key) = *clicked {
         app.details.selected = Some(key);
     }
-    if let Some(action) = action {
+    if let Some(action) = action.take() {
         app.dispatch(action, ui);
     }
 }
@@ -496,35 +575,76 @@ fn inspector(app: &mut App, ui: &mut Ui, theme: &Palette) {
 mod tests {
     use super::*;
 
+    /// The pane the table gets, for a window `window` points wide.
+    ///
+    /// Stated the way the window computes it rather than as one number,
+    /// so a change to the nav rail or the content inset moves these
+    /// tests with it.
+    fn pane_for(window: f32, inspector: bool) -> f32 {
+        let pane = window - theme::NAV_WIDTH - theme::PAD * 2.0;
+        if inspector {
+            pane - (INSPECTOR_WIDTH + SPACE_MD * 2.0)
+        } else {
+            pane
+        }
+    }
+
+    /// `egui_extras` puts `item_spacing.x` between columns and reserves
+    /// a lane for the vertical scrollbar.
+    const SPACING: f32 = SPACE_SM;
+    const SCROLLBAR: f32 = 12.0;
+
     #[test]
-    fn every_details_column_fits_the_default_window() {
-        // The regression this guards is silent and it is ugly. An
-        // `egui_extras` column keeps the width it was given whatever the
-        // pane can afford — only a `remainder()` shrinks — and the table
-        // neither clips nor scrolls when the total overruns. It simply
-        // paints past its own pane, over whatever is next to it. These
-        // ten columns summed to 962 points against a pane of about 924,
-        // so the last three were drawn across the inspector and over the
-        // inspector's own "Select a process".
-        //
-        // The budget is stated the way the window computes it, rather
-        // than as one number, so that a change to the nav rail or the
-        // content inset moves this test with it.
-        let window = 1440.0f32;
-        let pane =
-            window - theme::NAV_WIDTH - theme::PAD * 2.0 - (INSPECTOR_WIDTH + SPACE_MD * 2.0);
-        // `egui_extras` puts `item_spacing.x` between columns and
-        // reserves a lane for the vertical scrollbar.
-        let spacing = SPACE_SM * COLUMNS.len() as f32;
-        let scrollbar = 12.0;
-        let budget = pane - spacing - scrollbar;
+    fn the_columns_fit_the_window_the_app_opens_at() {
+        // The common state of this view: default window, no inspector.
+        // A horizontal scrollbar here would be one in the case that is
+        // not an edge case at all, which is a sizing problem rather than
+        // a scrolling one — so it is worth a test of its own even though
+        // overflow is now handled.
+        let Some(window) = crate::gui::DEFAULT_SIZE.first() else {
+            return;
+        };
+        let pane = pane_for(*window, false);
+        assert!(
+            (content_width(pane, SPACING, SCROLLBAR) - pane).abs() < f32::EPSILON,
+            "the ten columns do not fit the {window}-point window with the              inspector closed, so the view opens with a horizontal scrollbar"
+        );
+    }
+
+    #[test]
+    fn opening_the_inspector_scrolls_rather_than_dropping_columns() {
+        // The bug this whole arrangement exists for. The columns want
+        // about 838 points and the pane beside an open inspector has
+        // about 592, and the previous answer — a clip — did not shorten
+        // the overflowing column, it removed Threads, Handles, Arch and
+        // Session outright, with no scrollbar to say so.
+        let Some(window) = crate::gui::DEFAULT_SIZE.first() else {
+            return;
+        };
+        let pane = pane_for(*window, true);
+        let content = content_width(pane, SPACING, SCROLLBAR);
+        assert!(
+            content > pane,
+            "the content is {content} in a pane of {pane}, so nothing              overflows and the scroll wrapper is dead code — if the              columns really do fit now, delete it rather than this test"
+        );
 
         let total: f32 = COLUMNS.iter().map(|(_, width)| width).sum();
         assert!(
-            total <= budget,
-            "the ten columns want {total} points and the pane beside an \
-             open inspector has {budget} at the window size the app opens \
-             at — the overrun is painted over the inspector, not clipped"
+            content >= total,
+            "the content is {content} but the columns alone want {total},              so the table is still being asked to draw in less room than              it needs and a column will be cut off"
+        );
+    }
+
+    #[test]
+    fn the_narrowest_window_the_app_allows_still_reaches_every_column() {
+        // `MIN_SIZE` is well under what the columns want, which is why
+        // no fixed set of widths can be the answer here: whatever they
+        // are shrunk to, some allowed window is narrower.
+        let pane = pane_for(780.0, false);
+        let total: f32 = COLUMNS.iter().map(|(_, width)| width).sum();
+        assert!(
+            content_width(pane, SPACING, SCROLLBAR) >= total,
+            "the narrowest allowed window cannot reach all ten columns"
         );
     }
 
