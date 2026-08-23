@@ -15,9 +15,13 @@
 //!
 //! The default glow/glutin path goes through WGL, which fails on machines
 //! with a stale or hybrid OpenGL ICD — and hybrid graphics is exactly what
-//! the laptops this app is most useful on have. wgpu picks D3D12 or Vulkan
-//! from what the machine actually exposes, and on Windows 10 D3D12 is
-//! always there.
+//! the laptops this app is most useful on have. wgpu talks to D3D12
+//! instead, and on Windows 10 D3D12 is always there.
+//!
+//! ## And it runs on D3D12 specifically — see [`backends`]
+//!
+//! Letting wgpu choose between D3D12 and Vulkan re-opens the same wound
+//! the renderer was picked to close, one vendor along.
 //!
 //! ## The window opens undecorated by default
 //!
@@ -87,6 +91,35 @@ const _: () = {
     assert!(MIN_SIZE[0] < DEFAULT_SIZE[0] && MIN_SIZE[1] < DEFAULT_SIZE[1]);
 };
 
+/// The graphics backends the window may be created on.
+///
+/// **D3D12, and not Vulkan.** eframe's default is
+/// `Backends::PRIMARY | Backends::GL`, which on Windows means wgpu
+/// enumerates the Vulkan ICD as well and may well pick it — and an
+/// installable client driver is vendor code loaded into this process,
+/// exactly like the WGL path the renderer was chosen to avoid. Choosing
+/// wgpu bought the escape from a broken OpenGL ICD; leaving Vulkan in the
+/// set hands the same job to a different vendor's driver and hopes.
+///
+/// It is not hypothetical. An Intel UHD 620 on the 30.0.101.1122 driver
+/// takes an access violation inside `igvk64.dll` while the swapchain is
+/// being created — before the first frame, so the app does not fail to
+/// draw, it fails to *open*, with no window and no message. A GUI-subsystem
+/// binary has no console, so the only thing the user sees is nothing
+/// happening. The offscreen tests never caught it because a headless
+/// target creates no surface, and the surface is where that driver dies.
+///
+/// D3D12 costs nothing to prefer here. [`crate::win`] puts the floor at
+/// Windows 10 1809, every such machine has D3D12, and where the hardware
+/// cannot the runtime falls back to WARP rather than to nothing.
+///
+/// `WGPU_BACKEND` still overrides, which is the escape hatch in the other
+/// direction: a machine whose D3D12 path is the broken one can be started
+/// on Vulkan without a rebuild.
+fn backends() -> eframe::wgpu::Backends {
+    eframe::wgpu::Backends::from_env().unwrap_or(eframe::wgpu::Backends::DX12)
+}
+
 /// Opens the window and runs until it closes.
 pub fn run(config: Config) -> Result<()> {
     let custom_chrome = config.custom_chrome.unwrap_or(true);
@@ -108,6 +141,16 @@ pub fn run(config: Config) -> Result<()> {
         viewport = viewport.with_window_level(eframe::egui::WindowLevel::AlwaysOnTop);
     }
 
+    // Everything else about the wgpu setup is eframe's default; only the
+    // backend set is ours. Mutated in place rather than rebuilt because
+    // `WgpuSetupCreateNew` also carries the device descriptor and the
+    // display handle eframe fills in for winit, and restating those here
+    // would silently pin them to whatever they were at the time.
+    let mut wgpu_options = eframe::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {
+        setup.instance_descriptor.backends = backends();
+    }
+
     let options = eframe::NativeOptions {
         viewport,
         // Rustaman persists its own size. eframe's separate native-window
@@ -116,6 +159,7 @@ pub fn run(config: Config) -> Result<()> {
         persist_window: false,
         // See the module docs.
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options,
         ..Default::default()
     };
 
@@ -192,5 +236,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(options.renderer, eframe::Renderer::Wgpu);
+    }
+
+    #[test]
+    fn the_window_is_created_on_d3d12_alone() {
+        // `WGPU_BACKEND` is a documented override, so a machine that has
+        // set it has asked for something other than the default and the
+        // default is not what is under test here.
+        if std::env::var_os("WGPU_BACKEND").is_some() {
+            return;
+        }
+        // Not a style preference. Leaving Vulkan in the set lets wgpu
+        // pick an ICD that crashes the process during swapchain creation
+        // on hardware this app is specifically meant to run on — see
+        // `super::backends`.
+        assert_eq!(
+            super::backends(),
+            eframe::wgpu::Backends::DX12,
+            "the window must be created on D3D12 alone"
+        );
     }
 }
