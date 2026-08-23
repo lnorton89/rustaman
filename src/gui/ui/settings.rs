@@ -281,15 +281,15 @@ fn behaviour(app: &mut App, ui: &mut Ui, theme: &Palette) {
     // an explanation, or they look like a bug in the app.
     let (message, color) = if app.elevated {
         (
-            "Running with debug privilege: every process's owner, path and \
-             architecture can be read.",
+            "Running with debug privilege. More processes' owner, path and \
+             architecture can be read; protected processes may still refuse access.",
             theme.success,
         )
     } else {
         (
-            "Running without debug privilege. Processes owned by other \
-             accounts show no owner, path or architecture; every other \
-             column is complete. Run Rustaman as administrator to see them.",
+            "Running without debug privilege. Some processes may hide owner, \
+             path or architecture. Running as administrator can improve access; \
+             protected processes may still refuse it.",
             theme.text_muted,
         )
     };

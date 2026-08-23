@@ -7,14 +7,14 @@ not. That is not a quality bar you reach by being careful; it is a
 consequence of two structural rules, and everything below is a
 consequence of those two.
 
-> **1. The UI thread makes no system call.**
+> **1. Periodic monitoring makes no system call on the UI thread.**
 > **2. The UI is immediate mode, so every frame rebuilds the window.**
 
 ---
 
-## 1. The UI thread makes no system call
+## 1. Periodic monitoring stays off the UI thread
 
-Not "few". None. The window draws from a `Snapshot` that a background
+The window draws from a `Snapshot` that a background
 thread already built.
 
 This is the rule that the Task Manager shipping with Windows does not
@@ -61,32 +61,31 @@ of "read on demand, not every sample" state should reach for this rather
 than either calling `crate::win` inline (the bug this section exists to
 prevent) or inventing a second sampler.
 
-### The channel drops, and that is the feature
+### The mailbox overwrites, and that is the feature
 
-`engine` sends snapshots over a bounded channel with a non-blocking send.
-When the queue is full the sampler **drops the frame** and carries on.
-`Sampler::latest` drains whatever arrived and returns only the newest.
+`engine` publishes snapshots into a one-slot mailbox without blocking.
+The one-slot mailbox **overwrites the older unread frame** and carries on.
+`Engine::latest` takes the current value.
 
 An unbounded channel would be worse in exactly the situation this app
 exists for: a UI thread that fell behind would accumulate a backlog, and
 the window would then show a five-second-old machine while working
-through it. A dropped sample costs one tick of graph history. A queued
-one costs correctness.
+through it. An overwritten intermediate sample costs one tick of graph
+history. A queued stale sample costs correctness.
 
 The sleep is sliced into 100 ms pieces with a stop-flag check between
 them, so closing the window does not wait out the sampling interval.
 
-### Two caches, both pruned
+### Identity caches are bounded by the right identity
 
 The sampler holds an identity cache (`ProcessKey` → owner, path,
-bitness, elevation, description) and a description cache (path →
-`FileDescription`). Both are keyed on things that do not change for the
-life of a process, so this is one token open per process per lifetime
-rather than one per sample.
+bitness, elevation, description) and file metadata caches keyed by path,
+size and modification time. This is one token open per process lifetime,
+while an executable replaced in place gets fresh metadata.
 
-Both are pruned each tick against what is still running. A cache keyed by
-`ProcessKey` on a machine that starts and stops processes all day grows
-without bound otherwise, and
+The process cache is pruned each tick; the file caches have a hard size
+cap. A cache keyed by `ProcessKey` on a machine that starts and stops
+processes all day grows without bound otherwise, and
 `the_caches_do_not_grow_without_bound` in `engine/sampler.rs` is the test
 that says so.
 

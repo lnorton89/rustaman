@@ -123,10 +123,18 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
 /// whichever one is already in flight; neither half blocks.
 fn refresh(app: &mut App) {
     if let Some(pending) = &app.services.pending {
-        if let Some(services) = pending.poll() {
-            app.services.services = services;
-            app.services.refreshed = Some(Instant::now());
-            app.services.pending = None;
+        match pending.poll() {
+            crate::gui::app::background::Poll::Ready(services) => {
+                app.services.services = services;
+                app.services.refreshed = Some(Instant::now());
+                app.services.pending = None;
+            }
+            crate::gui::app::background::Poll::Failed => {
+                app.services.refreshed = Some(Instant::now());
+                app.services.pending = None;
+                app.notify("The services reader stopped unexpectedly", true);
+            }
+            crate::gui::app::background::Poll::Pending => {}
         }
     }
 
@@ -207,9 +215,14 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     let viewport = ui.available_rect_before_wrap();
 
     theme::quiet_column_rules(ui);
+    ui.set_clip_rect(viewport);
+    let body_height = widgets::table_body_height(ui, viewport.height());
     TableBuilder::new(ui)
         .resizable(true)
         .vscroll(true)
+        .min_scrolled_height(0.0)
+        .max_scroll_height(body_height)
+        .auto_shrink([true, false])
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .sense(Sense::click())
         .column(Column::remainder().at_least(220.0).clip(true))
@@ -301,7 +314,7 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         ServiceState::Running => theme.success,
                         ServiceState::Stopped => theme.text_muted,
                         ServiceState::Starting | ServiceState::Stopping => theme.warning,
-                        ServiceState::Other => theme.text_muted,
+                        ServiceState::Paused | ServiceState::Transitioning => theme.text_muted,
                     };
                     widgets::status_chip(ui, service.state.label(), color);
                 });
@@ -515,10 +528,18 @@ pub fn draw_startup(app: &mut App, ui: &mut Ui) {
 /// [`crate::gui::app::background`] and [`refresh`]'s matching comment.
 fn refresh_startup(app: &mut App) {
     if let Some(pending) = &app.startup.pending {
-        if let Some(entries) = pending.poll() {
-            app.startup.entries = entries;
-            app.startup.refreshed = Some(Instant::now());
-            app.startup.pending = None;
+        match pending.poll() {
+            crate::gui::app::background::Poll::Ready(entries) => {
+                app.startup.entries = entries;
+                app.startup.refreshed = Some(Instant::now());
+                app.startup.pending = None;
+            }
+            crate::gui::app::background::Poll::Failed => {
+                app.startup.refreshed = Some(Instant::now());
+                app.startup.pending = None;
+                app.notify("The startup reader stopped unexpectedly", true);
+            }
+            crate::gui::app::background::Poll::Pending => {}
         }
     }
 
@@ -577,9 +598,14 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     let viewport = ui.available_rect_before_wrap();
 
     theme::quiet_column_rules(ui);
+    ui.set_clip_rect(viewport);
+    let body_height = widgets::table_body_height(ui, viewport.height());
     TableBuilder::new(ui)
         .resizable(true)
         .vscroll(true)
+        .min_scrolled_height(0.0)
+        .max_scroll_height(body_height)
+        .auto_shrink([true, false])
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .sense(Sense::click())
         // Name is a stated width rather than the remainder. As the
@@ -695,7 +721,13 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                     .on_hover_text(&entry.command)
                     .context_menu(|ui| {
                         if ui.button("Open file location").clicked() {
-                            reveal = entry.executable();
+                            reveal = entry.executable().filter(|path| path.exists());
+                            if reveal.is_none() {
+                                app.notify(
+                                    "The startup command does not identify an existing file",
+                                    true,
+                                );
+                            }
                             ui.close();
                         }
                         if ui.button("Copy command").clicked() {

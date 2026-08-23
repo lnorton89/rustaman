@@ -147,12 +147,8 @@ pub fn parse(bytes: &[u8]) -> Vec<CoreTimes> {
         // `read_unaligned` imposes no alignment requirement, which
         // matters because the backing buffer is a `[u8]`. Every field is
         // a plain integer with no invalid bit pattern.
-        let entry = unsafe {
-            std::ptr::read_unaligned(
-                slice
-                    .as_ptr()
-                    .cast::<SystemProcessorPerformanceInformation>(),
-            )
+        let Some(entry) = read_cpu_entry(slice) else {
+            break;
         };
         cores.push(CoreTimes {
             idle: entry.IdleTime.max(0) as u64,
@@ -161,6 +157,20 @@ pub fn parse(bytes: &[u8]) -> Vec<CoreTimes> {
         });
     }
     cores
+}
+
+fn read_cpu_entry(bytes: &[u8]) -> Option<SystemProcessorPerformanceInformation> {
+    if bytes.len() < PROCESSOR_PERFORMANCE_SIZE {
+        return None;
+    }
+    // SAFETY: caller sliced exactly one kernel-written entry; unaligned read avoids byte-buffer alignment assumptions.
+    Some(unsafe {
+        std::ptr::read_unaligned(
+            bytes
+                .as_ptr()
+                .cast::<SystemProcessorPerformanceInformation>(),
+        )
+    })
 }
 
 /// The utilisation of every core between two samples.

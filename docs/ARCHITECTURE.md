@@ -6,20 +6,21 @@ Three layers, and the rule that separates them is the whole design:
   win/            Windows tells us things.      cfg(windows), unsafe, no state
   engine/         A thread asks, repeatedly.    cfg(windows), owns the sampling clock
   model/          What we make of the answers.  portable, pure, tested everywhere
-  gui/            What the user sees.           cfg(windows), draws, never queries
+  gui/            What the user sees.           cfg(windows), draws; dispatches user actions
 ```
 
 Data flows down that list and never back up. `win` does not know a window
 exists. `model` does not know Windows exists. `gui` does not know how a
 number was obtained, and — the part that matters most — **cannot obtain
-one itself**: the UI thread makes no system call, so a stalled disk or a
-process hanging in a kernel wait cannot stall the window. That is the
+one itself**: periodic monitoring never runs on the paint thread, so a
+stalled sampling read cannot stall the window. Explicit user actions may
+perform bounded calls synchronously. That is the
 single biggest difference from the Task Manager that ships with Windows,
 which queries on the thread that draws.
 
 The seam is a snapshot. `engine::Sampler` runs on its own thread, calls
-into `win`, builds an `engine::Snapshot`, and sends it down a **bounded,
-dropping** channel. The window takes the newest one that arrived and
+into `win`, builds a `model::Snapshot`, and sends it through a **bounded,
+single-slot, overwrite-oldest** mailbox. The window takes the newest one and
 draws it. If the UI is busy the sampler drops frames rather than
 queueing them, because a task manager showing a five-second-old backlog
 is worse than one showing the present.
@@ -62,7 +63,7 @@ Nothing here holds state between calls except a handle it owns.
 | `net.rs` | Adapter counters (`GetIfTable2`) and per-PID endpoints (`GetExtendedTcpTable`) |
 | `gpu.rs` | PDH GPU engine counters |
 | `services.rs` | The SCM: every Win32 service, its state, and its hosting PID |
-| `startup.rs` | The six registry and folder locations a program can register in |
+| `startup.rs` | Canonical Run/RunOnce registry views and both Startup folders |
 | `system.rs` | Uptime, logical processors, the machine's own description |
 | `windows.rs` | Top-level window enumeration, for telling an app from a background task |
 | `control.rs` | End, end tree, suspend, resume, set priority |

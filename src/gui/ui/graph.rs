@@ -311,15 +311,35 @@ pub fn core_grid(ui: &mut Ui, theme: &Palette, rect: Rect, cores: &[Series]) {
             // One axis, shared by every tile — see `Axis::Shared`.
             Axis::Shared,
         );
-        // A tile is an unlabelled square, and on a sixteen-or-more-core
-        // machine there is no other way to tell which one is core seven —
-        // Task Manager's own grid has the same tooltip for the same
-        // reason. Keyed on the core's index rather than a position within
-        // some larger id, since that index *is* the core's identity here.
+        // Each tile identifies itself and carries the current value. The
+        // graph still owns most of the pixels; these two short labels turn
+        // sixteen otherwise-anonymous shapes into actual logical processors.
+        if cell_rect.width() >= 46.0 && cell_rect.height() >= 24.0 {
+            let font = TextStyle::Small.resolve(ui.style());
+            ui.painter().text(
+                cell_rect.left_top() + Vec2::new(SPACE_XS, SPACE_XS),
+                Align2::LEFT_TOP,
+                format!("CPU {index}"),
+                font.clone(),
+                theme::rgb(theme.text_faint),
+            );
+            ui.painter().text(
+                cell_rect.right_top() + Vec2::new(-SPACE_XS, SPACE_XS),
+                Align2::RIGHT_TOP,
+                crate::format::percent(f64::from(series.latest())),
+                font,
+                theme::rgb(theme.text),
+            );
+        }
+        // Hover carries the window statistics that would be too dense to
+        // print on every tile at once.
         ui.interact(cell_rect, ui.id().with("core").with(index), Sense::hover())
             .on_hover_text(format!(
-                "Core {index} — {}",
-                crate::format::percent(f64::from(series.latest()))
+                "Logical processor {index}\nCurrent {}\nRecent average {}\nRecent peak {}\n{} samples",
+                crate::format::percent(f64::from(series.latest())),
+                crate::format::percent(f64::from(series.mean())),
+                crate::format::percent(f64::from(series.max())),
+                series.len(),
             ));
     }
 }

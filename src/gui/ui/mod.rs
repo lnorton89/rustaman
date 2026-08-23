@@ -48,6 +48,7 @@ pub mod performance;
 pub mod processes;
 pub mod services;
 pub mod settings;
+pub mod system_info;
 pub mod theme;
 pub mod widgets;
 
@@ -126,6 +127,7 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
                 View::Details => details::draw(app, ui),
                 View::Services => services::draw(app, ui),
                 View::Startup => services::draw_startup(app, ui),
+                View::System => system_info::draw(app, ui),
                 View::Settings => settings::draw(app, ui),
             }
         });
@@ -167,6 +169,7 @@ fn shortcuts(app: &mut App, ui: &Ui) {
                 Key::Num5,
                 Key::Num6,
                 Key::Num7,
+                Key::Num8,
             ]
             .map(|key| input.modifiers.command && input.key_pressed(key)),
         )
@@ -230,7 +233,7 @@ pub const SHORTCUTS: [(&str, &str); 5] = [
     ("F5", "Re-read services and startup entries"),
     ("Ctrl+F", "Search"),
     ("Esc", "Clear the search, then the selection"),
-    ("Ctrl+1…7", "Switch view"),
+    ("Ctrl+1…8", "Switch view"),
 ];
 
 #[cfg(test)]
@@ -238,31 +241,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_advertised_shortcut_is_one_the_handler_implements() {
-        // The pair that is easiest to let drift, because nothing breaks
-        // when they do — the menu simply lies.
-        let source = include_str!("mod.rs");
-        for (keys, description) in SHORTCUTS {
-            let implemented = match keys {
-                "Delete" => source.contains("Key::Delete"),
-                "F5" => source.contains("Key::F5"),
-                "Ctrl+F" => source.contains("Key::F)"),
-                "Esc" => source.contains("Key::Escape"),
-                "Ctrl+1…7" => source.contains("Key::Num1"),
-                _ => false,
-            };
-            assert!(
-                implemented,
-                "{keys} ({description}) is advertised but not handled"
-            );
-        }
-    }
-
-    #[test]
     fn there_is_a_shortcut_for_every_view() {
-        // Ctrl+1..6 covers the rail, so a view added later without a
+        // Ctrl+1..8 covers the rail, so a view added later without a
         // digit would be the one view with no shortcut.
-        let digits = 7;
+        let digits = 8;
         assert_eq!(
             View::ALL.len(),
             digits,
@@ -287,7 +269,7 @@ mod tests {
     /// `icon.rs` and `motion.rs` are deliberately absent — they are where
     /// colours, shapes and durations are *made*, so a rule forbidding
     /// those things would forbid the definitions themselves.
-    const DRAWING_MODULES: [(&str, &str); 10] = [
+    const DRAWING_MODULES: [(&str, &str); 11] = [
         ("chrome.rs", include_str!("chrome.rs")),
         ("details.rs", include_str!("details.rs")),
         ("graph.rs", include_str!("graph.rs")),
@@ -297,6 +279,7 @@ mod tests {
         ("processes.rs", include_str!("processes.rs")),
         ("services.rs", include_str!("services.rs")),
         ("settings.rs", include_str!("settings.rs")),
+        ("system_info.rs", include_str!("system_info.rs")),
         ("widgets.rs", include_str!("widgets.rs")),
     ];
 

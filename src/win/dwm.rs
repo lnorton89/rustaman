@@ -83,17 +83,15 @@ fn set_attribute(window: HWND, attribute: u32, value: u32) -> bool {
         return false;
     }
     let size = u32::try_from(std::mem::size_of::<u32>()).unwrap_or(4);
-    // SAFETY: `window` is a non-null window handle (checked above).
-    // `value` is a live local `u32` of exactly `size` bytes, which is
-    // what the length argument states; DWM reads it during the call and
-    // does not retain the pointer. An attribute the running build does
-    // not recognise is rejected with a failure status rather than being
-    // misinterpreted — which is the whole basis of the probing described
-    // in the module docs.
-    let status = unsafe {
-        DwmSetWindowAttribute(window, attribute, std::ptr::from_ref(&value).cast(), size)
-    };
+    let status = set_dwm_u32_attribute(window, attribute, &value, size);
     status == 0
+}
+
+/// Sets a DWM attribute from a caller-owned four-byte value.
+fn set_dwm_u32_attribute(window: HWND, attribute: u32, value: &u32, size: u32) -> i32 {
+    // SAFETY: `window` is non-null; `value` is live for exactly `size` bytes
+    // and DWM reads it synchronously without retaining the pointer.
+    unsafe { DwmSetWindowAttribute(window, attribute, std::ptr::from_ref(value).cast(), size) }
 }
 
 #[cfg(test)]

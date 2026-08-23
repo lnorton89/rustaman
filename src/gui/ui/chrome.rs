@@ -40,7 +40,7 @@ use super::theme::{
     self, NAV_WIDTH, PAD, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TITLE_BAR_HEIGHT,
 };
 use super::widgets;
-use crate::gui::app::{App, View, TOAST_SECONDS};
+use crate::gui::app::{App, SamplerHealth, View, TOAST_SECONDS};
 use crate::icon::Icon;
 use crate::theme::Palette;
 use egui::{Align, CornerRadius, Layout, Rect, ResizeDirection, Sense, Ui, Vec2, ViewportCommand};
@@ -52,6 +52,13 @@ use egui::{Align, CornerRadius, Layout, Rect, ResizeDirection, Sense, Ui, Vec2, 
 /// border is about four, and an undecorated window has none at all — so
 /// slightly more than the system's is the right answer, not less.
 const RESIZE_GRIP: f32 = 6.0;
+
+/// Corners need a larger target than straight edges.
+///
+/// Six-by-six made diagonal resizing technically present but practically
+/// unreachable at normal pointer speeds and high-DPI scaling. Windows' own
+/// non-client corner target is substantially larger for the same reason.
+const RESIZE_CORNER: f32 = 18.0;
 
 // Relations between constants, so checked when the crate is compiled.
 const _: () = {
@@ -65,6 +72,7 @@ const _: () = {
         "a grip this wide steals clicks from controls at the window edge \
          — a table's scrollbar is exactly there"
     );
+    assert!(RESIZE_CORNER > RESIZE_GRIP);
 };
 
 /// Draws the title bar and returns whether the window should close.
@@ -176,78 +184,119 @@ fn drag_region(ui: &mut Ui, app: &mut App) {
 /// window feel stuck.
 pub fn resize_handles(ui: &mut Ui) {
     let rect = ui.ctx().content_rect();
-    // Corners before edges: a corner is inside both edges' bands, and
-    // whichever is registered first wins the hit test. Diagonal resize is
-    // the one people aim for deliberately.
-    let handles = [
+    resize_handles_in(ui, rect);
+}
+
+fn resize_handles_in(ui: &mut Ui, rect: Rect) {
+    for (index, (area, direction, cursor)) in resize_regions(rect).into_iter().enumerate() {
+        let id = egui::Id::new("resize-handle").with(index);
+        // A foreground Area gives the native border its own interaction
+        // layer. Registering the rectangles on the root Ui looked correct but
+        // left them underneath panel widgets in egui's hit-test order, so a
+        // corner could be stolen by the title bar or the table beneath it.
+        egui::Area::new(id)
+            .order(egui::Order::Foreground)
+            .constrain(false)
+            .fixed_pos(area.min)
+            .show(ui.ctx(), |ui| {
+                let (_, response) = ui.allocate_exact_size(area.size(), Sense::click_and_drag());
+                // These eight rectangles are disjoint, so geometric hit
+                // testing is both unambiguous and more reliable than asking
+                // egui which widget owns the pointer. The latter can report a
+                // title-bar/table widget even when this foreground border is
+                // visibly under the pointer.
+                let contains_pointer = ui.input(|input| {
+                    input
+                        .pointer
+                        .interact_pos()
+                        .is_some_and(|pos| response.rect.contains(pos))
+                });
+                if contains_pointer {
+                    ui.ctx().set_cursor_icon(cursor);
+                }
+                // Hand the gesture to Windows on the press frame. Waiting for
+                // egui's drag threshold misses the button-down event that the
+                // native `drag_resize_window` call requires.
+                if contains_pointer && ui.input(|input| input.pointer.primary_pressed()) {
+                    ui.ctx()
+                        .send_viewport_cmd(ViewportCommand::BeginResize(direction));
+                }
+            });
+    }
+}
+
+/// The eight disjoint hit regions around an undecorated viewport.
+///
+/// Edge bands deliberately stop at the corner squares. Egui resolves
+/// overlapping interactions by layer/order, so registering a full-width
+/// horizontal edge over a corner lets that edge steal the pointer and turns
+/// an intended diagonal resize into a vertical one.
+fn resize_regions(rect: Rect) -> [(Rect, ResizeDirection, egui::CursorIcon); 8] {
+    let horizontal = (rect.width() - RESIZE_CORNER * 2.0).max(0.0);
+    let vertical = (rect.height() - RESIZE_CORNER * 2.0).max(0.0);
+    [
         (
-            Rect::from_min_size(rect.left_top(), Vec2::splat(RESIZE_GRIP)),
+            Rect::from_min_size(rect.left_top(), Vec2::splat(RESIZE_CORNER)),
             ResizeDirection::NorthWest,
             egui::CursorIcon::ResizeNwSe,
         ),
         (
             Rect::from_min_size(
-                rect.right_top() - Vec2::new(RESIZE_GRIP, 0.0),
-                Vec2::splat(RESIZE_GRIP),
+                rect.right_top() - Vec2::new(RESIZE_CORNER, 0.0),
+                Vec2::splat(RESIZE_CORNER),
             ),
             ResizeDirection::NorthEast,
             egui::CursorIcon::ResizeNeSw,
         ),
         (
             Rect::from_min_size(
-                rect.left_bottom() - Vec2::new(0.0, RESIZE_GRIP),
-                Vec2::splat(RESIZE_GRIP),
+                rect.left_bottom() - Vec2::new(0.0, RESIZE_CORNER),
+                Vec2::splat(RESIZE_CORNER),
             ),
             ResizeDirection::SouthWest,
             egui::CursorIcon::ResizeNeSw,
         ),
         (
             Rect::from_min_size(
-                rect.right_bottom() - Vec2::splat(RESIZE_GRIP),
-                Vec2::splat(RESIZE_GRIP),
+                rect.right_bottom() - Vec2::splat(RESIZE_CORNER),
+                Vec2::splat(RESIZE_CORNER),
             ),
             ResizeDirection::SouthEast,
             egui::CursorIcon::ResizeNwSe,
         ),
         (
-            Rect::from_min_size(rect.left_top(), Vec2::new(rect.width(), RESIZE_GRIP)),
+            Rect::from_min_size(
+                rect.left_top() + Vec2::new(RESIZE_CORNER, 0.0),
+                Vec2::new(horizontal, RESIZE_GRIP),
+            ),
             ResizeDirection::North,
             egui::CursorIcon::ResizeVertical,
         ),
         (
             Rect::from_min_size(
-                rect.left_bottom() - Vec2::new(0.0, RESIZE_GRIP),
-                Vec2::new(rect.width(), RESIZE_GRIP),
+                rect.left_bottom() + Vec2::new(RESIZE_CORNER, -RESIZE_GRIP),
+                Vec2::new(horizontal, RESIZE_GRIP),
             ),
             ResizeDirection::South,
             egui::CursorIcon::ResizeVertical,
         ),
         (
-            Rect::from_min_size(rect.left_top(), Vec2::new(RESIZE_GRIP, rect.height())),
+            Rect::from_min_size(
+                rect.left_top() + Vec2::new(0.0, RESIZE_CORNER),
+                Vec2::new(RESIZE_GRIP, vertical),
+            ),
             ResizeDirection::West,
             egui::CursorIcon::ResizeHorizontal,
         ),
         (
             Rect::from_min_size(
-                rect.right_top() - Vec2::new(RESIZE_GRIP, 0.0),
-                Vec2::new(RESIZE_GRIP, rect.height()),
+                rect.right_top() + Vec2::new(-RESIZE_GRIP, RESIZE_CORNER),
+                Vec2::new(RESIZE_GRIP, vertical),
             ),
             ResizeDirection::East,
             egui::CursorIcon::ResizeHorizontal,
         ),
-    ];
-
-    for (index, (area, direction, cursor)) in handles.into_iter().enumerate() {
-        let id = egui::Id::new("resize-handle").with(index);
-        let response = ui.interact(area, id, Sense::drag());
-        if response.hovered() || response.dragged() {
-            ui.ctx().set_cursor_icon(cursor);
-        }
-        if response.drag_started() {
-            ui.ctx()
-                .send_viewport_cmd(ViewportCommand::BeginResize(direction));
-        }
-    }
+    ]
 }
 
 /// Draws the navigation rail.
@@ -300,9 +349,9 @@ pub fn nav_rail(app: &mut App, ui: &mut Ui) {
                     let response =
                         widgets::chip(ui, "Limited access", theme.raised, theme.text_muted);
                     response.on_hover_text(
-                        "Some processes' owner, path and architecture cannot be \
-                         read without administrator rights. Everything else is \
-                         shown for every process.",
+                        "Some processes hide owner, path or architecture. \
+                         Administrator rights improve access, but protected \
+                         processes can still refuse it.",
                     );
                 }
             });
@@ -358,7 +407,25 @@ pub fn status_bar(app: &mut App, ui: &mut Ui) {
                     // window sits there with a frozen display looking
                     // perfectly live, which is the worst way for a
                     // monitoring tool to fail.
-                    if app.engine.is_running() {
+                    if app.sampler_health() == SamplerHealth::Stopped {
+                        ui.label(
+                            egui::RichText::new("Sampling has stopped")
+                                .color(theme::rgb(theme.danger))
+                                .text_style(egui::TextStyle::Small),
+                        );
+                    } else if app.sampler_health() == SamplerHealth::Stale {
+                        ui.label(
+                            egui::RichText::new("Sample is stale")
+                                .color(theme::rgb(theme.warning))
+                                .text_style(egui::TextStyle::Small),
+                        );
+                    } else if app.sampler_health() == SamplerHealth::Starting {
+                        ui.label(
+                            egui::RichText::new("Starting sampler…")
+                                .color(theme::rgb(theme.text_faint))
+                                .text_style(egui::TextStyle::Small),
+                        );
+                    } else {
                         ui.label(
                             egui::RichText::new(format!(
                                 "Updating every {}",
@@ -366,12 +433,6 @@ pub fn status_bar(app: &mut App, ui: &mut Ui) {
                             ))
                             .color(theme::rgb(theme.text_faint))
                             .text_style(egui::TextStyle::Small),
-                        );
-                    } else {
-                        ui.label(
-                            egui::RichText::new("Sampling has stopped")
-                                .color(theme::rgb(theme.danger))
-                                .text_style(egui::TextStyle::Small),
                         );
                     }
                 });
@@ -459,6 +520,124 @@ pub const SECTION_GAP: f32 = SPACE_LG;
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn every_resize_grip_has_one_unambiguous_direction() {
+        let window = Rect::from_min_size(egui::pos2(10.0, 20.0), Vec2::new(780.0, 620.0));
+        let regions = resize_regions(window);
+        let probes = [
+            (
+                window.left_top() + Vec2::splat(RESIZE_GRIP / 2.0),
+                ResizeDirection::NorthWest,
+            ),
+            (
+                window.right_top() + Vec2::new(-RESIZE_GRIP / 2.0, RESIZE_GRIP / 2.0),
+                ResizeDirection::NorthEast,
+            ),
+            (
+                window.left_bottom() + Vec2::new(RESIZE_GRIP / 2.0, -RESIZE_GRIP / 2.0),
+                ResizeDirection::SouthWest,
+            ),
+            (
+                window.right_bottom() - Vec2::splat(RESIZE_GRIP / 2.0),
+                ResizeDirection::SouthEast,
+            ),
+            (
+                egui::pos2(window.center().x, window.top() + 1.0),
+                ResizeDirection::North,
+            ),
+            (
+                egui::pos2(window.center().x, window.bottom() - 1.0),
+                ResizeDirection::South,
+            ),
+            (
+                egui::pos2(window.left() + 1.0, window.center().y),
+                ResizeDirection::West,
+            ),
+            (
+                egui::pos2(window.right() - 1.0, window.center().y),
+                ResizeDirection::East,
+            ),
+        ];
+
+        for (point, expected) in probes {
+            let hits: Vec<ResizeDirection> = regions
+                .iter()
+                .filter(|(region, _, _)| region.contains(point))
+                .map(|(_, direction, _)| *direction)
+                .collect();
+            assert_eq!(
+                hits,
+                vec![expected],
+                "{point:?} must hit exactly one region"
+            );
+        }
+    }
+
+    #[test]
+    fn diagonal_resize_targets_are_large_enough_to_hit() {
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(780.0, 620.0));
+        for (region, direction, _) in resize_regions(window).into_iter().take(4) {
+            assert!(matches!(
+                direction,
+                ResizeDirection::NorthWest
+                    | ResizeDirection::NorthEast
+                    | ResizeDirection::SouthWest
+                    | ResizeDirection::SouthEast
+            ));
+            assert_eq!(region.size(), Vec2::splat(RESIZE_CORNER));
+            assert!(
+                region.width() >= 16.0,
+                "{direction:?} is still only a precision-sized target"
+            );
+        }
+    }
+
+    #[test]
+    fn pressing_a_corner_immediately_requests_a_diagonal_native_resize() -> anyhow::Result<()> {
+        let ctx = egui::Context::default();
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(780.0, 620.0));
+        let run = |events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(window),
+                    events,
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| resize_handles_in(ui, window),
+            )
+        };
+
+        let start = window.right_bottom() - Vec2::splat(3.0);
+        // Areas participate in hit testing from the frame after their first
+        // layout, as they do in the live app after its first painted frame.
+        let mut warmup = run(Vec::new());
+        warmup.textures_delta.clear();
+        let mut output = run(vec![
+            egui::Event::PointerMoved(start),
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ]);
+        let commands = &output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .ok_or_else(|| anyhow::anyhow!("egui produced no root viewport output"))?
+            .commands;
+        let requested =
+            commands.contains(&ViewportCommand::BeginResize(ResizeDirection::SouthEast));
+        let commands = format!("{commands:?}");
+        output.textures_delta.clear();
+        assert!(
+            requested,
+            "corner press produced {commands} instead of a diagonal resize"
+        );
+        Ok(())
+    }
 
     #[test]
     fn interval_labels_read_the_way_a_person_would_say_them() {

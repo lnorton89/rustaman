@@ -316,11 +316,11 @@ mod tests {
 
     fn app_with(rows: Vec<ProcessRow>) -> App {
         let mut app = App::new(Config::default());
-        app.snapshot = Some(Snapshot {
+        app.snapshot = Some(std::sync::Arc::new(Snapshot {
             sequence: 1,
             processes: rows,
             ..Snapshot::default()
-        });
+        }));
         app
     }
 

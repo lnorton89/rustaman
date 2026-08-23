@@ -29,6 +29,7 @@
 use super::theme::{self, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS};
 use super::{chrome, graph, widgets};
 use crate::gui::app::{App, PerformanceFocus};
+use crate::model::history::Series;
 use crate::model::{Snapshot, SystemSample};
 use crate::theme::Palette;
 use egui::{Rect, Response, Sense, Ui, Vec2};
@@ -443,6 +444,22 @@ fn floor_for(focus: PerformanceFocus) -> f32 {
     }
 }
 
+/// The wall-clock span represented by the samples currently visible.
+///
+/// Histories can be only partly filled just after launch, so describing the
+/// configured capacity would overstate what the graph actually contains.
+fn history_window(series: &Series, interval: std::time::Duration) -> String {
+    let seconds = (series.len() as f64 * interval.as_secs_f64()).round() as u64;
+    crate::format::duration(seconds)
+}
+
+/// The sampler interval that produced the history currently on screen.
+fn sample_interval(app: &App) -> std::time::Duration {
+    app.snapshot
+        .as_ref()
+        .map_or_else(|| app.engine.interval(), |snapshot| snapshot.interval)
+}
+
 /// The selected resource, drawn large.
 ///
 /// Returns the drawn content's own bounding rect — not used by [`draw`],
@@ -502,7 +519,8 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     };
     let height = visuals * GRAPH_MINIMUM / (GRAPH_MINIMUM + grid_floor);
 
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+    let (rect, graph_response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
     graph::banded(
         ui,
         theme,
@@ -524,6 +542,13 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             unit: graph::Unit::Percent,
         },
     );
+    graph_response.on_hover_text(format!(
+        "CPU history\nCurrent {}\nRecent average {}\nRecent peak {}\nKernel now {}",
+        crate::format::percent(system.cpu.total_percent),
+        crate::format::percent(f64::from(app.performance.cpu.mean())),
+        crate::format::percent(f64::from(app.performance.cpu.max())),
+        crate::format::percent(system.cpu.kernel_percent),
+    ));
     ui.add_space(SPACE_SM);
 
     ui.horizontal(|ui| {
@@ -544,6 +569,41 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         );
     });
     ui.add_space(chrome::SECTION_GAP);
+
+    ui.horizontal_top(|ui| {
+        let width = stat_column_width(ui.available_width(), 4);
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Current load",
+            &crate::format::percent(system.cpu.total_percent),
+        );
+        stat_column(
+            ui,
+            theme,
+            width,
+            "User mode",
+            &crate::format::percent(
+                (system.cpu.total_percent - system.cpu.kernel_percent).max(0.0),
+            ),
+        );
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Recent average",
+            &crate::format::percent(f64::from(app.performance.cpu.mean())),
+        );
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Recent peak",
+            &crate::format::percent(f64::from(app.performance.cpu.max())),
+        );
+    });
+    ui.add_space(SPACE_MD);
 
     ui.horizontal_top(|ui| {
         let width = stat_column_width(ui.available_width(), 4);
@@ -583,8 +643,11 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             ui,
             theme,
             &format!(
-                "{} logical processors · {} cores · {} MHz",
-                system.cpu.logical_cores, system.cpu.physical_cores, system.cpu.megahertz
+                "{} logical processors · {} cores · {} MHz · {} history",
+                system.cpu.logical_cores,
+                system.cpu.physical_cores,
+                system.cpu.megahertz,
+                history_window(&app.performance.cpu, sample_interval(app)),
             ),
         );
         // Measured here rather than at the end of the panel: the grid
@@ -628,7 +691,7 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         ),
     );
 
-    let (rect, _) = ui.allocate_exact_size(
+    let (rect, graph_response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), graph_height(ui, MEMORY)),
         Sense::hover(),
     );
@@ -643,6 +706,12 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             unit: graph::Unit::Percent,
         },
     );
+    graph_response.on_hover_text(format!(
+        "Memory load history\nCurrent {}\nRecent average {}\nRecent peak {}",
+        crate::format::percent(system.memory.used_percent()),
+        crate::format::percent(f64::from(app.performance.memory.mean())),
+        crate::format::percent(f64::from(app.performance.memory.max())),
+    ));
     ui.add_space(SPACE_MD);
 
     widgets::meter(
@@ -688,6 +757,41 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             &crate::format::bytes(system.memory.cached),
         );
     });
+    ui.add_space(SPACE_MD);
+    ui.horizontal_top(|ui| {
+        let width = stat_column_width(ui.available_width(), 4);
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Physical load",
+            &crate::format::percent(system.memory.used_percent()),
+        );
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Commit load",
+            &crate::format::percent(crate::model::percent_of(
+                system.memory.committed,
+                system.memory.commit_limit,
+            )),
+        );
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Recent average",
+            &crate::format::percent(f64::from(app.performance.memory.mean())),
+        );
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Recent peak",
+            &crate::format::percent(f64::from(app.performance.memory.max())),
+        );
+    });
     ui.add_space(chrome::SECTION_GAP);
 
     widgets::section(ui, theme, "Kernel memory");
@@ -717,7 +821,7 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
 fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     widgets::section(ui, theme, "Disk");
 
-    let (rect, _) = ui.allocate_exact_size(
+    let (rect, graph_response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), graph_height(ui, DISK)),
         Sense::hover(),
     );
@@ -750,6 +854,12 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             },
         ],
     );
+    graph_response.on_hover_text(format!(
+        "Disk throughput history\nCurrent {}\nRecent average {}\nRecent peak {}",
+        crate::format::rate(app.performance.disk.latest().into()),
+        crate::format::rate(app.performance.disk.mean().into()),
+        crate::format::rate(app.performance.disk.max().into()),
+    ));
     // The same gap the CPU panel leaves between a graph and its legend.
     ui.add_space(SPACE_SM);
 
@@ -771,6 +881,44 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             theme.series(4, 5),
             "Write",
             &crate::format::rate(write),
+        );
+    });
+    ui.add_space(chrome::SECTION_GAP);
+
+    let busiest = system
+        .disks
+        .iter()
+        .map(|disk| disk.active_percent)
+        .fold(0.0f64, f64::max);
+    ui.horizontal_top(|ui| {
+        let width = stat_column_width(ui.available_width(), 4);
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Current",
+            &crate::format::rate(read + write),
+        );
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Recent average",
+            &crate::format::rate(app.performance.disk.mean().into()),
+        );
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Recent peak",
+            &crate::format::rate(app.performance.disk.max().into()),
+        );
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Busiest disk",
+            &crate::format::percent(busiest),
         );
     });
     ui.add_space(chrome::SECTION_GAP);
@@ -832,7 +980,7 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             );
             ui.add_space(SPACE_SM);
             ui.horizontal_top(|ui| {
-                let width = stat_column_width(ui.available_width(), 3);
+                let width = stat_column_width(ui.available_width(), 2);
                 stat_column(
                     ui,
                     theme,
@@ -847,20 +995,28 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
                     "Write",
                     &crate::format::rate(disk.write_rate),
                 );
-                stat_column(
-                    ui,
-                    theme,
-                    width,
-                    "Free",
-                    &format!(
-                        "{} / {}",
-                        crate::format::bytes(disk.free),
-                        crate::format::bytes(disk.capacity)
-                    ),
-                );
             });
         });
     });
+    if !system.volumes.is_empty() {
+        ui.add_space(SPACE_MD);
+        ui.horizontal_wrapped(|ui| {
+            for volume in &system.volumes {
+                let used = volume.capacity.saturating_sub(volume.free);
+                widgets::chip(
+                    ui,
+                    &format!(
+                        "{}  {} used · {} free",
+                        volume.letter,
+                        crate::format::bytes(used),
+                        crate::format::bytes(volume.free)
+                    ),
+                    theme.raised,
+                    theme.text_muted,
+                );
+            }
+        });
+    }
     record_below(ui, DISK, rect.bottom());
 }
 
@@ -870,8 +1026,9 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
 /// ## Why this is a list and the disk panel is a grid
 ///
 /// A card is the right container for an item with rich, varied content —
-/// a disk has a name, an active-time meter, a read rate, a write rate
-/// and a capacity pair, and five things want a box. An adapter has a
+/// a disk has a name, an active-time meter, and directional rates.
+/// Volume capacity is a separate list because it is not attributable to
+/// physical disks. An adapter has a
 /// name and two rates, and every adapter has exactly the same fields, so
 /// a card per adapter is a box drawn around one line of text. A machine
 /// with twenty adapters got twenty of those, and the two that mattered
@@ -950,7 +1107,7 @@ fn network_graph(
     );
     widgets::section(ui, theme, &heading);
 
-    let (rect, _) = ui.allocate_exact_size(
+    let (rect, graph_response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), graph_height(ui, NETWORK)),
         Sense::hover(),
     );
@@ -990,6 +1147,12 @@ fn network_graph(
             ],
         ),
     }
+    graph_response.on_hover_text(format!(
+        "Network throughput history\nCurrent {}\nRecent average {}\nRecent peak {}",
+        crate::format::rate(series.latest().into()),
+        crate::format::rate(series.mean().into()),
+        crate::format::rate(series.max().into()),
+    ));
     // The same gap the CPU panel leaves between its graph and its
     // legend, because this is the same pairing.
     ui.add_space(SPACE_SM);
@@ -1046,6 +1209,13 @@ fn network_graph(
         let width = stat_column_width(ui.available_width(), 4);
         stat_column(ui, theme, width, "Receive", &crate::format::rate(receive));
         stat_column(ui, theme, width, "Send", &crate::format::rate(send));
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Average",
+            &crate::format::rate(f64::from(series.mean())),
+        );
         // The peak over the window the graph draws, which is the context
         // that makes the current number mean something: 1.3 MB/s is
         // either busy or idle depending on what this link has been doing
@@ -1058,17 +1228,48 @@ fn network_graph(
             "Peak",
             &crate::format::rate(f64::from(series.max())),
         );
+    });
+    ui.add_space(SPACE_MD);
+    ui.horizontal_top(|ui| {
+        let width = stat_column_width(ui.available_width(), 4);
         stat_column(
             ui,
             theme,
             width,
-            "Total in / out",
-            &format!(
-                "{} / {}",
-                crate::format::bytes(in_total),
-                crate::format::bytes(out_total)
-            ),
+            "Total received",
+            &crate::format::bytes(in_total),
         );
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Total sent",
+            &crate::format::bytes(out_total),
+        );
+        if let Some(adapter) = focused {
+            stat_column(
+                ui,
+                theme,
+                width,
+                "Link speed",
+                &crate::format::link_speed(adapter.link_speed),
+            );
+            stat_column(ui, theme, width, "State", adapter.state.label());
+        } else {
+            let connected = system
+                .adapters
+                .iter()
+                .filter(|adapter| adapter.state.is_online())
+                .count();
+            stat_column(ui, theme, width, "Connected", &connected.to_string());
+            stat_column(
+                ui,
+                theme,
+                width,
+                "Adapters",
+                &system.adapters.len().to_string(),
+            );
+        }
     });
     // Handed back so `network` can measure the list it draws below it
     // against the graph's own extent.
@@ -1435,7 +1636,7 @@ fn sort_busiest_first<T>(items: &mut [T], rate: impl Fn(&T) -> f64, name: impl F
 fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     widgets::section(ui, theme, "GPU");
 
-    let (rect, _) = ui.allocate_exact_size(
+    let (rect, graph_response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), graph_height(ui, GPU)),
         Sense::hover(),
     );
@@ -1450,6 +1651,12 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             unit: graph::Unit::Percent,
         },
     );
+    graph_response.on_hover_text(format!(
+        "GPU utilisation history\nCurrent {}\nRecent average {}\nRecent peak {}",
+        crate::format::percent(f64::from(app.performance.gpu.latest())),
+        crate::format::percent(f64::from(app.performance.gpu.mean())),
+        crate::format::percent(f64::from(app.performance.gpu.max())),
+    ));
     ui.add_space(SPACE_MD);
 
     if system.gpus.is_empty() {
@@ -1461,6 +1668,39 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         record_below(ui, GPU, rect.bottom());
         return;
     }
+    let dedicated: u64 = system.gpus.iter().map(|gpu| gpu.memory_used).sum();
+    ui.horizontal_top(|ui| {
+        let width = stat_column_width(ui.available_width(), 4);
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Current",
+            &crate::format::percent(f64::from(app.performance.gpu.latest())),
+        );
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Recent average",
+            &crate::format::percent(f64::from(app.performance.gpu.mean())),
+        );
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Recent peak",
+            &crate::format::percent(f64::from(app.performance.gpu.max())),
+        );
+        stat_column(
+            ui,
+            theme,
+            width,
+            "Dedicated in use",
+            &crate::format::bytes(dedicated),
+        );
+    });
+    ui.add_space(chrome::SECTION_GAP);
     // Busiest first, same reasoning as the disk grid above: on a hybrid-
     // graphics laptop the integrated adapter usually sits idle and the
     // discrete one is doing the work, and the panel should lead with
@@ -1584,6 +1824,18 @@ fn stat_column(ui: &mut Ui, theme: &Palette, width: f32, caption: &str, value: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_window_describes_only_samples_that_exist() {
+        let mut series = Series::new(240);
+        for value in [1.0, 2.0, 3.0, 4.0] {
+            series.push(value);
+        }
+        assert_eq!(
+            history_window(&series, std::time::Duration::from_millis(500)),
+            "0:00:02"
+        );
+    }
 
     #[test]
     fn a_full_width_rect_inside_detail_stays_off_the_window_edge() -> anyhow::Result<()> {
@@ -1926,12 +2178,10 @@ mod tests {
                 disks: vec![
                     crate::model::DiskSample {
                         name: "C:".to_string(),
-                        capacity: 1,
                         ..Default::default()
                     },
                     crate::model::DiskSample {
                         name: "D:".to_string(),
-                        capacity: 1,
                         ..Default::default()
                     },
                 ],

@@ -77,16 +77,7 @@ pub fn titles_by_pid() -> HashMap<u32, String> {
 /// cannot outlive the borrow.
 fn collect(found: &mut HashMap<u32, String>) {
     let parameter = std::ptr::from_mut(found) as LPARAM;
-    // SAFETY: `visit` is a valid `extern "system"` callback of the shape
-    // `EnumWindows` requires. `parameter` is a pointer to `found`, which
-    // is uniquely borrowed for this call and outlives it; `EnumWindows`
-    // is synchronous, calls the callback only from this thread, and
-    // retains neither the pointer nor the callback after it returns. So
-    // the pointer is live and exclusively owned for every callback
-    // invocation.
-    unsafe {
-        let _ = EnumWindows(Some(visit), parameter);
-    }
+    enumerate_windows(parameter);
 }
 
 /// The `EnumWindows` callback.
@@ -94,13 +85,15 @@ fn collect(found: &mut HashMap<u32, String>) {
 /// `extern "system"` because that is the calling convention Win32
 /// expects; a mismatch here corrupts the stack rather than failing to
 /// compile.
+// SAFETY: Win32 enters this callback only through `enumerate_windows`, which
+// provides the `LPARAM` contract re-established by `callback_result_map`.
 unsafe extern "system" fn visit(window: HWND, parameter: LPARAM) -> BOOL {
-    // SAFETY: `parameter` is the pointer `collect` passed, which points
-    // at a live `HashMap` uniquely borrowed for the duration of the
-    // enclosing `EnumWindows` call. `EnumWindows` invokes this callback
-    // synchronously on the calling thread, so no other reference to the
-    // map exists while this one is held.
-    let Some(found) = (unsafe { (parameter as *mut HashMap<u32, String>).as_mut() }) else {
+    visit_window(window, parameter)
+}
+
+/// Processes one callback invocation using the stack-owned result map.
+fn visit_window(window: HWND, parameter: LPARAM) -> BOOL {
+    let Some(found) = callback_result_map(parameter) else {
         // A null parameter cannot happen from `collect`, but returning
         // rather than dereferencing keeps the callback total.
         return TRUE;
@@ -123,17 +116,12 @@ unsafe extern "system" fn visit(window: HWND, parameter: LPARAM) -> BOOL {
 
 /// Whether a window is visible.
 fn is_visible(window: HWND) -> bool {
-    // SAFETY: `window` is a handle Win32 just passed to the callback, so
-    // it is valid for the duration of the callback. The call takes it by
-    // value and retains nothing.
-    unsafe { IsWindowVisible(window) != 0 }
+    window_is_visible(window)
 }
 
 /// A window's title, or `None` if it has none.
 fn window_title(window: HWND) -> Option<String> {
-    // SAFETY: `window` is valid for the callback's duration; the call
-    // takes it by value.
-    let length = unsafe { GetWindowTextLengthW(window) };
+    let length = window_text_length(window);
     if length <= 0 {
         return None;
     }
@@ -144,11 +132,7 @@ fn window_title(window: HWND) -> Option<String> {
     let capacity = usize::try_from(length).unwrap_or(0).min(MAX_TITLE) + 1;
     let mut buffer = vec![0u16; capacity];
     let size = i32::try_from(buffer.len()).unwrap_or(0);
-    // SAFETY: `window` is valid. `buffer` is a live, uniquely-borrowed
-    // allocation of at least `size` u16s — `size` is derived from
-    // `buffer.len()`. The call writes at most that many units including
-    // the terminator, and retains nothing.
-    let written = unsafe { GetWindowTextW(window, buffer.as_mut_ptr(), size) };
+    let written = copy_window_text(window, &mut buffer, size);
     if written <= 0 {
         return None;
     }
@@ -162,14 +146,50 @@ fn window_title(window: HWND) -> Option<String> {
 /// The process that owns a window.
 fn owning_pid(window: HWND) -> Option<u32> {
     let mut pid = 0u32;
-    // SAFETY: `window` is valid for the callback's duration. `pid` is a
-    // live, uniquely-borrowed out-parameter the callee writes once. The
-    // return value is the thread id, which is not needed.
-    let thread = unsafe { GetWindowThreadProcessId(window, std::ptr::from_mut(&mut pid)) };
+    let thread = window_process_id(window, &mut pid);
     // A zero thread id means the window handle was invalid — which can
     // happen if the window was destroyed between being enumerated and
     // being queried.
     (thread != 0 && pid != 0).then_some(pid)
+}
+
+/// Invokes synchronous top-level window enumeration for one stack-owned map.
+fn enumerate_windows(parameter: LPARAM) {
+    // SAFETY: `visit` has the exact callback ABI. `parameter` points at the
+    // uniquely-borrowed map in `collect`; EnumWindows is synchronous and retains neither.
+    let _ = unsafe { EnumWindows(Some(visit), parameter) };
+}
+
+/// Reconstitutes the result map encoded by [`collect`] for this synchronous callback.
+fn callback_result_map<'a>(parameter: LPARAM) -> Option<&'a mut HashMap<u32, String>> {
+    // SAFETY: only `collect` registers `visit`, and it passes its live,
+    // uniquely-borrowed map as `LPARAM`; EnumWindows invokes synchronously.
+    unsafe { (parameter as *mut HashMap<u32, String>).as_mut() }
+}
+
+/// Checks visibility of a window handle supplied by the active enumeration.
+fn window_is_visible(window: HWND) -> bool {
+    // SAFETY: Win32 supplied this opaque handle to the current callback; the call retains nothing.
+    unsafe { IsWindowVisible(window) != 0 }
+}
+
+/// Reads the current UTF-16 title length for a callback window.
+fn window_text_length(window: HWND) -> i32 {
+    // SAFETY: Win32 supplied this opaque handle to the current callback; the call retains nothing.
+    unsafe { GetWindowTextLengthW(window) }
+}
+
+/// Copies a callback window's UTF-16 title into a caller-owned buffer.
+fn copy_window_text(window: HWND, buffer: &mut [u16], size: i32) -> i32 {
+    // SAFETY: `buffer` is writable for `size` UTF-16 units, which is derived
+    // from its length; Win32 retains neither pointer nor the window handle.
+    unsafe { GetWindowTextW(window, buffer.as_mut_ptr(), size) }
+}
+
+/// Writes a callback window's owning process ID to caller-owned storage.
+fn window_process_id(window: HWND, pid: &mut u32) -> u32 {
+    // SAFETY: `pid` is a live writable out-parameter; Win32 retains neither it nor `window`.
+    unsafe { GetWindowThreadProcessId(window, pid) }
 }
 
 #[cfg(test)]

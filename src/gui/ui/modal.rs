@@ -83,10 +83,11 @@ impl Confirmation {
                 // collapsed, which is why the user reached for this, and
                 // they cannot see how large it is.
                 body: format!(
-                    "{count} processes will be ended, children first. \
-                     Unsaved work in any of them will be lost."
+                    "Rustaman will try to end the {count} processes in the \
+                     current snapshot, children first. New descendants may \
+                     escape. Unsaved work in any ended process will be lost."
                 ),
-                confirm: "End tree".to_string(),
+                confirm: "End snapshot tree".to_string(),
                 destructive: true,
             },
             Pending::Realtime(_, name) => Self {

@@ -61,17 +61,7 @@ pub fn enable() -> bool {
 /// Opens this process's own access token for adjusting privileges.
 fn open_own_token() -> Option<OwnedHandle> {
     let mut raw = std::ptr::null_mut();
-    // SAFETY: `GetCurrentProcess` returns a pseudo-handle that is always
-    // valid and must not be closed — it is passed straight through and
-    // never wrapped in `OwnedHandle`. `raw` is a live, uniquely-borrowed
-    // pointer the callee writes a real handle into on success.
-    let ok = unsafe {
-        OpenProcessToken(
-            GetCurrentProcess(),
-            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
-            std::ptr::from_mut(&mut raw),
-        )
-    };
+    let ok = open_current_process_token(&mut raw);
     if ok == 0 {
         return None;
     }
@@ -90,18 +80,7 @@ fn lookup_privilege(name: &str) -> Option<LUID> {
         LowPart: 0,
         HighPart: 0,
     };
-    // SAFETY: `wide` is a live, NUL-terminated UTF-16 buffer that
-    // outlives the call — it is bound to a local above rather than being
-    // a temporary. The first argument being null asks for the local
-    // system, which is what a privilege on this process means. `luid` is
-    // a live, uniquely-borrowed out-parameter.
-    let ok = unsafe {
-        LookupPrivilegeValueW(
-            std::ptr::null(),
-            wide.as_ptr(),
-            std::ptr::from_mut(&mut luid),
-        )
-    };
+    let ok = lookup_local_privilege(&wide, &mut luid);
     (ok != 0).then_some(luid)
 }
 
@@ -121,22 +100,7 @@ fn adjust(token: &OwnedHandle, luid: LUID) -> bool {
             Attributes: SE_PRIVILEGE_ENABLED,
         }],
     };
-    // SAFETY: `token` is a live token handle opened with
-    // TOKEN_ADJUST_PRIVILEGES above. `privileges` is a live, correctly
-    // sized `TOKEN_PRIVILEGES` with `PrivilegeCount` matching its one
-    // populated entry. The three null/zero arguments decline the
-    // previous-state out-parameters, which the call documents as
-    // permitted. Nothing is retained past the call.
-    let ok = unsafe {
-        AdjustTokenPrivileges(
-            token.raw(),
-            0,
-            &privileges,
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
+    let ok = adjust_one_privilege(token.raw(), &privileges);
     if ok == 0 {
         return false;
     }
@@ -150,11 +114,51 @@ const ERROR_NOT_ALL_ASSIGNED: u32 = 1300;
 
 /// `GetLastError`, wrapped.
 fn last_error() -> u32 {
-    // SAFETY: `GetLastError` takes no arguments, reads thread-local
-    // state, and cannot fail. It must be called before anything else
-    // that could overwrite the thread's last-error value, which is why
-    // the only caller invokes it immediately after the call it is
-    // interpreting.
+    read_last_error()
+}
+
+/// Opens the current process's real token handle into caller-owned storage.
+fn open_current_process_token(raw: &mut windows_sys::Win32::Foundation::HANDLE) -> i32 {
+    // SAFETY: the pseudo-handle is valid by definition; `raw` is a live
+    // writable out-parameter and the API retains neither handle nor pointer.
+    unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            raw,
+        )
+    }
+}
+
+/// Resolves a NUL-terminated privilege name against the local system.
+fn lookup_local_privilege(name: &[u16], luid: &mut LUID) -> i32 {
+    // SAFETY: `name` is live and NUL-terminated; `luid` is a live writable
+    // out-parameter and the null system pointer requests the local machine.
+    unsafe { LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), luid) }
+}
+
+/// Enables the one populated privilege entry on a live token.
+fn adjust_one_privilege(
+    token: windows_sys::Win32::Foundation::HANDLE,
+    privileges: &TOKEN_PRIVILEGES,
+) -> i32 {
+    // SAFETY: token is live; `privileges` contains its declared single entry.
+    // Null previous-state pointers are documented when the old value is not needed.
+    unsafe {
+        AdjustTokenPrivileges(
+            token,
+            0,
+            privileges,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    }
+}
+
+/// Reads the caller thread's last Win32 error without changing it.
+fn read_last_error() -> u32 {
+    // SAFETY: this parameterless call returns thread-local state by value.
     unsafe { windows_sys::Win32::Foundation::GetLastError() }
 }
 

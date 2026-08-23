@@ -48,11 +48,8 @@
 //! choice the user makes by running it as administrator, not one this
 //! binary makes for them.
 //!
-//! ## Failure is a warning, not an error
-//!
-//! A missing resource compiler should cost the icon, not the build.
-//! Anyone who needs it sees the warning, and CI builds the release
-//! binaries on a runner that has one.
+//! Release builds fail if resources cannot be embedded; a distributable
+//! binary without its manifest or Explorer icon is not a valid release.
 
 fn main() {
     // Re-run only when the inputs change, rather than on every source
@@ -91,8 +88,10 @@ fn embed_resources() {
     resource.set("LegalCopyright", "MIT licensed");
 
     if let Err(error) = resource.compile() {
-        // See the module docs: a missing resource compiler costs the
-        // icon, not the build.
-        println!("cargo:warning=could not embed the Windows resources: {error}");
+        if std::env::var("PROFILE").ok().as_deref() == Some("release") {
+            eprintln!("could not embed required Windows release resources: {error}");
+            std::process::exit(1);
+        }
+        println!("cargo:warning=could not embed Windows resources: {error}");
     }
 }

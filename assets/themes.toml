@@ -158,6 +158,28 @@ warning = "#ffb347"
 success = "#4fd67f"
 rainbow_span = 270
 
+# A full-spectrum theme with ultraviolet chrome and a hot-pink accent.
+# Its 330-degree series band reaches every colour family without making
+# the first and last chart series the same hue, as a closed 360-degree
+# circle would.
+[[theme]]
+id = "rainbow"
+name = "Rainbow"
+mode = "dark"
+app = "#090817"
+panel = "#11102a"
+raised = "#1b193b"
+hover = "#282653"
+border = "#403c69"
+accent = "#ff7ad9"
+text = "#f5f1ff"
+text_muted = "#aaa9c9"
+danger = "#ff6f91"
+warning = "#ffd166"
+success = "#63e6a5"
+info = "#69d8ff"
+rainbow_span = 330
+
 # -------------------------------------------------------------- light
 
 # The light default. Cool white, blue accent, and a band dark enough to

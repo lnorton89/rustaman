@@ -45,9 +45,10 @@
 
 use super::handle::{OwnedHandle, OwnedLocalMemory};
 use super::strings;
-use crate::model::{Architecture, ProcessKey};
+use crate::model::{Architecture, ProcessIcon, ProcessKey};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use windows_sys::Win32::Foundation::MAX_PATH;
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{
@@ -78,6 +79,8 @@ pub struct Identity {
     pub elevated: bool,
     /// Image bitness.
     pub architecture: Architecture,
+    /// Explorer's small executable icon.
+    pub icon: Option<Arc<ProcessIcon>>,
 }
 
 /// Resolved identities, keyed so a recycled PID cannot inherit one.
@@ -99,7 +102,33 @@ pub struct Cache {
     /// and eighteen `chrome.exe` processes share one. Keyed by path
     /// rather than by process, so a browser's twentieth renderer costs
     /// nothing.
-    descriptions: HashMap<PathBuf, String>,
+    descriptions: HashMap<FileKey, String>,
+    /// Shell icons shared by every process using an image path.
+    icons: HashMap<FileKey, Arc<ProcessIcon>>,
+}
+
+/// A path plus metadata that changes when an updater replaces the file.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct FileKey {
+    path: PathBuf,
+    bytes: u64,
+    modified_nanos: u128,
+}
+
+impl FileKey {
+    fn read(path: &Path) -> Self {
+        let metadata = std::fs::metadata(path).ok();
+        let bytes = metadata.as_ref().map_or(0, std::fs::Metadata::len);
+        let modified_nanos = metadata
+            .and_then(|value| value.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_nanos());
+        Self {
+            path: path.to_path_buf(),
+            bytes,
+            modified_nanos,
+        }
+    }
 }
 
 impl Cache {
@@ -117,19 +146,36 @@ impl Cache {
         let mut identity = resolve(key.pid);
         if let Some(path) = identity.path.clone() {
             identity.description = self.description_for(&path);
+            identity.icon = self.icon_for(&path);
         }
         self.entries.insert(key, identity.clone());
         identity
     }
 
+    fn icon_for(&mut self, path: &Path) -> Option<Arc<ProcessIcon>> {
+        let key = FileKey::read(path);
+        if let Some(cached) = self.icons.get(&key) {
+            return Some(Arc::clone(cached));
+        }
+        let icon = Arc::new(super::app_icon::extract(path)?);
+        if self.icons.len() >= 4096 {
+            self.icons.clear();
+        }
+        self.icons.insert(key, Arc::clone(&icon));
+        Some(icon)
+    }
+
     /// The `FileDescription` for an image path, cached across processes.
     fn description_for(&mut self, path: &Path) -> String {
-        if let Some(cached) = self.descriptions.get(path) {
+        let key = FileKey::read(path);
+        if let Some(cached) = self.descriptions.get(&key) {
             return cached.clone();
         }
         let description = file_description(path).unwrap_or_default();
-        self.descriptions
-            .insert(path.to_path_buf(), description.clone());
+        if self.descriptions.len() >= 4096 {
+            self.descriptions.clear();
+        }
+        self.descriptions.insert(key, description.clone());
         description
     }
 
@@ -141,12 +187,10 @@ impl Cache {
     /// thousands. Called by the sampler with the keys in the current
     /// snapshot.
     ///
-    /// The description cache is deliberately **not** pruned. It is keyed
-    /// by path, bounded by the number of distinct executables the machine
-    /// has run, and re-reading a version resource is the expensive thing
-    /// this whole module exists to avoid — a compiler that runs a
-    /// thousand times should pay for its description once, not a thousand
-    /// times.
+    /// The description and icon caches are keyed by path plus file
+    /// metadata, so replacing an executable cannot retain its old label or
+    /// art. They use a hard cap rather than live-process pruning: a compiler
+    /// that runs a thousand times should still pay for its metadata once.
     pub fn retain_live(&mut self, live: &std::collections::HashSet<ProcessKey>) {
         self.entries.retain(|key, _| live.contains(key));
     }
@@ -181,6 +225,7 @@ pub fn resolve(pid: u32) -> Identity {
         user: token_user(&process).unwrap_or_default(),
         elevated: token_elevated(&process).unwrap_or(false),
         architecture: architecture(&process),
+        icon: None,
     }
 }
 
@@ -191,11 +236,7 @@ pub fn resolve(pid: u32) -> Identity {
 /// query here and is granted in cases the full right is not, so asking
 /// for more would lose identity for processes this can otherwise read.
 fn open(pid: u32) -> Option<OwnedHandle> {
-    // SAFETY: no pointers are involved — the call takes an access mask, a
-    // BOOL, and a PID by value, and returns a handle or null. The
-    // returned handle is immediately given to `OwnedHandle`, which
-    // rejects null and closes it on drop.
-    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    let raw = open_query_process(pid);
     OwnedHandle::new(raw)
 }
 
@@ -207,20 +248,7 @@ fn image_path(process: &OwnedHandle) -> Option<PathBuf> {
     // not worth a retry loop.
     let mut buffer = vec![0u16; 32 * 1024];
     let mut length = u32::try_from(buffer.len()).unwrap_or(MAX_PATH);
-    // SAFETY: `process` is a live handle opened with
-    // PROCESS_QUERY_LIMITED_INFORMATION, which this call requires.
-    // `buffer` is a live, uniquely-borrowed allocation of at least
-    // `length` u16s — `length` is derived from `buffer.len()`. `length`
-    // is also a live out-parameter the callee overwrites with the
-    // characters written. Nothing is retained.
-    let ok = unsafe {
-        QueryFullProcessImageNameW(
-            process.raw(),
-            windows_sys::Win32::System::Threading::PROCESS_NAME_WIN32,
-            buffer.as_mut_ptr(),
-            std::ptr::from_mut(&mut length),
-        )
-    };
+    let ok = read_process_image_path(process.raw(), &mut buffer, &mut length);
     if ok == 0 {
         return None;
     }
@@ -238,61 +266,33 @@ fn token_user(process: &OwnedHandle) -> Option<String> {
     let buffer = token_information(&token, TokenUser)?;
     // The buffer starts with a `TOKEN_USER`, whose first field points at
     // a SID stored later in the same buffer.
-    if buffer.len() < std::mem::size_of::<TOKEN_USER>() {
-        return None;
-    }
-    // SAFETY: the buffer is at least `size_of::<TOKEN_USER>()` bytes
-    // (checked above) and was filled by `GetTokenInformation` for the
-    // `TokenUser` class, which documents that layout. `read_unaligned`
-    // imposes no alignment requirement, which matters because the buffer
-    // is a `Vec<u8>`. The `TOKEN_USER` is copied out, but its `Sid`
-    // pointer still points into `buffer`, which is alive for the rest of
-    // this function — that is why the SID is consumed below rather than
-    // returned.
-    let user = unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<TOKEN_USER>()) };
+    let user = read_token_user(&buffer)?;
     if user.User.Sid.is_null() {
         return None;
     }
-    // SAFETY: `user.User.Sid` points into `buffer`, which is still alive
-    // here, and was written by the kernel as a valid SID.
-    let name = unsafe { account_name(user.User.Sid) };
+    let name = account_name(user.User.Sid);
     // Keep `buffer` alive across the call above; dropping it earlier
     // would dangle the SID pointer.
     drop(buffer);
     name
 }
 
-/// Turns a SID into `DOMAIN\user`, falling back to its string form.
-///
-/// # Safety
-///
-/// `sid` must point at a valid SID that stays alive for this call.
-unsafe fn account_name(sid: *mut core::ffi::c_void) -> Option<String> {
-    use windows_sys::Win32::Security::LookupAccountSidW;
-
+/// Turns the live `TOKEN_USER` SID into `DOMAIN\user`, falling back to text.
+fn account_name(sid: *mut core::ffi::c_void) -> Option<String> {
     let mut name = vec![0u16; 256];
     let mut domain = vec![0u16; 256];
     let mut name_length = u32::try_from(name.len()).unwrap_or(0);
     let mut domain_length = u32::try_from(domain.len()).unwrap_or(0);
     let mut kind = 0i32;
 
-    // SAFETY: the caller guarantees `sid` is a valid, live SID. `name`
-    // and `domain` are live, uniquely-borrowed buffers whose lengths are
-    // passed alongside them and which the callee will not exceed; the
-    // two length variables are live out-parameters. A null first
-    // argument asks for the local system. Nothing is retained past the
-    // call.
-    let ok = unsafe {
-        LookupAccountSidW(
-            std::ptr::null(),
-            sid,
-            name.as_mut_ptr(),
-            std::ptr::from_mut(&mut name_length),
-            domain.as_mut_ptr(),
-            std::ptr::from_mut(&mut domain_length),
-            std::ptr::from_mut(&mut kind),
-        )
-    };
+    let ok = lookup_account_sid(
+        sid,
+        &mut name,
+        &mut name_length,
+        &mut domain,
+        &mut domain_length,
+        &mut kind,
+    );
 
     if ok != 0 {
         let account = strings::from_wide_nul(strings::reported_slice(&name, name_length));
@@ -310,28 +310,18 @@ unsafe fn account_name(sid: *mut core::ffi::c_void) -> Option<String> {
     // container identity — still identifies the process, and showing the
     // SID beats showing nothing.
     //
-    // SAFETY: as above for `sid`. The out-parameter receives a
-    // `LocalAlloc`-owned string, which `OwnedLocalMemory` takes over.
     let mut raw = std::ptr::null_mut();
-    let ok = unsafe { ConvertSidToStringSidW(sid, std::ptr::from_mut(&mut raw)) };
+    let ok = sid_to_string(sid, &mut raw);
     if ok == 0 {
         return None;
     }
     let owned = OwnedLocalMemory::new(raw.cast())?;
-    // SAFETY: `raw` is a live, NUL-terminated UTF-16 string owned by
-    // `owned` for the rest of this scope. The length is bounded by
-    // scanning for the terminator the call guarantees.
-    let text = unsafe { wide_from_pointer(owned.raw().cast()) };
+    let text = wide_from_pointer(owned.raw().cast(), &owned);
     Some(text)
 }
 
-/// Reads a NUL-terminated wide string from a raw pointer.
-///
-/// # Safety
-///
-/// `pointer` must be non-null and point at a NUL-terminated UTF-16 string
-/// that stays alive for this call.
-unsafe fn wide_from_pointer(pointer: *const u16) -> String {
+/// Copies the NUL-terminated UTF-16 string owned by `OwnedLocalMemory`.
+fn wide_from_pointer(pointer: *const u16, owned: &OwnedLocalMemory) -> String {
     if pointer.is_null() {
         return String::new();
     }
@@ -340,18 +330,13 @@ unsafe fn wide_from_pointer(pointer: *const u16) -> String {
     // a missing terminator rather than a real limit.
     const MAX_UNITS: usize = 1024;
     while length < MAX_UNITS {
-        // SAFETY: the caller guarantees the string is NUL-terminated, so
-        // every unit up to and including the terminator is within the
-        // allocation. The cap stops the scan if it is not.
-        let unit = unsafe { *pointer.add(length) };
+        let unit = read_wide_unit(pointer, length);
         if unit == 0 {
             break;
         }
         length += 1;
     }
-    // SAFETY: `length` units were just confirmed readable by the scan
-    // above, and the buffer is alive for this call.
-    let slice = unsafe { std::slice::from_raw_parts(pointer, length) };
+    let slice = wide_slice(pointer, length, owned);
     String::from_utf16_lossy(slice)
 }
 
@@ -359,23 +344,14 @@ unsafe fn wide_from_pointer(pointer: *const u16) -> String {
 fn token_elevated(process: &OwnedHandle) -> Option<bool> {
     let token = open_token(process)?;
     let buffer = token_information(&token, TokenElevation)?;
-    if buffer.len() < std::mem::size_of::<TOKEN_ELEVATION>() {
-        return None;
-    }
-    // SAFETY: the buffer holds at least a `TOKEN_ELEVATION` (checked
-    // above) written by `GetTokenInformation` for that class.
-    // `read_unaligned` imposes no alignment requirement on the `Vec<u8>`.
-    let elevation = unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<TOKEN_ELEVATION>()) };
+    let elevation = read_token_elevation(&buffer)?;
     Some(elevation.TokenIsElevated != 0)
 }
 
 /// Opens a process's access token for querying.
 fn open_token(process: &OwnedHandle) -> Option<OwnedHandle> {
     let mut raw = std::ptr::null_mut();
-    // SAFETY: `process` is a live process handle. `raw` is a live,
-    // uniquely-borrowed out-parameter the callee writes a real handle
-    // into on success; `OwnedHandle` then owns and closes it.
-    let ok = unsafe { OpenProcessToken(process.raw(), TOKEN_QUERY, std::ptr::from_mut(&mut raw)) };
+    let ok = open_query_token(process.raw(), &mut raw);
     if ok == 0 {
         return None;
     }
@@ -391,36 +367,13 @@ fn open_token(process: &OwnedHandle) -> Option<OwnedHandle> {
 /// simple two-call form is correct here.
 fn token_information(token: &OwnedHandle, class: i32) -> Option<Vec<u8>> {
     let mut needed = 0u32;
-    // SAFETY: `token` is a live token handle opened with TOKEN_QUERY. A
-    // null buffer with a zero length is the documented way to ask for
-    // the required size; the call fails and writes it to `needed`, which
-    // is a live out-parameter.
-    let _ = unsafe {
-        GetTokenInformation(
-            token.raw(),
-            class,
-            std::ptr::null_mut(),
-            0,
-            std::ptr::from_mut(&mut needed),
-        )
-    };
+    query_token_information_size(token.raw(), class, &mut needed);
     let size = usize::try_from(needed).unwrap_or(0);
     if size == 0 {
         return None;
     }
     let mut buffer = vec![0u8; size];
-    // SAFETY: `buffer` is a live, uniquely-borrowed allocation of exactly
-    // `needed` bytes, which is what the length argument says. The callee
-    // writes only within it and does not retain the pointer.
-    let ok = unsafe {
-        GetTokenInformation(
-            token.raw(),
-            class,
-            buffer.as_mut_ptr().cast(),
-            needed,
-            std::ptr::from_mut(&mut needed),
-        )
-    };
+    let ok = read_token_information(token.raw(), class, &mut buffer, needed, &mut needed);
     (ok != 0).then_some(buffer)
 }
 
@@ -436,17 +389,7 @@ fn token_information(token: &OwnedHandle, class: i32) -> Option<Vec<u8>> {
 fn architecture(process: &OwnedHandle) -> Architecture {
     let mut image = IMAGE_FILE_MACHINE_UNKNOWN;
     let mut native = IMAGE_FILE_MACHINE_UNKNOWN;
-    // SAFETY: `process` is a live handle opened with
-    // PROCESS_QUERY_LIMITED_INFORMATION, which this call accepts. Both
-    // out-parameters are live, uniquely-borrowed values the callee
-    // writes once.
-    let ok = unsafe {
-        IsWow64Process2(
-            process.raw(),
-            std::ptr::from_mut(&mut image),
-            std::ptr::from_mut(&mut native),
-        )
-    };
+    let ok = read_process_machines(process.raw(), &mut image, &mut native);
     if ok == 0 {
         return Architecture::Unknown;
     }
@@ -479,20 +422,14 @@ fn architecture(process: &OwnedHandle) -> Architecture {
 pub fn file_description(path: &Path) -> Option<String> {
     let wide = strings::to_wide(&path.to_string_lossy());
     let mut ignored = 0u32;
-    // SAFETY: `wide` is a live, NUL-terminated UTF-16 path bound to a
-    // local that outlives the call. `ignored` is a live out-parameter the
-    // call writes a zero into (it exists only for compatibility).
-    let size = unsafe { GetFileVersionInfoSizeW(wide.as_ptr(), std::ptr::from_mut(&mut ignored)) };
+    let size = version_info_size(&wide, &mut ignored);
     let size_usize = usize::try_from(size).unwrap_or(0);
     if size_usize == 0 {
         return None;
     }
 
     let mut block = vec![0u8; size_usize];
-    // SAFETY: `wide` is as above. `block` is a live, uniquely-borrowed
-    // allocation of exactly `size` bytes, which is what the length
-    // argument states and what the call just reported it needs.
-    let ok = unsafe { GetFileVersionInfoW(wide.as_ptr(), 0, size, block.as_mut_ptr().cast()) };
+    let ok = read_version_info(&wide, size, &mut block);
     if ok == 0 {
         return None;
     }
@@ -513,32 +450,12 @@ fn translation(block: &[u8]) -> Option<(u16, u16)> {
     let key = strings::to_wide("\\VarFileInfo\\Translation");
     let mut pointer: *mut core::ffi::c_void = std::ptr::null_mut();
     let mut length = 0u32;
-    // SAFETY: `block` is a live version-info block filled by
-    // `GetFileVersionInfoW`. `key` is a live NUL-terminated buffer bound
-    // to a local. Both out-parameters are live. On success the call
-    // points `pointer` *into* `block`, which is borrowed for the whole
-    // of this function — so the read below cannot dangle.
-    let ok = unsafe {
-        VerQueryValueW(
-            block.as_ptr().cast(),
-            key.as_ptr(),
-            std::ptr::from_mut(&mut pointer),
-            std::ptr::from_mut(&mut length),
-        )
-    };
+    let ok = query_version_value(block, &key, &mut pointer, &mut length);
     // Each translation entry is two u16s; one is enough.
     if ok == 0 || pointer.is_null() || length < 4 {
         return None;
     }
-    // SAFETY: the call reported at least 4 bytes at `pointer`, which
-    // points into the live `block`. Two `u16`s are read without an
-    // alignment requirement.
-    let pair = unsafe {
-        let language = std::ptr::read_unaligned(pointer.cast::<u16>());
-        let codepage = std::ptr::read_unaligned(pointer.cast::<u16>().add(1));
-        (language, codepage)
-    };
-    Some(pair)
+    read_translation_pair(pointer, block)
 }
 
 /// Reads one string value out of a version-info block.
@@ -551,26 +468,163 @@ fn query_string(block: &[u8], key: &str) -> Option<String> {
     let wide_key = strings::to_wide(key);
     let mut pointer: *mut core::ffi::c_void = std::ptr::null_mut();
     let mut length = 0u32;
-    // SAFETY: as `translation` — `block` and `wide_key` are both live for
-    // the call, the out-parameters are live, and on success `pointer`
-    // points into `block`.
-    let ok = unsafe {
-        VerQueryValueW(
-            block.as_ptr().cast(),
-            wide_key.as_ptr(),
-            std::ptr::from_mut(&mut pointer),
-            std::ptr::from_mut(&mut length),
-        )
-    };
+    let ok = query_version_value(block, &wide_key, &mut pointer, &mut length);
     if ok == 0 || pointer.is_null() || length == 0 {
         return None;
     }
     let units = usize::try_from(length).unwrap_or(0);
-    // SAFETY: the call reported `length` UTF-16 units at `pointer`,
-    // which points into the live `block`. The slice is consumed before
-    // this function returns.
-    let slice = unsafe { std::slice::from_raw_parts(pointer.cast::<u16>(), units) };
+    let slice = version_string_slice(pointer.cast(), units, block)?;
     Some(strings::from_wide_nul(slice))
+}
+
+fn open_query_process(pid: u32) -> windows_sys::Win32::Foundation::HANDLE {
+    // SAFETY: all arguments are by value and the returned handle is immediately owned or rejected.
+    unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) }
+}
+fn read_process_image_path(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    buffer: &mut [u16],
+    length: &mut u32,
+) -> i32 {
+    // SAFETY: handle is live; buffer and length are live writable out-parameters and are not retained.
+    unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            windows_sys::Win32::System::Threading::PROCESS_NAME_WIN32,
+            buffer.as_mut_ptr(),
+            length,
+        )
+    }
+}
+fn read_token_user(buffer: &[u8]) -> Option<TOKEN_USER> {
+    if buffer.len() < std::mem::size_of::<TOKEN_USER>() {
+        return None;
+    }
+    // SAFETY: caller checked this buffer holds a TOKEN_USER from TokenUser; unaligned reads are supported.
+    Some(unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<TOKEN_USER>()) })
+}
+fn lookup_account_sid(
+    sid: *mut core::ffi::c_void,
+    name: &mut [u16],
+    name_length: &mut u32,
+    domain: &mut [u16],
+    domain_length: &mut u32,
+    kind: &mut i32,
+) -> i32 {
+    use windows_sys::Win32::Security::LookupAccountSidW;
+    // SAFETY: sid points into the live token buffer; all slices and lengths are live out-parameters and no pointer is retained.
+    unsafe {
+        LookupAccountSidW(
+            std::ptr::null(),
+            sid,
+            name.as_mut_ptr(),
+            name_length,
+            domain.as_mut_ptr(),
+            domain_length,
+            kind,
+        )
+    }
+}
+fn sid_to_string(sid: *mut core::ffi::c_void, raw: &mut *mut u16) -> i32 {
+    // SAFETY: sid points into the live token buffer and raw is a live output pointer for LocalAlloc-owned text.
+    unsafe { ConvertSidToStringSidW(sid, raw) }
+}
+fn read_wide_unit(pointer: *const u16, index: usize) -> u16 {
+    // SAFETY: caller owns the LocalAlloc SID string and bounds its scan to its guaranteed terminator.
+    unsafe { *pointer.add(index) }
+}
+fn wide_slice(pointer: *const u16, length: usize, _owned: &OwnedLocalMemory) -> &[u16] {
+    // SAFETY: caller scanned these initialized units while the owned LocalAlloc allocation remains live.
+    unsafe { std::slice::from_raw_parts(pointer, length) }
+}
+fn read_token_elevation(buffer: &[u8]) -> Option<TOKEN_ELEVATION> {
+    if buffer.len() < std::mem::size_of::<TOKEN_ELEVATION>() {
+        return None;
+    }
+    // SAFETY: caller checked this buffer holds TOKEN_ELEVATION from TokenElevation; unaligned reads are supported.
+    Some(unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<TOKEN_ELEVATION>()) })
+}
+fn open_query_token(
+    process: windows_sys::Win32::Foundation::HANDLE,
+    raw: &mut windows_sys::Win32::Foundation::HANDLE,
+) -> i32 {
+    // SAFETY: process is live and raw is a live writable out-parameter not retained by Win32.
+    unsafe { OpenProcessToken(process, TOKEN_QUERY, raw) }
+}
+fn query_token_information_size(
+    token: windows_sys::Win32::Foundation::HANDLE,
+    class: i32,
+    needed: &mut u32,
+) {
+    // SAFETY: null buffer is the documented size query; needed is a live writable out-parameter.
+    let _ = unsafe { GetTokenInformation(token, class, std::ptr::null_mut(), 0, needed) };
+}
+fn read_token_information(
+    token: windows_sys::Win32::Foundation::HANDLE,
+    class: i32,
+    buffer: &mut [u8],
+    size: u32,
+    needed: &mut u32,
+) -> i32 {
+    // SAFETY: buffer is allocated for size bytes; needed is live output storage and no pointer is retained.
+    unsafe { GetTokenInformation(token, class, buffer.as_mut_ptr().cast(), size, needed) }
+}
+fn read_process_machines(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    image: &mut u16,
+    native: &mut u16,
+) -> i32 {
+    // SAFETY: handle is live and both machine outputs are distinct writable out-parameters.
+    unsafe { IsWow64Process2(handle, image, native) }
+}
+fn version_info_size(path: &[u16], ignored: &mut u32) -> u32 {
+    // SAFETY: path is live and NUL-terminated; ignored is a live compatibility out-parameter.
+    unsafe { GetFileVersionInfoSizeW(path.as_ptr(), ignored) }
+}
+fn read_version_info(path: &[u16], size: u32, block: &mut [u8]) -> i32 {
+    // SAFETY: path is NUL-terminated and block has exactly the reported size; neither is retained.
+    unsafe { GetFileVersionInfoW(path.as_ptr(), 0, size, block.as_mut_ptr().cast()) }
+}
+fn query_version_value(
+    block: &[u8],
+    key: &[u16],
+    pointer: &mut *mut core::ffi::c_void,
+    length: &mut u32,
+) -> i32 {
+    // SAFETY: block is a live version resource, key is NUL-terminated, and outputs are live; result points only into block.
+    unsafe { VerQueryValueW(block.as_ptr().cast(), key.as_ptr(), pointer, length) }
+}
+fn read_translation_pair(pointer: *const core::ffi::c_void, block: &[u8]) -> Option<(u16, u16)> {
+    if !region_is_inside(pointer.cast(), 4, std::mem::align_of::<u16>(), block) {
+        return None;
+    }
+    // SAFETY: `VerQueryValueW` reported at least four readable bytes at
+    // this pointer and the range check above proved they remain inside
+    // the live version-info block. Unaligned access is deliberate.
+    let [language, codepage] = unsafe { std::ptr::read_unaligned(pointer.cast::<[u16; 2]>()) };
+    Some((language, codepage))
+}
+fn version_string_slice(pointer: *const u16, units: usize, block: &[u8]) -> Option<&[u16]> {
+    let bytes = units.checked_mul(std::mem::size_of::<u16>())?;
+    if !region_is_inside(pointer.cast(), bytes, std::mem::align_of::<u16>(), block) {
+        return None;
+    }
+    // SAFETY: the checked byte range is aligned for u16 and lies wholly
+    // inside the live version-info block borrowed for the returned slice.
+    Some(unsafe { std::slice::from_raw_parts(pointer, units) })
+}
+
+/// Whether a raw byte range is aligned and wholly inside its live owner.
+fn region_is_inside(pointer: *const u8, length: usize, alignment: usize, owner: &[u8]) -> bool {
+    let start = pointer as usize;
+    let owner_start = owner.as_ptr() as usize;
+    let Some(end) = start.checked_add(length) else {
+        return false;
+    };
+    let Some(owner_end) = owner_start.checked_add(owner.len()) else {
+        return false;
+    };
+    start >= owner_start && end <= owner_end && start.is_multiple_of(alignment)
 }
 
 #[cfg(test)]

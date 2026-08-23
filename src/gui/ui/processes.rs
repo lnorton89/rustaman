@@ -146,7 +146,7 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     let theme = app.theme.clone();
     toolbar(app, ui, &theme);
     ui.add_space(chrome::TOOLBAR_GAP);
-    refresh_rows(app);
+    refresh_rows(app, ui.ctx());
 
     if app.snapshot.is_none() {
         widgets::empty_state(ui, &theme, "Waiting for the first sample…");
@@ -228,7 +228,7 @@ fn toolbar(app: &mut App, ui: &mut Ui, theme: &Palette) {
 }
 
 /// Rebuilds the visible rows if anything they depend on has changed.
-fn refresh_rows(app: &mut App) {
+fn refresh_rows(app: &mut App, context: &egui::Context) {
     let Some(snapshot) = app.snapshot.as_ref() else {
         return;
     };
@@ -253,11 +253,36 @@ fn refresh_rows(app: &mut App) {
         &expanded,
         &collapsed,
     );
+    if app.processes.icon_sequence != snapshot.sequence {
+        app.processes.icons.retain(|path, _| {
+            snapshot
+                .processes
+                .iter()
+                .any(|process| process.path.as_ref() == Some(path))
+        });
+        for process in &snapshot.processes {
+            let (Some(path), Some(icon)) = (&process.path, &process.icon) else {
+                continue;
+            };
+            if app.processes.icons.contains_key(path) {
+                continue;
+            }
+            let image =
+                egui::ColorImage::from_rgba_unmultiplied([icon.width, icon.height], &icon.rgba);
+            let texture = context.load_texture(
+                format!("process-icon:{}", path.display()),
+                image,
+                egui::TextureOptions::LINEAR,
+            );
+            app.processes.icons.insert(path.clone(), texture);
+        }
+        app.processes.icon_sequence = snapshot.sequence;
+    }
 }
 
 /// Draws the table.
 fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
-    let entries: Vec<Entry> = app.processes.rows.entries().to_vec();
+    let entries = app.processes.rows.shared_entries();
     let Some(snapshot) = app.snapshot.clone() else {
         return;
     };
@@ -295,6 +320,7 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     // See `super::details`: a table wider than its pane paints over
     // whatever is beside it rather than clipping or scrolling.
     ui.set_clip_rect(viewport);
+    let body_height = widgets::table_body_height(ui, viewport.height());
     let mut builder = TableBuilder::new(ui)
         // Keyed on the column *order*, because `egui_extras` stores the
         // dragged widths in a `Vec` indexed by position. Reorder the
@@ -309,6 +335,13 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
         .striped(false)
         .resizable(true)
         .vscroll(true)
+        // `TableBuilder` otherwise defaults to an infinite maximum scroll
+        // height. With hundreds of rows it allocates through the status bar
+        // and places its scrollbar at the physical window edge instead of
+        // the bottom of this central pane.
+        .min_scrolled_height(0.0)
+        .max_scroll_height(body_height)
+        .auto_shrink([true, false])
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .sense(Sense::click());
 
@@ -442,19 +475,26 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                         let selected = app.processes.selected == Some(key);
 
                         let mut disclosure = false;
-                        let mut row = widgets::Row::record(
+                        let accent = process.icon.as_ref().map(|icon| icon.accent);
+                        let mut row = widgets::Row::accented(
                             &mut row,
                             theme,
                             viewport,
                             egui::Id::new("row").with(key),
                             selected,
                             index % 2 == 1,
+                            accent,
                         );
                         for slot in 0..columns.len() {
                             row.cell(|ui| match columns.get(slot) {
                                 Some(SortKey::Name) => {
-                                    disclosure =
-                                        name_cell(ui, theme, process, *depth, *children, *expanded);
+                                    let texture = process
+                                        .path
+                                        .as_ref()
+                                        .and_then(|path| app.processes.icons.get(path));
+                                    disclosure = name_cell(
+                                        ui, theme, process, texture, *depth, *children, *expanded,
+                                    );
                                 }
                                 Some(column) => {
                                     metric_cell(
@@ -601,6 +641,7 @@ fn name_cell(
     ui: &mut Ui,
     theme: &Palette,
     process: &ProcessRow,
+    texture: Option<&egui::TextureHandle>,
     depth: u16,
     children: usize,
     expanded: bool,
@@ -621,6 +662,13 @@ fn name_cell(
             // prefix, and this is the one place `INDENT` is not already
             // added to something that starts with one.
             ui.add_space(SPACE_XS + icons::DISCLOSURE);
+        }
+
+        if let Some(texture) = texture {
+            let image = egui::Image::new((texture.id(), egui::Vec2::splat(18.0)))
+                .corner_radius(egui::CornerRadius::same(3));
+            ui.add(image);
+            ui.add_space(SPACE_XS);
         }
 
         // There used to be a coloured dot here, hashed from the process
@@ -841,7 +889,7 @@ fn context_menu(ui: &mut Ui, theme: &Palette, process: &ProcessRow) -> Option<Ac
         chosen = Some(Action::EndTask(key));
         ui.close();
     }
-    if ui.button("End process tree").clicked() {
+    if ui.button("End process tree (best effort)").clicked() {
         chosen = Some(Action::EndTree(key));
         ui.close();
     }
@@ -901,6 +949,19 @@ pub const CHIP_GAP: f32 = SPACE_MD;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_process_list_cannot_grow_past_its_pane() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            for pane in [0.0, HEADER_HEIGHT / 2.0, 620.0, 1_406.0] {
+                let body = widgets::table_body_height(ui, pane);
+                assert!(body >= 0.0);
+                assert!(body + HEADER_HEIGHT <= pane.max(HEADER_HEIGHT));
+            }
+        });
+        output.textures_delta.clear();
+    }
 
     #[test]
     fn clicking_the_sorted_column_flips_it() {

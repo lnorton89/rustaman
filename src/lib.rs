@@ -22,13 +22,13 @@
 //! it names a Windows type, which means `cargo test` exercises the
 //! sorting, the rate arithmetic, the theme contrast checks, and the
 //! config parsing on any machine — including the ones CI runs the
-//! non-Windows job on. Only the ~20% that genuinely needs a Windows
-//! kernel to answer is untestable off-platform, rather than all of it.
+//! non-Windows job on. No percentage is promised: the GUI and Windows
+//! boundary have grown, while the deterministic core remains portable.
 //!
 //! [`engine`] is the seam: a sampler thread calls into [`win`] on an
 //! interval and publishes [`model::Snapshot`]s that [`gui`] reads. The
-//! UI thread never makes a system call, which is why a machine with
-//! 400 processes and a busy disk does not drop frames.
+//! periodic monitoring calls never run on the paint thread, which is why
+//! a machine with 400 processes and a busy disk does not drop frames.
 //!
 //! See `docs/ARCHITECTURE.md` for the module map, `docs/WINDOWS_APIS.md`
 //! for which API answers which question and what it costs, and
@@ -67,3 +67,5 @@ pub mod win;
 
 #[cfg(test)]
 mod header_check;
+#[cfg(test)]
+mod unsafe_check;

@@ -151,7 +151,19 @@ mod windows {
     }
 
     /// Every scene, in the order `--list` prints them.
-    const SCENES: [Scene; 25] = [
+    const SCENES: [Scene; 27] = [
+        Scene {
+            name: "live-system",
+            about: "System Information on THIS machine, really sampled",
+            view: View::System,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: true,
+            select: false,
+            modal: false,
+            hover: None,
+        },
         Scene {
             name: "live-network",
             about: "Performance › Network on THIS machine, really sampled",
@@ -449,6 +461,18 @@ mod windows {
             hover: None,
         },
         Scene {
+            name: "system",
+            about: "Windows, firmware, and hardware information",
+            view: View::System,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: false,
+            modal: false,
+            hover: None,
+        },
+        Scene {
             name: "settings",
             about: "Theme, interval and the about panel",
             view: View::Settings,
@@ -578,7 +602,7 @@ mod windows {
         } else {
             let snapshot = fabricate();
             fill_history(&mut app, &snapshot);
-            app.snapshot = Some(snapshot);
+            app.snapshot = Some(snapshot.into());
             app.services.services = services();
             app.startup.entries = startup();
         }
@@ -644,6 +668,16 @@ mod windows {
             .build_ui(move |ui| {
                 rustaman::gui::ui::draw(&mut app, ui);
             });
+        // The same face the window itself asks for, so a scene shows
+        // what the app shows. Note this makes a scene's *metrics*
+        // machine-dependent: a machine without the family renders in
+        // egui's bundled face and every string is a different width.
+        // That is the right trade for a harness whose output a person
+        // looks at — there is no golden image here to diverge from, and
+        // a screenshot in a face the app never uses is the one thing it
+        // must not produce.
+        rustaman::gui::font::install(&harness.ctx, rustaman::gui::DEFAULT_FAMILY);
+
         if let Some((x, y)) = scene.hover {
             harness
                 .input_mut()
@@ -727,6 +761,16 @@ mod windows {
     fn fabricate() -> Snapshot {
         Snapshot {
             system: SystemSample {
+                info: rustaman::model::SystemInfo {
+                    computer_name: "RUSTAMAN-WORKSTATION".to_string(),
+                    os_name: "Windows 11 Pro".to_string(),
+                    os_version: "24H2".to_string(),
+                    os_build: "26100".to_string(),
+                    manufacturer: "Framework".to_string(),
+                    model: "Desktop".to_string(),
+                    bios_vendor: "INSYDE Corp.".to_string(),
+                    bios_version: "03.03".to_string(),
+                },
                 cpu: CpuSample {
                     total_percent: 23.5,
                     kernel_percent: 6.1,
@@ -752,8 +796,6 @@ mod windows {
                         read_rate: 4_194_304.0,
                         write_rate: 1_048_576.0,
                         active_percent: 41.0,
-                        capacity: 1_000_204_886_016,
-                        free: 104_211_939_328,
                     },
                     DiskSample {
                         index: 1,
@@ -761,6 +803,16 @@ mod windows {
                         read_rate: 0.0,
                         write_rate: 0.0,
                         active_percent: 0.0,
+                    },
+                ],
+                volumes: vec![
+                    rustaman::model::VolumeSample {
+                        letter: "C:".to_string(),
+                        capacity: 1_000_204_886_016,
+                        free: 104_211_939_328,
+                    },
+                    rustaman::model::VolumeSample {
+                        letter: "D:".to_string(),
                         capacity: 4_000_787_030_016,
                         free: 1_724_502_835_200,
                     },
@@ -861,6 +913,7 @@ mod windows {
                     "C:\\Windows\\System32\\{}",
                     row.name
                 ))),
+                icon: None,
                 user: if matches!(row.kind, ProcessKind::System) {
                     "NT AUTHORITY\\SYSTEM".to_string()
                 } else {
@@ -895,6 +948,7 @@ mod windows {
                 nonpaged_pool: u64::from(row.handles) * 128,
                 page_faults: u64::from(row.handles) * 97,
                 hard_faults: u64::from(row.threads) * 3,
+                hard_fault_rate: f64::from(row.threads) / 10.0,
                 thread_count: row.threads,
                 handle_count: row.handles,
                 disk_read_rate: f64::from(row.threads) * 4_096.0,
@@ -1234,21 +1288,37 @@ mod windows {
             performance
                 .memory
                 .push((snapshot.system.memory.used_percent() * wobble(step, 7)) as f32);
-            performance.disk.push(
-                (snapshot
-                    .system
-                    .disks
-                    .iter()
-                    .map(DiskSample::total_rate)
-                    .sum::<f64>()
-                    * wobble(step, 3)) as f32,
-            );
+            // Read and write wobble on their own seeds. Scaling one
+            // figure by one multiplier would give the Disk panel two
+            // lines of identical shape at different heights, which
+            // looks like a rendering fault rather than like a machine —
+            // and would hide the one thing the split exists to show,
+            // which is read and write diverging.
+            let (read, write) = snapshot
+                .system
+                .disks
+                .iter()
+                .fold((0.0, 0.0), |(read, write), disk| {
+                    (read + disk.read_rate, write + disk.write_rate)
+                });
+            let read = read * wobble(step, 3);
+            let write = write * wobble(step, 17);
+            performance.disk.push((read + write) as f32);
+            performance.disk_read.push(read as f32);
+            performance.disk_write.push(write as f32);
+
+            // Receive is derived from the same two wobbled figures the
+            // other rings are pushed from, rather than wobbled again:
+            // an independently varying receive would exceed the total
+            // it is part of on some samples, and the panel would show
+            // a machine receiving more than it moved.
+            let network = snapshot.system.network_rate() * wobble(step, 5);
+            let sent = snapshot.system.network_send_rate() * wobble(step, 9);
+            performance.network.push(network as f32);
+            performance.network_send.push(sent as f32);
             performance
-                .network
-                .push((snapshot.system.network_rate() * wobble(step, 5)) as f32);
-            performance
-                .network_send
-                .push((snapshot.system.network_send_rate() * wobble(step, 9)) as f32);
+                .network_receive
+                .push((network - sent).max(0.0) as f32);
             performance.gpu.push((34.0 * wobble(step, 11)) as f32);
 
             for (index, adapter) in snapshot.system.adapters.iter().enumerate() {

@@ -75,6 +75,16 @@ pub fn hover_fill(ui: &Ui, id: egui::Id, hovered: bool, rest: Rgb, lifted: Rgb) 
     theme::rgb(rest.lerp(lifted, t))
 }
 
+/// Maximum height for a table's scrolling body inside the remaining pane.
+///
+/// `TableBuilder::header` advances the cursor by the header and the Ui's
+/// vertical item spacing before starting its body. Reserving only the visible
+/// header makes every table extend one spacing step over the pane's bottom.
+#[must_use]
+pub fn table_body_height(ui: &Ui, pane_height: f32) -> f32 {
+    (pane_height - theme::HEADER_HEIGHT - ui.spacing().item_spacing.y).max(0.0)
+}
+
 /// A navigation-rail entry: icon, label, and an accent bar when active.
 ///
 /// The bar rather than a filled background because the rail is narrow and
@@ -657,17 +667,28 @@ fn row_rect(ui: &Ui, viewport: Rect) -> Rect {
 /// through as a hairline along the top and bottom of every hovered row.
 fn row_clip(ui: &Ui, viewport: Rect) -> Rect {
     let gapless = gapless_cell(ui);
-    // Never *narrower* than the cell's own gapless rect, whatever the
-    // viewport says. A table that takes its viewport from
+    // The viewport, widened by the same half-spacing the cell rects are.
+    //
+    // The widening is needed: a table that takes its viewport from
     // `available_rect_before_wrap` gets one whose left edge is the first
-    // cell's left edge — and `egui_extras`' own hover fill is expanded
-    // half a spacing past that, so clipping ours to the viewport left
-    // four points of the *control* colour showing down the left of every
-    // hovered row in the Services list. Four points of grey, only while
-    // hovered, only on two of the four tables.
+    // cell's left edge, and `egui_extras`' own hover fill is expanded
+    // half a spacing past that — so clipping ours to the viewport exactly
+    // left four points of the *control* colour showing down the left of
+    // every hovered row in the Services list. Four points of grey, only
+    // while hovered, only on two of the four tables.
+    //
+    // But it is widened by a *bound*, not to whatever the cell happens
+    // to be. Taking the union with the cell rect makes the clip as wide
+    // as the widest cell, which is no clip at all once a table is wider
+    // than its pane: the Details table's last columns then paint their
+    // row backgrounds straight across the inspector beside it. This rect
+    // is the only thing holding them, because the fill is painted
+    // through `set_clip_rect`, which *replaces* the clip in force rather
+    // than intersecting it.
+    let bleed = 0.5 * ui.spacing().item_spacing.x + 1.0;
     Rect::from_min_max(
-        egui::pos2(viewport.left().min(gapless.left()), gapless.top()),
-        egui::pos2(viewport.right().max(gapless.right()), gapless.bottom()),
+        egui::pos2(viewport.left() - bleed, gapless.top()),
+        egui::pos2(viewport.right() + bleed, gapless.bottom()),
     )
 }
 
@@ -723,6 +744,7 @@ fn row_background(
     id: egui::Id,
     selected: bool,
     striped: bool,
+    accent: Option<Rgb>,
 ) {
     let row = row_rect(ui, viewport);
     // Asked of the context rather than of the `Ui`. `Ui::rect_contains_pointer`
@@ -732,7 +754,10 @@ fn row_background(
     // while the other seven stayed at rest.
     let hovered = ui.ctx().rect_contains_pointer(ui.layer_id(), row);
 
-    let base = if striped { theme.raised } else { theme.panel };
+    let mut base = if striped { theme.raised } else { theme.panel };
+    if let Some(accent) = accent {
+        base = base.lerp(accent, 0.07);
+    }
     let fill = if selected {
         theme::rgb(theme.selection)
     } else {
@@ -760,6 +785,9 @@ fn row_background(
             Vec2::new(SELECTION_BAR, row.height() * grown),
         );
         painter.rect_filled(bar, CornerRadius::ZERO, theme::rgb(theme.accent));
+    } else if let Some(accent) = accent.filter(|_| ui.max_rect().left() <= viewport.left() + 0.5) {
+        let bar = Rect::from_min_size(row.min, Vec2::new(2.0, row.height()));
+        painter.rect_filled(bar, CornerRadius::ZERO, theme::rgb(accent));
     }
 }
 
@@ -772,6 +800,7 @@ enum RowFill {
         id: egui::Id,
         selected: bool,
         striped: bool,
+        accent: Option<Rgb>,
     },
     /// A category heading, which is none of those things.
     Group,
@@ -835,8 +864,29 @@ impl<'a, 'b, 'r> Row<'a, 'b, 'r> {
                 id,
                 selected,
                 striped,
+                accent: None,
             },
         }
+    }
+
+    /// A record row carrying the executable icon's representative colour.
+    pub fn accented(
+        row: &'r mut TableRow<'a, 'b>,
+        theme: &'r Palette,
+        viewport: Rect,
+        id: egui::Id,
+        selected: bool,
+        striped: bool,
+        accent: Option<Rgb>,
+    ) -> Self {
+        let mut record = Self::record(row, theme, viewport, id, selected, striped);
+        record.fill = RowFill::Record {
+            id,
+            selected,
+            striped,
+            accent,
+        };
+        record
     }
 
     /// A grouping row — a category heading, not a record.
@@ -861,7 +911,8 @@ impl<'a, 'b, 'r> Row<'a, 'b, 'r> {
                     id,
                     selected,
                     striped,
-                } => row_background(ui, theme, viewport, id, selected, striped),
+                    accent,
+                } => row_background(ui, theme, viewport, id, selected, striped, accent),
                 RowFill::Group => group_row_background(ui, theme, viewport),
             }
             contents(ui);
@@ -1165,7 +1216,57 @@ pub const fn pane_inset() -> f32 {
 #[cfg(test)]
 mod tests {
     use super::card_grid_layout;
+    use super::table_body_height;
+    use super::theme;
     use super::theme::SPACE_MD;
+
+    #[test]
+    fn a_real_table_header_and_body_end_inside_the_pane() -> anyhow::Result<()> {
+        use egui::{Rect, Vec2};
+        use egui_extras::{Column, TableBuilder};
+
+        let ctx = egui::Context::default();
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(780.0, 480.0));
+        let mut bounds = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(window),
+                ..Default::default()
+            },
+            |ui| {
+                let pane = ui.available_rect_before_wrap();
+                let body_height = table_body_height(ui, pane.height());
+                let body = TableBuilder::new(ui)
+                    .vscroll(true)
+                    .min_scrolled_height(0.0)
+                    .max_scroll_height(body_height)
+                    .auto_shrink([true, false])
+                    .column(Column::remainder())
+                    .header(theme::HEADER_HEIGHT, |mut header| {
+                        header.col(|ui| {
+                            ui.label("Name");
+                        });
+                    })
+                    .body(|body| {
+                        body.rows(theme::ROW_HEIGHT, 100, |mut row| {
+                            row.col(|ui| {
+                                ui.label("process.exe");
+                            });
+                        });
+                    });
+                bounds = Some((pane, body.inner_rect));
+            },
+        );
+        output.textures_delta.clear();
+        let (pane, body) = bounds.ok_or_else(|| anyhow::anyhow!("table did not draw"))?;
+        assert!(
+            body.bottom() <= pane.bottom() + 0.01,
+            "table body ends at {}, past pane bottom {}",
+            body.bottom(),
+            pane.bottom()
+        );
+        Ok(())
+    }
 
     #[test]
     fn no_cards_is_no_columns_rather_than_a_division_by_zero() {
@@ -1291,7 +1392,7 @@ mod tests {
                 ui.scope_builder(egui::UiBuilder::new().max_rect(cell), |ui| {
                     ui.set_clip_rect(cell);
                     ui.allocate_exact_size(cell.size(), Sense::hover());
-                    row_background(ui, &theme, row, egui::Id::new("row"), true, false);
+                    row_background(ui, &theme, row, egui::Id::new("row"), true, false, None);
                 });
             }
         });

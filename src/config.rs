@@ -50,6 +50,12 @@ pub struct Config {
     /// back to the default rather than failing to load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
+    /// The UI typeface, by family name, looked up in the machine's own
+    /// font directories. Unset takes [`crate::gui::DEFAULT_FAMILY`]; a
+    /// family that is not installed falls back to the bundled face
+    /// rather than failing to start. See [`crate::gui::font`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
     /// Which view was open, by its stable name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<String>,
@@ -167,6 +173,7 @@ pub fn parse(text: &str) -> Config {
     }
     Config {
         theme: field(&table, "theme"),
+        font: field(&table, "font"),
         view: field(&table, "view"),
         interval_ms: field(&table, "interval_ms"),
         sort: field(&table, "sort"),
@@ -180,13 +187,13 @@ pub fn parse(text: &str) -> Config {
     }
 }
 
-/// Writes the config to the platform location, atomically.
+/// Writes the config to the platform location with a durable temp file
+/// and an atomic same-volume replacement.
 ///
 /// Written to a temporary file beside the target and then renamed, so a
-/// crash or a power cut during the write leaves the previous config
-/// intact rather than a half-written one that parses to nothing. The
-/// rename is the only step that can be observed, and it either happened
-/// or it did not.
+/// crash during the write leaves the previous config intact rather than
+/// a half-written one that parses to nothing. The temp file is flushed
+/// before the replacement is requested.
 ///
 /// Failures are returned rather than swallowed. The app saves on exit,
 /// and "your preferences were not saved" is the caller's to surface — a
@@ -207,11 +214,14 @@ pub fn save(config: &Config) -> std::io::Result<()> {
     std::fs::create_dir_all(parent)?;
 
     let text = toml::to_string_pretty(config).map_err(std::io::Error::other)?;
-    let temporary = path.with_extension("toml.tmp");
-    std::fs::write(&temporary, text)?;
-    // `rename` over an existing file is atomic on Windows for a
-    // same-volume move, which this is by construction.
-    match std::fs::rename(&temporary, &path) {
+    let temporary = path.with_extension(format!("toml.{}.tmp", std::process::id()));
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+    }
+    match replace(&temporary, &path) {
         Ok(()) => Ok(()),
         Err(error) => {
             // Do not leave the temporary behind to be mistaken for a
@@ -221,6 +231,17 @@ pub fn save(config: &Config) -> std::io::Result<()> {
             Err(error)
         }
     }
+}
+
+/// Replaces `target` with `source` on the same volume.
+#[cfg(windows)]
+fn replace(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    crate::win::file::replace(source, target)
+}
+
+#[cfg(not(windows))]
+fn replace(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    std::fs::rename(source, target)
 }
 
 #[cfg(test)]
@@ -273,6 +294,7 @@ mod tests {
     fn a_config_round_trips() -> Result<()> {
         let original = Config {
             theme: Some("midnight".to_string()),
+            font: Some("Product Sans".to_string()),
             view: Some("performance".to_string()),
             interval_ms: Some(2_000),
             sort: Some(SortKey::Memory),

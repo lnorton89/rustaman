@@ -231,11 +231,9 @@ Per-process connection *counts* come from `GetExtendedTcpTable` and
 `GetExtendedUdpTable` with `TCP_TABLE_OWNER_PID_ALL`, which is the only
 Win32 interface that attributes a network object to a PID at all.
 
-**IPv4 only, deliberately.** The IPv6 tables are a second pair of calls
-with a second pair of row layouts, and a process holding an IPv6 endpoint
-almost always holds an IPv4 one too — so supporting them roughly doubles
-the work in this module to change a count from "some" to "slightly more
-some".
+Both `AF_INET` and `AF_INET6` owner tables are queried for TCP and UDP.
+The mutable tables use bounded resize/retry loops so a connection opened
+between the size query and fetch does not blank the whole sample.
 
 ### GPU
 
@@ -275,22 +273,23 @@ reports the access denial rather than silently doing nothing.
 This is re-read on demand (`F5`), not every tick: the enumeration is
 expensive and the answer changes on a human timescale.
 
-### Startup — six locations
+### Startup locations
 
-`src/win/startup.rs`. A program can register to run at logon in six
-places, and a tool that reads fewer is quietly lying:
+`src/win/startup.rs` covers the canonical Run/RunOnce registry mechanisms
+and both Startup folders:
 
 | Location | |
 |---|---|
 | `HKCU\...\CurrentVersion\Run` | per-user |
 | `HKLM\...\CurrentVersion\Run` | machine-wide, 64-bit view |
-| `HKLM\...\Wow6432Node\...\Run` | machine-wide, **32-bit view** — the one everyone forgets |
+| `HKLM\...\Run` through `KEY_WOW64_32KEY` | machine-wide, **32-bit view** |
 | `HKCU\...\CurrentVersion\RunOnce` | per-user, fires once |
 | `HKLM\...\CurrentVersion\RunOnce` | machine-wide, fires once |
+| `HKLM\...\RunOnce` through `KEY_WOW64_32KEY` | machine-wide, 32-bit view, fires once |
 | The Startup folders | per-user and All Users |
 
 Whether an entry is *enabled* is not in the `Run` key. It is a binary
-blob under `...\Explorer\StartupApproved\Run`, whose first byte is the
+blob under `...\Explorer\StartupApproved\Run` / `StartupFolder`, whose first byte is the
 flag — even values enabled, odd disabled. An entry with no blob has never
 been touched, and is enabled.
 
@@ -345,7 +344,7 @@ overhead that implies, plus the fact that only one kernel logger session
 of some classes can exist at a time, so starting one can fail because
 something else got there first.
 
-Rustaman shows open TCP and UDP endpoint counts instead: cheap, exact,
+Rustaman shows open IPv4 and IPv6 TCP/UDP endpoint counts instead: cheap,
 unprivileged, and honest about being a different measurement.
 
 ### Which window belongs to which process, reliably

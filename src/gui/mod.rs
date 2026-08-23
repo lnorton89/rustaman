@@ -29,6 +29,7 @@
 //! switch takes effect on the next start, and says so.
 
 pub mod app;
+pub mod font;
 pub mod icons;
 pub mod ui;
 
@@ -49,6 +50,15 @@ use anyhow::Result;
 /// does not have, and every screenshot was taken 260 points wider than
 /// the window anyone opens. Take the width from here.
 pub const DEFAULT_SIZE: [f32; 2] = [1180.0, 760.0];
+
+/// The typeface the window asks for when the config does not name one.
+///
+/// A *name*, not a font — see [`font`] on why the distinction is the
+/// whole design. Nothing is bundled and nothing is downloaded: if this
+/// family is installed on the machine the window is set in it, and if
+/// it is not, the window opens in egui's bundled face exactly as it did
+/// before. Both outcomes are normal and neither is reported.
+pub const DEFAULT_FAMILY: &str = "Product Sans";
 
 /// The smallest the window may be dragged to.
 ///
@@ -80,6 +90,11 @@ const _: () = {
 /// Opens the window and runs until it closes.
 pub fn run(config: Config) -> Result<()> {
     let custom_chrome = config.custom_chrome.unwrap_or(true);
+    // Cloned out before `config` is moved into the creation closure.
+    let family = config
+        .font
+        .clone()
+        .unwrap_or_else(|| DEFAULT_FAMILY.to_owned());
     let size = config.window_size.unwrap_or(DEFAULT_SIZE);
     let always_on_top = config.always_on_top.unwrap_or(false);
 
@@ -95,6 +110,10 @@ pub fn run(config: Config) -> Result<()> {
 
     let options = eframe::NativeOptions {
         viewport,
+        // Rustaman persists its own size. eframe's separate native-window
+        // persistence can restore a stale position from a detached monitor
+        // before the app has a chance to fit it to the current work area.
+        persist_window: false,
         // See the module docs.
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
@@ -104,7 +123,13 @@ pub fn run(config: Config) -> Result<()> {
         crate::brand::NAME,
         options,
         Box::new(move |cc| {
+            // Before the app is built, so the first frame is already
+            // in the right face — installing it later would draw one
+            // frame in the bundled one and then reflow the whole
+            // window, which reads as a fault on startup.
+            font::install(&cc.egui_ctx, &family);
             let mut instance = app::App::new(config);
+            instance.native_window = native_window_handle(cc);
             // The one thing that has to happen after the window exists:
             // asking DWM to darken the system caption, for the users who
             // chose it. A refusal is expected on older builds and costs
@@ -112,16 +137,22 @@ pub fn run(config: Config) -> Result<()> {
             if !custom_chrome {
                 darken_system_caption(cc, instance.theme.mode);
             }
-            // The sampler reports whether it got debug privilege, which
-            // the Settings view explains. Read here rather than in
-            // `App::new` because it is the sampler thread that asks for
-            // it, and asking twice would be a second, pointless
-            // privilege adjustment.
-            instance.elevated = crate::win::privilege::enable();
             Ok(Box::new(instance))
         }),
     )
     .map_err(|error| anyhow::anyhow!("the window could not be opened: {error}"))
+}
+
+/// The numeric Win32 handle used by the bounds safeguard after native moves
+/// and resizes. Other backends never reach this Windows-only module.
+fn native_window_handle(cc: &eframe::CreationContext<'_>) -> Option<isize> {
+    use eframe::wgpu::rwh::{HasWindowHandle, RawWindowHandle};
+
+    let handle = cc.window_handle().ok()?;
+    let RawWindowHandle::Win32(window) = handle.as_ref() else {
+        return None;
+    };
+    Some(window.hwnd.get())
 }
 
 /// Asks DWM to draw the system caption dark, for a dark theme.

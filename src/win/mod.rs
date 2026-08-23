@@ -65,9 +65,12 @@
 //! window, because one optional counter is missing would be worse than
 //! one that quietly omits a column.
 
+pub mod app_icon;
 pub mod control;
+pub mod dialog;
 pub mod disk;
 pub mod dwm;
+pub mod file;
 pub mod gpu;
 pub mod handle;
 pub mod identity;
@@ -79,4 +82,5 @@ pub mod services;
 pub mod startup;
 pub mod strings;
 pub mod system;
+pub mod window;
 pub mod windows;

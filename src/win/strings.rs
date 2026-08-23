@@ -19,8 +19,9 @@
 //!   values. [`from_wide_nul`] stops at the first NUL.
 //! - **Counted**, with an explicit length and *no* guaranteed
 //!   terminator — the `UNICODE_STRING` that `NtQuerySystemInformation`
-//!   returns each process's image name in. [`from_unicode_string`] uses
-//!   the length and never looks for a NUL.
+//!   returns each process's image name in. [`from_unicode_string_in`]
+//!   uses the length, validates it against its owner, and never looks for
+//!   a NUL.
 //!
 //! Reading a counted string as if it were terminated walks off the end of
 //! the process-information buffer into the next entry; reading a
@@ -64,35 +65,30 @@ pub fn from_wide_nul(buffer: &[u16]) -> String {
     String::from_utf16_lossy(buffer.get(..end).unwrap_or(&[]))
 }
 
-/// Reads a counted `UNICODE_STRING`.
-///
-/// # Safety
-///
-/// `value.Buffer` must point at `value.Length` bytes that are valid for
-/// reads and that stay alive for this call. In practice the caller holds
-/// the buffer `NtQuerySystemInformation` filled, and the `UNICODE_STRING`
-/// points into it.
-///
-/// This is the one function in the module that is `unsafe`, and it is
-/// `unsafe` rather than private because the contract it needs — "the
-/// buffer this points into is still alive" — is not one the function can
-/// check. [`super::nt`] is its only caller and holds that buffer.
+/// Reads a counted string only when it lies wholly inside `owner`.
 #[must_use]
-pub unsafe fn from_unicode_string(value: &UNICODE_STRING) -> String {
+pub fn from_unicode_string_in(value: &UNICODE_STRING, owner: &[u8]) -> Option<String> {
     if value.Buffer.is_null() || value.Length == 0 {
-        return String::new();
+        return Some(String::new());
     }
-    // `Length` is in *bytes*, and the buffer is u16 units. Treating it as
-    // a unit count reads twice as far as the string actually runs — into
-    // the next process's entry, which is why this division is not an
-    // incidental detail.
+    if !value.Length.is_multiple_of(2) {
+        return None;
+    }
+    let start = value.Buffer as usize;
+    let owner_start = owner.as_ptr() as usize;
+    let owner_end = owner_start.checked_add(owner.len())?;
+    let string_end = start.checked_add(usize::from(value.Length))?;
+    if start < owner_start
+        || string_end > owner_end
+        || !start.is_multiple_of(std::mem::align_of::<u16>())
+    {
+        return None;
+    }
     let units = usize::from(value.Length / 2);
-    // SAFETY: the caller guarantees `Buffer` points at `Length` valid
-    // bytes; `units` is half that, in u16s, so the slice is within the
-    // same allocation. The slice is used and dropped before this
-    // function returns, so it cannot outlive the buffer.
+    // SAFETY: pointer alignment and the complete byte range were checked
+    // against the live owning allocation above.
     let slice = unsafe { std::slice::from_raw_parts(value.Buffer, units) };
-    String::from_utf16_lossy(slice)
+    Some(String::from_utf16_lossy(slice))
 }
 
 /// Trims a buffer to a length a Win32 call reported, guarding against a
@@ -195,17 +191,22 @@ mod tests {
         // The `UNICODE_STRING` case: `Length` is in bytes, and there is
         // no guaranteed terminator. Reading it as terminated would run
         // into the next entry of the process-information buffer.
-        let backing: Vec<u16> = "chrome.exe\0garbage".encode_utf16().collect();
+        #[repr(C, align(2))]
+        struct AlignedBytes([u8; 40]);
+        let mut backing = AlignedBytes([0; 40]);
+        for (index, unit) in "chrome.exe\0garbage".encode_utf16().enumerate() {
+            let offset = index * 2;
+            backing.0[offset..offset + 2].copy_from_slice(&unit.to_ne_bytes());
+        }
         let value = UNICODE_STRING {
             Length: 20, // ten characters, in bytes
             MaximumLength: 40,
-            Buffer: backing.as_ptr().cast_mut(),
+            Buffer: backing.0.as_mut_ptr().cast(),
         };
-        // SAFETY: `backing` is alive for the whole call and holds more
-        // than `Length` bytes.
-        let text = unsafe { from_unicode_string(&value) };
+        let text = from_unicode_string_in(&value, &backing.0);
         assert_eq!(
-            text, "chrome.exe",
+            text.as_deref(),
+            Some("chrome.exe"),
             "the byte length must be halved to a unit count, or this \
              reads twice as far as the string runs"
         );
@@ -218,8 +219,31 @@ mod tests {
             MaximumLength: 0,
             Buffer: std::ptr::null_mut(),
         };
-        // SAFETY: the buffer is null and the length zero, which the
-        // function checks before dereferencing anything.
-        assert_eq!(unsafe { from_unicode_string(&empty) }, "");
+        assert_eq!(from_unicode_string_in(&empty, &[]).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn a_counted_string_outside_its_owner_is_rejected() {
+        let owner = vec![0u8; 16];
+        let outside: Vec<u16> = "elsewhere".encode_utf16().collect();
+        let value = UNICODE_STRING {
+            Length: u16::try_from(outside.len() * 2).unwrap_or(u16::MAX),
+            MaximumLength: u16::try_from(outside.len() * 2).unwrap_or(u16::MAX),
+            Buffer: outside.as_ptr().cast_mut(),
+        };
+        assert_eq!(from_unicode_string_in(&value, &owner), None);
+    }
+
+    #[test]
+    fn a_counted_string_crossing_its_owners_end_is_rejected() {
+        #[repr(C, align(2))]
+        struct AlignedBytes([u8; 8]);
+        let mut owner = AlignedBytes([0; 8]);
+        let value = UNICODE_STRING {
+            Length: 4,
+            MaximumLength: 4,
+            Buffer: owner.0.as_mut_ptr().wrapping_add(6).cast(),
+        };
+        assert_eq!(from_unicode_string_in(&value, &owner.0), None);
     }
 }

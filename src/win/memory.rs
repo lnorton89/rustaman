@@ -97,43 +97,35 @@ pub fn read() -> (MemorySample, SystemCounts) {
 fn global_status() -> Option<MEMORYSTATUSEX> {
     let mut status = MEMORYSTATUSEX {
         dwLength: u32::try_from(std::mem::size_of::<MEMORYSTATUSEX>()).unwrap_or(0),
-        ..unsafe_zeroed_status()
+        ..MEMORYSTATUSEX::default()
     };
-    // SAFETY: `status` is a live, uniquely-borrowed `MEMORYSTATUSEX` with
-    // its `dwLength` set to its own size, which is the contract the call
-    // documents. The callee writes only within that struct and does not
-    // retain the pointer.
-    let ok = unsafe { GlobalMemoryStatusEx(std::ptr::from_mut(&mut status)) };
+    let ok = read_global_memory_status(&mut status);
     (ok != 0).then_some(status)
-}
-
-/// A zeroed `MEMORYSTATUSEX`, for the struct-update syntax above.
-///
-/// `MEMORYSTATUSEX` is plain integers, so all-zero is a valid — if
-/// meaningless — value, and the caller overwrites `dwLength` immediately.
-/// Written as a named function so the one `unsafe` it needs is not buried
-/// inside an initialiser.
-fn unsafe_zeroed_status() -> MEMORYSTATUSEX {
-    // SAFETY: every field of `MEMORYSTATUSEX` is a `u32` or `u64`, for
-    // which the all-zero bit pattern is valid. There are no references,
-    // no `NonNull`, and no enums with restricted discriminants.
-    unsafe { std::mem::zeroed() }
 }
 
 /// `GetPerformanceInfo`, wrapped.
 fn performance_info() -> Option<PERFORMANCE_INFORMATION> {
     let size = u32::try_from(std::mem::size_of::<PERFORMANCE_INFORMATION>()).unwrap_or(0);
-    // SAFETY: as above — every field is an integer, so all-zero is a
-    // valid starting value, and `cb` is set to the struct's own size
-    // before the call, which is the documented contract.
-    let mut info: PERFORMANCE_INFORMATION = unsafe { std::mem::zeroed() };
-    info.cb = size;
-    // SAFETY: `info` is a live, uniquely-borrowed struct of exactly
-    // `size` bytes, which is what `cb` and the second argument both
-    // state. The callee writes only within it and does not retain the
-    // pointer.
-    let ok = unsafe { GetPerformanceInfo(std::ptr::from_mut(&mut info), size) };
+    let mut info = PERFORMANCE_INFORMATION {
+        cb: size,
+        ..PERFORMANCE_INFORMATION::default()
+    };
+    let ok = read_performance_info(&mut info, size);
     (ok != 0).then_some(info)
+}
+
+/// Fills the caller-owned global-memory structure.
+fn read_global_memory_status(status: &mut MEMORYSTATUSEX) -> i32 {
+    // SAFETY: `status.dwLength` identifies its exact initialized struct size;
+    // `status` is a live writable out-parameter and is not retained.
+    unsafe { GlobalMemoryStatusEx(status) }
+}
+
+/// Fills the caller-owned performance counter structure.
+fn read_performance_info(info: &mut PERFORMANCE_INFORMATION, size: u32) -> i32 {
+    // SAFETY: `info.cb` and `size` state the structure's exact byte size;
+    // `info` is a live writable out-parameter and is not retained.
+    unsafe { GetPerformanceInfo(info, size) }
 }
 
 #[cfg(test)]

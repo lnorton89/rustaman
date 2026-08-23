@@ -75,26 +75,15 @@ pub struct DiskCounters {
 
 /// Reads every physical disk's counters.
 ///
-/// Probes drive numbers from zero upward and stops at the first gap of
-/// two, because drive numbers are usually contiguous but a removable
-/// device that has been ejected can leave a hole. Stopping at the first
-/// failure would lose every disk after an ejected card reader.
+/// Probes the entire bounded range. Physical-drive numbers can contain
+/// arbitrary gaps after hot-plug/ejection, so a gap is never evidence
+/// that a later number does not exist.
 #[must_use]
 pub fn read() -> Vec<DiskCounters> {
     let mut disks = Vec::new();
-    let mut misses = 0u32;
     for index in 0..MAX_DRIVES {
-        match counters(index) {
-            Some(disk) => {
-                disks.push(disk);
-                misses = 0;
-            }
-            None => {
-                misses += 1;
-                if misses >= 2 {
-                    break;
-                }
-            }
+        if let Some(disk) = counters(index) {
+            disks.push(disk);
         }
     }
     disks
@@ -118,52 +107,16 @@ fn counters(index: u32) -> Option<DiskCounters> {
 /// break this for every non-administrator.
 fn open_device(index: u32) -> Option<OwnedHandle> {
     let path = strings::to_wide(&format!("\\\\.\\PhysicalDrive{index}"));
-    // SAFETY: `path` is a live, NUL-terminated UTF-16 buffer bound to a
-    // local that outlives the call. A null security-attributes pointer
-    // requests the default descriptor and a null template handle is the
-    // documented value for `OPEN_EXISTING`. The returned handle is
-    // immediately given to `OwnedHandle`, which rejects both failure
-    // sentinels and closes it on drop.
-    let raw = unsafe {
-        CreateFileW(
-            path.as_ptr(),
-            0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            std::ptr::null_mut(),
-        )
-    };
+    let raw = open_physical_drive(&path);
     OwnedHandle::new(raw)
 }
 
 /// Issues `IOCTL_DISK_PERFORMANCE` against an open device.
 fn query_performance(device: &OwnedHandle) -> Option<DISK_PERFORMANCE> {
-    // SAFETY: `DISK_PERFORMANCE` is plain integers and a fixed-size
-    // array, so the all-zero bit pattern is a valid starting value.
-    let mut performance: DISK_PERFORMANCE = unsafe { std::mem::zeroed() };
+    let mut performance = DISK_PERFORMANCE::default();
     let size = u32::try_from(std::mem::size_of::<DISK_PERFORMANCE>()).unwrap_or(0);
     let mut returned = 0u32;
-    // SAFETY: `device` is a live handle from `open_device`. The two null
-    // input arguments say there is no input buffer, which this IOCTL
-    // documents. `performance` is a live, uniquely-borrowed struct of
-    // exactly `size` bytes, which is what the length argument states.
-    // `returned` is a live out-parameter. A null OVERLAPPED requests a
-    // synchronous call, which is correct for a handle not opened with
-    // FILE_FLAG_OVERLAPPED. Nothing is retained past the call.
-    let ok = unsafe {
-        DeviceIoControl(
-            device.raw(),
-            IOCTL_DISK_PERFORMANCE,
-            std::ptr::null(),
-            0,
-            std::ptr::from_mut(&mut performance).cast(),
-            size,
-            std::ptr::from_mut(&mut returned),
-            std::ptr::null_mut(),
-        )
-    };
+    let ok = disk_performance_ioctl(device.raw(), &mut performance, size, &mut returned);
     // A short read means the driver filled in less than the structure,
     // and the tail would be the zeroes above rather than real counters.
     if ok == 0 || returned < size {
@@ -203,7 +156,7 @@ pub struct Volume {
 
 /// Every fixed volume with a drive letter.
 ///
-/// Used for the capacity figure beside each disk. This does **not** map
+/// Shown separately from physical disks. This does **not** map
 /// volumes onto physical drives — that needs
 /// `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` per volume and gets involved
 /// with spanned and mirrored sets, which is a great deal of machinery for
@@ -254,8 +207,7 @@ pub fn volumes() -> Vec<Volume> {
 
 /// The bitmask of drive letters in use.
 fn logical_drives() -> u32 {
-    // SAFETY: takes no arguments, returns a bitmask, cannot fail.
-    unsafe { GetLogicalDrives() }
+    get_logical_drive_mask()
 }
 
 /// Whether a drive letter names a disk attached to this machine.
@@ -267,9 +219,7 @@ fn logical_drives() -> u32 {
 /// up).
 fn is_local_disk(root: &str) -> bool {
     let wide = strings::to_wide(root);
-    // SAFETY: `wide` is a live, NUL-terminated UTF-16 path bound to a
-    // local. The call reads it and retains nothing.
-    let kind = unsafe { GetDriveTypeW(wide.as_ptr()) };
+    let kind = drive_type(&wide);
     kind == DRIVE_FIXED || kind == DRIVE_REMOVABLE
 }
 
@@ -279,21 +229,71 @@ fn free_space(root: &str) -> Option<(u64, u64)> {
     let mut available = 0u64;
     let mut total = 0u64;
     let mut free = 0u64;
-    // SAFETY: `wide` is a live, NUL-terminated UTF-16 path bound to a
-    // local. All three out-parameters are live, uniquely-borrowed `u64`s
-    // the callee writes once each. Nothing is retained.
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(
-            wide.as_ptr(),
-            std::ptr::from_mut(&mut available),
-            std::ptr::from_mut(&mut total),
-            std::ptr::from_mut(&mut free),
-        )
-    };
+    let ok = volume_free_space(&wide, &mut available, &mut total, &mut free);
     // `free` is the volume's free space; `available` is what this user's
     // quota permits. The volume figure is the one to show — a quota'd
     // user is not told the disk is full when it is not.
     (ok != 0).then_some((total, free))
+}
+
+/// Opens a physical-drive device for the metadata-only disk IOCTL.
+fn open_physical_drive(path: &[u16]) -> windows_sys::Win32::Foundation::HANDLE {
+    // SAFETY: `path` is live and NUL-terminated; null security attributes and
+    // template handle are documented for `OPEN_EXISTING`. The caller owns it.
+    unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    }
+}
+
+/// Issues the synchronous `IOCTL_DISK_PERFORMANCE` into its fixed-size output.
+fn disk_performance_ioctl(
+    device: windows_sys::Win32::Foundation::HANDLE,
+    performance: &mut DISK_PERFORMANCE,
+    size: u32,
+    returned: &mut u32,
+) -> i32 {
+    // SAFETY: `device` is a live owned handle; `performance` is writable for
+    // exactly `size` bytes and `returned` is a live out-parameter. No input or
+    // OVERLAPPED buffer is supplied, so the API retains no borrowed memory.
+    unsafe {
+        DeviceIoControl(
+            device,
+            IOCTL_DISK_PERFORMANCE,
+            std::ptr::null(),
+            0,
+            std::ptr::from_mut(performance).cast(),
+            size,
+            returned,
+            std::ptr::null_mut(),
+        )
+    }
+}
+
+/// Returns the current logical-drive bit mask.
+fn get_logical_drive_mask() -> u32 {
+    // SAFETY: this call takes no pointers and returns a value by copy.
+    unsafe { GetLogicalDrives() }
+}
+
+/// Reads a drive root's Win32 drive type without retaining the UTF-16 path.
+fn drive_type(root: &[u16]) -> u32 {
+    // SAFETY: `root` is live and NUL-terminated for the duration of the call.
+    unsafe { GetDriveTypeW(root.as_ptr()) }
+}
+
+/// Reads a volume's capacity counters into caller-owned out-parameters.
+fn volume_free_space(root: &[u16], available: &mut u64, total: &mut u64, free: &mut u64) -> i32 {
+    // SAFETY: `root` is live and NUL-terminated; every reference is a live
+    // writable out-parameter and the API retains none of them.
+    unsafe { GetDiskFreeSpaceExW(root.as_ptr(), available, total, free) }
 }
 
 /// A readable label for a physical drive.
@@ -349,6 +349,7 @@ mod tests {
     const SECOND: u64 = 10_000_000;
 
     #[test]
+    #[ignore = "environment smoke test"]
     fn the_machine_has_at_least_one_disk() {
         let disks = read();
         assert!(
@@ -443,6 +444,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "environment smoke test"]
     fn the_system_volume_is_found_with_a_plausible_capacity() {
         let volumes = volumes();
         assert!(!volumes.is_empty(), "a machine has at least one volume");

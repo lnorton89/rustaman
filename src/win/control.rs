@@ -127,10 +127,7 @@ pub type Action = Result<(), ActionError>;
 /// build tool — should be able to tell.
 pub fn end(key: ProcessKey) -> Action {
     let process = verify(key, PROCESS_TERMINATE)?;
-    // SAFETY: `process` is a live handle opened with PROCESS_TERMINATE
-    // for the process `verify` confirmed is the intended target. The call
-    // takes the handle and an exit code by value.
-    let ok = unsafe { TerminateProcess(process.raw(), 1) };
+    let ok = terminate_verified_process(process.raw());
     if ok == 0 {
         return Err(ActionError::Failed(last_error()));
     }
@@ -140,18 +137,14 @@ pub fn end(key: ProcessKey) -> Action {
 /// Suspends every thread in a process.
 pub fn suspend(key: ProcessKey) -> Action {
     let process = verify(key, PROCESS_SUSPEND_RESUME)?;
-    // SAFETY: `process` is a live handle opened with
-    // PROCESS_SUSPEND_RESUME for the verified target. `NtSuspendProcess`
-    // takes the handle by value and returns a status.
-    let status = unsafe { NtSuspendProcess(process.raw()) };
+    let status = suspend_process_handle(process.raw());
     status_to_action(status)
 }
 
 /// Resumes a suspended process.
 pub fn resume(key: ProcessKey) -> Action {
     let process = verify(key, PROCESS_SUSPEND_RESUME)?;
-    // SAFETY: as `suspend`.
-    let status = unsafe { NtResumeProcess(process.raw()) };
+    let status = resume_process_handle(process.raw());
     status_to_action(status)
 }
 
@@ -166,10 +159,7 @@ pub fn set_priority(key: ProcessKey, priority: Priority) -> Action {
         Priority::High => HIGH_PRIORITY_CLASS,
         Priority::Realtime => REALTIME_PRIORITY_CLASS,
     };
-    // SAFETY: `process` is a live handle opened with
-    // PROCESS_SET_INFORMATION for the verified target. `class` is one of
-    // the documented priority-class constants.
-    let ok = unsafe { SetPriorityClass(process.raw(), class) };
+    let ok = set_process_priority(process.raw(), class);
     if ok == 0 {
         return Err(ActionError::Failed(last_error()));
     }
@@ -184,9 +174,7 @@ pub fn set_priority(key: ProcessKey, priority: Priority) -> Action {
 #[must_use]
 pub fn priority_of(key: ProcessKey) -> Option<Priority> {
     let process = verify(key, PROCESS_QUERY_LIMITED_INFORMATION).ok()?;
-    // SAFETY: `process` is a live handle opened with
-    // PROCESS_QUERY_LIMITED_INFORMATION for the verified target.
-    let class = unsafe { GetPriorityClass(process.raw()) };
+    let class = process_priority(process.raw());
     match class {
         IDLE_PRIORITY_CLASS => Some(Priority::Idle),
         BELOW_NORMAL_PRIORITY_CLASS => Some(Priority::BelowNormal),
@@ -210,10 +198,7 @@ pub fn set_affinity(key: ProcessKey, mask: usize) -> Action {
         return Err(ActionError::Failed(ERROR_INVALID_PARAMETER));
     }
     let process = verify(key, PROCESS_SET_INFORMATION)?;
-    // SAFETY: `process` is a live handle opened with
-    // PROCESS_SET_INFORMATION for the verified target. `mask` is a
-    // non-zero bitmask passed by value.
-    let ok = unsafe { SetProcessAffinityMask(process.raw(), mask) };
+    let ok = set_process_affinity(process.raw(), mask);
     if ok == 0 {
         return Err(ActionError::Failed(last_error()));
     }
@@ -237,10 +222,7 @@ fn verify(key: ProcessKey, access: u32) -> Result<OwnedHandle, ActionError> {
     // which is needed for the check and is granted far more freely than
     // the action rights.
     let combined = access | PROCESS_QUERY_LIMITED_INFORMATION;
-    // SAFETY: no pointers — an access mask, a BOOL, and a PID by value.
-    // The returned handle goes straight into `OwnedHandle`, which rejects
-    // the failure sentinels and closes it on drop.
-    let raw = unsafe { OpenProcess(combined, 0, key.pid) };
+    let raw = open_process_handle(combined, key.pid);
     let Some(process) = OwnedHandle::new(raw) else {
         let code = last_error();
         // `ERROR_INVALID_PARAMETER` from `OpenProcess` means there is no
@@ -269,24 +251,25 @@ fn created_at(process: &OwnedHandle) -> Option<u64> {
         dwLowDateTime: 0,
         dwHighDateTime: 0,
     };
-    let mut ignored = FILETIME {
+    let mut exited = FILETIME {
         dwLowDateTime: 0,
         dwHighDateTime: 0,
     };
-    // SAFETY: `process` is a live handle opened with at least
-    // PROCESS_QUERY_LIMITED_INFORMATION. All four out-parameters are
-    // live, uniquely-borrowed `FILETIME`s the callee writes once each;
-    // the three this code does not need are given separate storage
-    // rather than aliasing one, which would be undefined.
-    let ok = unsafe {
-        GetProcessTimes(
-            process.raw(),
-            std::ptr::from_mut(&mut created),
-            std::ptr::from_mut(&mut ignored),
-            std::ptr::from_mut(&mut ignored),
-            std::ptr::from_mut(&mut ignored),
-        )
+    let mut kernel = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
     };
+    let mut user = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let ok = read_process_times(
+        process.raw(),
+        &mut created,
+        &mut exited,
+        &mut kernel,
+        &mut user,
+    );
     if ok == 0 {
         return None;
     }
@@ -311,10 +294,7 @@ fn status_to_action(status: i32) -> Action {
 
 /// `GetLastError`, wrapped.
 fn last_error() -> u32 {
-    // SAFETY: takes no arguments, reads thread-local state, cannot fail.
-    // Called immediately after the call being interpreted, before
-    // anything else can overwrite it.
-    unsafe { GetLastError() }
+    read_last_error()
 }
 
 /// Opens Explorer with a file selected.
@@ -326,7 +306,6 @@ fn last_error() -> u32 {
 /// character is refused rather than escaped, because Windows paths cannot
 /// contain one and a path that appears to is not a path.
 pub fn reveal_in_explorer(path: &std::path::Path) -> Action {
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
     let text = path.to_string_lossy();
@@ -337,25 +316,97 @@ pub fn reveal_in_explorer(path: &std::path::Path) -> Action {
     let file = strings::to_wide("explorer.exe");
     let parameters = strings::to_wide(&format!("/select,\"{text}\""));
 
-    // SAFETY: all three wide buffers are live, NUL-terminated, and bound
-    // to locals that outlive the call. A null window handle and a null
-    // directory are both documented as "no preference". The return is an
-    // integer status disguised as a handle and is not a resource.
-    let result = unsafe {
+    let result = open_explorer_selection(&operation, &file, &parameters, SW_SHOWNORMAL);
+    // Values of 32 or less are the documented error range.
+    if (result as isize) <= 32 {
+        return Err(ActionError::Failed(last_error()));
+    }
+    Ok(())
+}
+
+/// Terminates a process after [`verify`] confirmed its creation time.
+fn terminate_verified_process(handle: windows_sys::Win32::Foundation::HANDLE) -> i32 {
+    // SAFETY: `verify` opened this live handle with PROCESS_TERMINATE; both
+    // arguments are by value and the API retains no state.
+    unsafe { TerminateProcess(handle, 1) }
+}
+
+/// Invokes the required ntdll suspend export for a verified process handle.
+fn suspend_process_handle(handle: windows_sys::Win32::Foundation::HANDLE) -> i32 {
+    // SAFETY: the verified live handle is passed by value to the exact declared ntdll ABI.
+    unsafe { NtSuspendProcess(handle) }
+}
+
+/// Invokes the required ntdll resume export for a verified process handle.
+fn resume_process_handle(handle: windows_sys::Win32::Foundation::HANDLE) -> i32 {
+    // SAFETY: the verified live handle is passed by value to the exact declared ntdll ABI.
+    unsafe { NtResumeProcess(handle) }
+}
+
+/// Sets the documented priority class on a verified live process handle.
+fn set_process_priority(handle: windows_sys::Win32::Foundation::HANDLE, class: u32) -> i32 {
+    // SAFETY: `handle` is live and `class` is a documented by-value priority constant.
+    unsafe { SetPriorityClass(handle, class) }
+}
+
+/// Reads the documented priority class from a verified live process handle.
+fn process_priority(handle: windows_sys::Win32::Foundation::HANDLE) -> u32 {
+    // SAFETY: `handle` is live; the API takes it by value and retains nothing.
+    unsafe { GetPriorityClass(handle) }
+}
+
+/// Applies a non-zero affinity mask to a verified live process handle.
+fn set_process_affinity(handle: windows_sys::Win32::Foundation::HANDLE, mask: usize) -> i32 {
+    // SAFETY: `handle` is live and `mask` is a validated non-zero by-value bit mask.
+    unsafe { SetProcessAffinityMask(handle, mask) }
+}
+
+/// Opens a process handle for the caller to wrap in [`OwnedHandle`].
+fn open_process_handle(access: u32, pid: u32) -> windows_sys::Win32::Foundation::HANDLE {
+    // SAFETY: all arguments are by value; the returned handle is immediately owned or rejected.
+    unsafe { OpenProcess(access, 0, pid) }
+}
+
+/// Writes all four process timestamps into distinct caller-owned values.
+fn read_process_times(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    created: &mut FILETIME,
+    exited: &mut FILETIME,
+    kernel: &mut FILETIME,
+    user: &mut FILETIME,
+) -> i32 {
+    // SAFETY: `handle` is live and each reference is a distinct live writable
+    // FILETIME out-parameter; the API retains neither the handle nor pointers.
+    unsafe { GetProcessTimes(handle, created, exited, kernel, user) }
+}
+
+/// Reads the caller thread's last Win32 error without changing it.
+fn read_last_error() -> u32 {
+    // SAFETY: this parameterless call returns thread-local state by value.
+    unsafe { GetLastError() }
+}
+
+/// Opens Explorer with a caller-owned operation, executable, and selection parameters.
+fn open_explorer_selection(
+    operation: &[u16],
+    file: &[u16],
+    parameters: &[u16],
+    show: i32,
+) -> windows_sys::Win32::Foundation::HINSTANCE {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+
+    // SAFETY: all slices are live NUL-terminated UTF-16 strings; null owner and
+    // directory are documented defaults, and ShellExecute retains no pointer.
+    unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
             operation.as_ptr(),
             file.as_ptr(),
             parameters.as_ptr(),
             std::ptr::null(),
-            SW_SHOWNORMAL,
+            show,
         )
-    };
-    // Values of 32 or less are the documented error range.
-    if (result as isize) <= 32 {
-        return Err(ActionError::Failed(last_error()));
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -365,9 +416,7 @@ mod tests {
     /// This process's real key, read from the kernel rather than assumed.
     fn own_key() -> Option<ProcessKey> {
         let pid = std::process::id();
-        // SAFETY: no pointers; an access mask, a BOOL, and a PID by
-        // value. The handle goes straight into `OwnedHandle`.
-        let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        let raw = open_process_handle(PROCESS_QUERY_LIMITED_INFORMATION, pid);
         let process = OwnedHandle::new(raw)?;
         Some(ProcessKey {
             pid,

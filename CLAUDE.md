@@ -168,6 +168,21 @@ that keeps it reviewable:
 No caller of one of these should need `unsafe` itself, and no test body
 should contain any.
 
+This is mandatory for agents as well as contributors. Before adding an
+unsafe operation, prove a safe standard-library operation, checked byte
+encoding, `Default`, or an existing owner cannot do the job. Required
+unsafe stays under `src/win/`; one private safe function owns exactly one
+unsafe operation. Public `unsafe fn`, unsafe test fixtures, and unsafe in
+`main`, `config`, `engine`, or `gui` are prohibited. ABI-required
+`unsafe extern` declarations/callbacks are the narrow exception, and
+their logic must immediately delegate to safe code.
+
+The policy is executable: `unsafe_op_in_unsafe_fn` and Clippy's
+`undocumented_unsafe_blocks` / `missing_safety_doc` are denied, while
+`src/unsafe_check.rs` rejects unsafe outside `src/win`, unsafe in tests,
+public unsafe functions, and functions containing multiple unsafe
+operations. Do not suppress those checks; reshape the boundary.
+
 ### A hand-declared kernel struct is pinned by compile-time assertions
 
 `src/win/nt/types.rs` declares `SystemProcessInformation` and friends by

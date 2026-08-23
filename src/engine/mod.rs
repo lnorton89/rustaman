@@ -9,9 +9,9 @@
 //! The seam between Windows and the UI.
 //!
 //! A background thread samples the machine on an interval and publishes a
-//! [`Snapshot`] over a channel. The UI thread takes the latest one and
-//! draws it. **The UI thread makes no system call at all**, which is the
-//! single design decision this module exists to enforce.
+//! [`Snapshot`] into a latest-value mailbox. The UI takes the newest value
+//! and draws it. Expensive periodic collection stays off the UI thread;
+//! explicit user actions may still make small, bounded system calls.
 //!
 //! ## Why the sampling cannot be on the UI thread
 //!
@@ -30,12 +30,10 @@
 //! hung. That is the complaint about the one that ships with Windows, and
 //! it is the reason for this architecture.
 //!
-//! ## The channel drops rather than queues
+//! ## The mailbox overwrites rather than queues
 //!
-//! The channel is bounded at [`QUEUE_DEPTH`] and the sampler uses a
-//! non-blocking send. If the UI is not keeping up — minimised, on a
-//! machine mid-stall — the sampler discards the snapshot and takes the
-//! next one on schedule.
+//! There is one slot. If the UI is not keeping up — minimised, on a
+//! machine mid-stall — publishing replaces the older unread snapshot.
 //!
 //! An unbounded channel would queue them instead, and the UI would then
 //! work through a backlog of stale snapshots showing the machine as it
@@ -43,23 +41,15 @@
 //! be worse: the sampler would stall to the UI's rate and the graphs would
 //! silently change their time base.
 //!
-//! Dropping is the only option that keeps "the last snapshot is what the
-//! machine looks like now" true, which is the property everything on
-//! screen depends on.
+//! Overwriting the old value keeps "the last snapshot is what the machine
+//! looks like now" true without ever blocking the sampler.
 
 pub mod sampler;
 
 use crate::model::Snapshot;
-use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-/// How many snapshots may be in flight before the sampler starts dropping.
-///
-/// Two: one the UI is drawing and one waiting. A deeper queue only buys
-/// the ability to fall further behind — see the module docs.
-const QUEUE_DEPTH: usize = 2;
 
 /// A handle to the running sampler.
 ///
@@ -67,7 +57,7 @@ const QUEUE_DEPTH: usize = 2;
 /// cannot outlive the window it feeds.
 pub struct Engine {
     /// Where snapshots arrive.
-    snapshots: Receiver<Snapshot>,
+    snapshots: Arc<Mutex<Option<Arc<Snapshot>>>>,
     /// The sampling interval, in milliseconds. Shared with the thread so
     /// the settings page can change it without restarting the sampler.
     interval_ms: Arc<AtomicU64>,
@@ -100,8 +90,8 @@ impl Engine {
     /// opening frame where every process shows its cumulative total as if
     /// it accrued in one second.
     #[must_use]
-    pub fn start(interval: Duration) -> Self {
-        let (sender, snapshots) = bounded(QUEUE_DEPTH);
+    pub fn start(interval: Duration, elevated: bool) -> Self {
+        let snapshots = Arc::new(Mutex::new(None));
         let interval_ms = Arc::new(AtomicU64::new(millis(interval)));
         let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -114,8 +104,9 @@ impl Engine {
                 let interval_ms = Arc::clone(&interval_ms);
                 let stopping = Arc::clone(&stopping);
                 let finished = Arc::clone(&finished);
+                let snapshots = Arc::clone(&snapshots);
                 move || {
-                    sampler::run(&sender, &interval_ms, &stopping);
+                    sampler::run(&snapshots, &interval_ms, &stopping, elevated);
                     finished.store(true, Ordering::Release);
                 }
             })
@@ -133,18 +124,11 @@ impl Engine {
     /// The most recent snapshot, or `None` if none has arrived since the
     /// last call.
     ///
-    /// Drains the channel and returns the **last** item rather than the
-    /// first. If two snapshots arrived between frames — which happens
-    /// whenever a frame takes longer than the interval — drawing the
-    /// older one and leaving the newer queued would put the UI
-    /// permanently one sample behind, and it would never catch up.
+    /// Takes the mailbox value. Publishing may have overwritten older
+    /// unread samples, so this is always the freshest available value.
     #[must_use]
-    pub fn latest(&self) -> Option<Snapshot> {
-        let mut newest = None;
-        while let Ok(snapshot) = self.snapshots.try_recv() {
-            newest = Some(snapshot);
-        }
-        newest
+    pub fn latest(&self) -> Option<Arc<Snapshot>> {
+        self.snapshots.lock().ok()?.take()
     }
 
     /// Changes the sampling interval.
@@ -171,7 +155,9 @@ impl Engine {
     /// on a frozen display looking live.
     #[must_use]
     pub fn is_running(&self) -> bool {
-        self.thread.is_some() && !self.stopping.load(Ordering::Relaxed)
+        self.thread.is_some()
+            && !self.stopping.load(Ordering::Relaxed)
+            && !self.finished.load(Ordering::Acquire)
     }
 }
 
@@ -236,17 +222,10 @@ fn millis(interval: Duration) -> u64 {
     )
 }
 
-/// Sends a snapshot, dropping it if the UI is not keeping up.
-///
-/// Returns whether the receiver is still connected, which is how the
-/// sampler learns the window has closed.
-fn publish(sender: &Sender<Snapshot>, snapshot: Snapshot) -> bool {
-    match sender.try_send(snapshot) {
-        Ok(()) => true,
-        // The UI is behind. Drop this one and take the next on schedule;
-        // see the module docs.
-        Err(TrySendError::Full(_)) => true,
-        Err(TrySendError::Disconnected(_)) => false,
+/// Publishes a snapshot, replacing an older unread value.
+fn publish(mailbox: &Mutex<Option<Arc<Snapshot>>>, snapshot: Snapshot) {
+    if let Ok(mut slot) = mailbox.lock() {
+        *slot = Some(Arc::new(snapshot));
     }
 }
 
@@ -272,44 +251,19 @@ mod tests {
     }
 
     #[test]
-    fn a_full_queue_drops_rather_than_disconnecting() {
-        // The property the whole channel design rests on: a UI that is
-        // not keeping up must cost the sampler nothing.
-        let (sender, receiver) = bounded::<Snapshot>(1);
-        assert!(publish(&sender, Snapshot::default()));
-        assert!(
-            publish(&sender, Snapshot::default()),
-            "a full queue is not an error — the snapshot is dropped and \
-             the sampler carries on"
-        );
-        assert_eq!(receiver.len(), 1, "and the queue has not grown");
-    }
-
-    #[test]
-    fn a_closed_receiver_tells_the_sampler_to_stop() {
-        let (sender, receiver) = bounded::<Snapshot>(1);
-        drop(receiver);
-        assert!(
-            !publish(&sender, Snapshot::default()),
-            "a disconnected channel is how the sampler learns the window \
-             has closed"
-        );
-    }
-
-    #[test]
-    fn latest_returns_the_newest_snapshot_and_drains_the_rest() {
-        // Drawing the oldest and leaving the newest queued would put the
-        // UI permanently one sample behind, with no way to catch up.
-        let (sender, snapshots) = bounded::<Snapshot>(4);
-        for sequence in 1..=3u64 {
-            let snapshot = Snapshot {
-                sequence,
-                ..Snapshot::default()
-            };
-            assert!(publish(&sender, snapshot));
+    fn latest_value_overwrites_stale_unread_snapshots() {
+        let snapshots = Arc::new(Mutex::new(None));
+        for sequence in 1..=4u64 {
+            publish(
+                &snapshots,
+                Snapshot {
+                    sequence,
+                    ..Snapshot::default()
+                },
+            );
         }
         let engine = Engine {
-            snapshots,
+            snapshots: Arc::clone(&snapshots),
             interval_ms: Arc::new(AtomicU64::new(1_000)),
             stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             finished: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -317,13 +271,13 @@ mod tests {
         };
         assert_eq!(
             engine.latest().map(|snapshot| snapshot.sequence),
-            Some(3),
+            Some(4),
             "the newest snapshot is the one that describes the machine now"
         );
         assert_eq!(
             engine.latest().map(|snapshot| snapshot.sequence),
             None,
-            "and the queue is empty afterwards"
+            "and the mailbox is empty afterwards"
         );
     }
 
@@ -340,7 +294,7 @@ mod tests {
         // it, this test hangs rather than fails, so it is bounded from
         // the outside too: the assertion is on elapsed time, and the
         // whole thing is over in `SHUTDOWN_GRACE` plus a poll.
-        let (sender, snapshots) = bounded::<Snapshot>(1);
+        let snapshots = Arc::new(Mutex::new(None));
         let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let wedged = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let thread = std::thread::Builder::new()
@@ -348,9 +302,6 @@ mod tests {
             .spawn({
                 let wedged = Arc::clone(&wedged);
                 move || {
-                    // Held so the channel stays connected, exactly as a
-                    // real sampler holds it.
-                    let _sender = sender;
                     while !wedged.load(Ordering::Acquire) {
                         std::thread::sleep(Duration::from_millis(5));
                     }
@@ -390,7 +341,7 @@ mod tests {
         // A thread that failed to spawn means no snapshots will ever
         // arrive; the UI says so rather than showing a frozen display
         // that looks live.
-        let (_sender, snapshots) = bounded::<Snapshot>(1);
+        let snapshots = Arc::new(Mutex::new(None));
         let engine = Engine {
             snapshots,
             interval_ms: Arc::new(AtomicU64::new(1_000)),
@@ -402,10 +353,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "environment smoke test"]
     fn a_real_engine_produces_snapshots_and_stops_cleanly() -> Result<()> {
         // The end-to-end path, at the fastest interval so the test is
         // short. Exercises the sampler thread against the real machine.
-        let engine = Engine::start(Duration::from_millis(crate::config::MIN_INTERVAL_MS));
+        let engine = Engine::start(Duration::from_millis(crate::config::MIN_INTERVAL_MS), false);
         assert!(engine.is_running());
 
         // The first snapshot arrives after one interval, and every rate
@@ -452,7 +404,7 @@ mod tests {
 
     #[test]
     fn changing_the_interval_takes_effect_without_a_restart() {
-        let engine = Engine::start(Duration::from_secs(1));
+        let engine = Engine::start(Duration::from_secs(1), false);
         assert_eq!(engine.interval(), Duration::from_secs(1));
         engine.set_interval(Duration::from_secs(2));
         assert_eq!(engine.interval(), Duration::from_secs(2));

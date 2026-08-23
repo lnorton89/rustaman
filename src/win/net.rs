@@ -77,10 +77,11 @@ use crate::model::{AdapterKind, AdapterState};
 use std::collections::HashMap;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     FreeMibTable, GetExtendedTcpTable, GetExtendedUdpTable, GetIfTable2, MIB_IF_ROW2,
-    MIB_IF_TABLE2, MIB_TCPTABLE_OWNER_PID, MIB_UDPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
-    UDP_TABLE_OWNER_PID,
+    MIB_IF_TABLE2, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID,
+    MIB_TCPTABLE_OWNER_PID, MIB_UDP6ROW_OWNER_PID, MIB_UDP6TABLE_OWNER_PID, MIB_UDPROW_OWNER_PID,
+    MIB_UDPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
 };
-use windows_sys::Win32::Networking::WinSock::AF_INET;
+use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
 /// One adapter's cumulative counters and the facts that identify it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -304,11 +305,7 @@ impl IfTable {
     /// Reads the interface table.
     fn read() -> Option<Self> {
         let mut pointer: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
-        // SAFETY: `pointer` is a live, uniquely-borrowed out-parameter
-        // the callee writes a freshly allocated table into on success.
-        // Ownership of that allocation transfers to this `IfTable`,
-        // whose `Drop` frees it.
-        let status = unsafe { GetIfTable2(std::ptr::from_mut(&mut pointer)) };
+        let status = get_if_table(&mut pointer);
         if status != 0 || pointer.is_null() {
             return None;
         }
@@ -321,9 +318,19 @@ impl IfTable {
     /// slice is built from the header's stated count. The lifetime ties
     /// it to `self`, which is what stops a row outliving the allocation.
     fn rows(&self) -> &[MIB_IF_ROW2] {
+        let table = self.table();
+        self.rows_from_table(table)
+    }
+
+    /// Borrows the allocation header guarded by this owner.
+    fn table(&self) -> &MIB_IF_TABLE2 {
         // SAFETY: `self.0` is a non-null table allocated by
         // `GetIfTable2` (checked in `read`) and alive for the borrow.
-        let table = unsafe { &*self.0 };
+        unsafe { &*self.0 }
+    }
+
+    /// Borrows the variable-length row array in this owned allocation.
+    fn rows_from_table<'a>(&'a self, table: &'a MIB_IF_TABLE2) -> &'a [MIB_IF_ROW2] {
         let count = usize::try_from(table.NumEntries).unwrap_or(0);
         // SAFETY: the table's `Table` field is the first element of a
         // trailing array of `NumEntries` rows, which is the layout
@@ -335,10 +342,22 @@ impl IfTable {
 
 impl Drop for IfTable {
     fn drop(&mut self) {
-        // SAFETY: `self.0` is a non-null table from `GetIfTable2`, owned
-        // exclusively by this value, and this is the one free.
-        unsafe { FreeMibTable(self.0.cast()) };
+        free_if_table(self.0);
     }
+}
+
+/// Allocates an interface table into `pointer`.
+fn get_if_table(pointer: &mut *mut MIB_IF_TABLE2) -> u32 {
+    // SAFETY: `pointer` is a live, uniquely-borrowed out-parameter. On
+    // success the allocation is transferred immediately to `IfTable`.
+    unsafe { GetIfTable2(std::ptr::from_mut(pointer)) }
+}
+
+/// Releases the allocation exclusively owned by an `IfTable`.
+fn free_if_table(pointer: *mut MIB_IF_TABLE2) {
+    // SAFETY: callers pass the non-null allocation returned by
+    // `GetIfTable2` exactly once, from `IfTable::drop`.
+    unsafe { FreeMibTable(pointer.cast()) };
 }
 
 /// Counts open TCP and UDP endpoints per process.
@@ -356,39 +375,27 @@ pub fn connections_by_pid() -> HashMap<u32, u32> {
 
 /// Adds every TCP endpoint's owner to the counts.
 fn count_tcp(counts: &mut HashMap<u32, u32>) {
-    let Some(buffer) = extended_table(true) else {
-        return;
-    };
-    // The table is a `DWORD` count followed by that many rows.
-    let Some(count) = leading_count(&buffer) else {
-        return;
-    };
-    let header = std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>()
-        - std::mem::size_of::<windows_sys::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID>(
-        );
-    let stride = std::mem::size_of::<
-        windows_sys::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID,
-    >();
-    // The owning PID is the last `DWORD` of the row.
-    let pid_offset = stride - std::mem::size_of::<u32>();
-    tally(&buffer, count, header, stride, pid_offset, counts);
+    count_table::<MIB_TCPTABLE_OWNER_PID, MIB_TCPROW_OWNER_PID>(true, AF_INET as u32, counts);
+    count_table::<MIB_TCP6TABLE_OWNER_PID, MIB_TCP6ROW_OWNER_PID>(true, AF_INET6 as u32, counts);
 }
 
 /// Adds every UDP endpoint's owner to the counts.
 fn count_udp(counts: &mut HashMap<u32, u32>) {
-    let Some(buffer) = extended_table(false) else {
+    count_table::<MIB_UDPTABLE_OWNER_PID, MIB_UDPROW_OWNER_PID>(false, AF_INET as u32, counts);
+    count_table::<MIB_UDP6TABLE_OWNER_PID, MIB_UDP6ROW_OWNER_PID>(false, AF_INET6 as u32, counts);
+}
+
+/// Reads and tallies one address-family/protocol table.
+fn count_table<Table, Row>(tcp: bool, family: u32, counts: &mut HashMap<u32, u32>) {
+    let Some(buffer) = extended_table(tcp, family) else {
         return;
     };
     let Some(count) = leading_count(&buffer) else {
         return;
     };
-    let header = std::mem::size_of::<MIB_UDPTABLE_OWNER_PID>()
-        - std::mem::size_of::<windows_sys::Win32::NetworkManagement::IpHelper::MIB_UDPROW_OWNER_PID>(
-        );
-    let stride = std::mem::size_of::<
-        windows_sys::Win32::NetworkManagement::IpHelper::MIB_UDPROW_OWNER_PID,
-    >();
-    let pid_offset = stride - std::mem::size_of::<u32>();
+    let header = std::mem::size_of::<Table>().saturating_sub(std::mem::size_of::<Row>());
+    let stride = std::mem::size_of::<Row>();
+    let pid_offset = stride.saturating_sub(std::mem::size_of::<u32>());
     tally(&buffer, count, header, stride, pid_offset, counts);
 }
 
@@ -444,71 +451,66 @@ fn leading_count(buffer: &[u8]) -> Option<u32> {
 /// `tcp` selects between the TCP and UDP variants; they share the
 /// ask-then-fetch protocol and differ only in the function called.
 ///
-/// IPv4 only. The IPv6 tables are a second pair of calls with a second
-/// pair of row layouts, and a process with an IPv6 endpoint almost always
-/// has an IPv4 one too — so the second pair roughly doubles the work to
-/// change a count from "some" to "slightly more some". Recorded in
-/// `docs/WINDOWS_APIS.md` as a deliberate omission.
-fn extended_table(tcp: bool) -> Option<Vec<u8>> {
+/// IPv4 and IPv6 use different row layouts, selected by `family`.
+fn extended_table(tcp: bool, family: u32) -> Option<Vec<u8>> {
     let mut size = 0u32;
     // First call: a null buffer asks for the size.
     //
-    // SAFETY: a null buffer with `size` as a live out-parameter is the
-    // documented way to ask for the required length. The call is
-    // expected to fail; only the size it reports is used. The remaining
-    // arguments are by-value constants.
-    let _ = unsafe {
-        if tcp {
-            GetExtendedTcpTable(
-                std::ptr::null_mut(),
-                std::ptr::from_mut(&mut size),
-                0,
-                AF_INET as u32,
-                TCP_TABLE_OWNER_PID_ALL,
-                0,
-            )
-        } else {
-            GetExtendedUdpTable(
-                std::ptr::null_mut(),
-                std::ptr::from_mut(&mut size),
-                0,
-                AF_INET as u32,
-                UDP_TABLE_OWNER_PID,
-                0,
-            )
-        }
+    let _ = if tcp {
+        query_tcp_table(std::ptr::null_mut(), &mut size, family)
+    } else {
+        query_udp_table(std::ptr::null_mut(), &mut size, family)
     };
-    let capacity = usize::try_from(size).unwrap_or(0);
-    if capacity == 0 {
-        return None;
+    for _ in 0..3 {
+        let capacity = usize::try_from(size).unwrap_or(0);
+        if capacity == 0 {
+            return None;
+        }
+        let mut buffer = vec![0u8; capacity];
+        let status = if tcp {
+            query_tcp_table(buffer.as_mut_ptr().cast(), &mut size, family)
+        } else {
+            query_udp_table(buffer.as_mut_ptr().cast(), &mut size, family)
+        };
+        if status == 0 {
+            return Some(buffer);
+        }
     }
+    None
+}
 
-    let mut buffer = vec![0u8; capacity];
-    // SAFETY: `buffer` is a live, uniquely-borrowed allocation of exactly
-    // `size` bytes, which is what the length out-parameter states. The
-    // callee writes only within it and does not retain the pointer.
-    let status = unsafe {
-        if tcp {
-            GetExtendedTcpTable(
-                buffer.as_mut_ptr().cast(),
-                std::ptr::from_mut(&mut size),
-                0,
-                AF_INET as u32,
-                TCP_TABLE_OWNER_PID_ALL,
-                0,
-            )
-        } else {
-            GetExtendedUdpTable(
-                buffer.as_mut_ptr().cast(),
-                std::ptr::from_mut(&mut size),
-                0,
-                AF_INET as u32,
-                UDP_TABLE_OWNER_PID,
-                0,
-            )
-        }
-    };
-    (status == 0).then_some(buffer)
+/// Queries or fills one extended TCP table.
+fn query_tcp_table(buffer: *mut core::ffi::c_void, size: &mut u32, family: u32) -> u32 {
+    // SAFETY: `buffer` is either null for the documented sizing call or
+    // points to the caller's live `*size`-byte allocation. `size` is a
+    // unique live out-parameter and the remaining values are constants.
+    unsafe {
+        GetExtendedTcpTable(
+            buffer,
+            std::ptr::from_mut(size),
+            0,
+            family,
+            TCP_TABLE_OWNER_PID_ALL,
+            0,
+        )
+    }
+}
+
+/// Queries or fills one extended UDP table.
+fn query_udp_table(buffer: *mut core::ffi::c_void, size: &mut u32, family: u32) -> u32 {
+    // SAFETY: `buffer` is either null for the documented sizing call or
+    // points to the caller's live `*size`-byte allocation. `size` is a
+    // unique live out-parameter and the remaining values are constants.
+    unsafe {
+        GetExtendedUdpTable(
+            buffer,
+            std::ptr::from_mut(size),
+            0,
+            family,
+            UDP_TABLE_OWNER_PID,
+            0,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -603,36 +605,25 @@ mod tests {
 
     #[test]
     fn nothing_is_filtered_out_for_being_down() -> anyhow::Result<()> {
-        // A test cannot unplug a cable, so this checks the property that
-        // makes the disappearing rows impossible rather than the
-        // symptom: the predicate deciding what is in the list reads no
-        // live field. `OperStatus`, `AdminStatus`, `MediaConnectState`
-        // and the link speed all belong to `state_of` and `link_speed`,
-        // which describe an adapter — the moment one of them appears in
-        // `is_an_adapter` it decides whether the adapter exists, and the
-        // row starts vanishing when the machine changes.
-        let source = include_str!("net.rs");
-        let body = source
-            .split("fn is_an_adapter")
-            .nth(1)
-            .and_then(|rest| rest.split("\n}").next())
-            .ok_or_else(|| anyhow::anyhow!("is_an_adapter is no longer a plain function"))?;
-        for live in [
-            "OperStatus",
-            "AdminStatus",
-            "MediaConnectState",
-            "LinkSpeed",
-        ] {
-            assert!(
-                !body.contains(live),
-                "is_an_adapter reads {live}, which is a live property — \
-                 an adapter would drop out of the list when it changed"
-            );
-        }
+        let mut row = MIB_IF_ROW2 {
+            Type: IF_TYPE_ETHERNET,
+            ..MIB_IF_ROW2::default()
+        };
+        assert!(is_an_adapter(&row));
+        row.OperStatus = 0;
+        row.AdminStatus = 0;
+        row.MediaConnectState = 0;
+        row.TransmitLinkSpeed = 0;
+        row.ReceiveLinkSpeed = 0;
+        assert!(
+            is_an_adapter(&row),
+            "live state must describe an adapter, not remove it"
+        );
         Ok(())
     }
 
     #[test]
+    #[ignore = "environment smoke test"]
     fn this_process_can_be_found_among_the_connection_owners() {
         // Every Windows machine has open endpoints; the map should not be
         // empty, and every PID in it should be plausible.

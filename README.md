@@ -14,9 +14,9 @@ Rustaman is a native Rust rewrite of the idea: the same data, read through
 the same interfaces, in a window that stays responsive when the machine
 does not.
 
-- **The UI thread makes no system call.** A background thread samples the
-  machine and publishes snapshots; the window draws whatever arrived last.
-  A stalled disk cannot stall the window.
+- **Periodic monitoring stays off the UI thread.** A background sampler
+  overwrites a latest-value mailbox; the window draws the freshest snapshot.
+  Explicit user actions remain synchronous so their result is immediate.
 - **One `NtQuerySystemInformation` call** gets CPU, memory and I/O for
   every process at once, instead of the ~2,500 syscalls per second the
   documented route costs — and unlike that route, it can see protected
@@ -35,12 +35,14 @@ does not.
 | View | |
 |---|---|
 | **Processes** | A real tree, grouped into Apps / Background / Windows. Collapsed parents carry their subtree's totals, so a browser's thirty renderers do not hide behind it. Cells are heat-tinted by load, so a glance down a column finds the heavy rows. |
-| **Performance** | CPU (total, kernel band, and a per-core grid), memory including the kernel pools, per-disk **active time** — not just throughput — network adapters, and GPU engines. |
+| **Performance** | CPU (total, kernel band, labeled logical-processor grid, and recent averages/peaks), memory and commit pressure including kernel pools, per-disk **active time** and throughput, network link/totals, and GPU engines and dedicated memory. |
+| **Memory** | A per-process treemap showing what is holding physical memory and how each selected process is using it. |
 | **Details** | One flat technical table plus an inspector: owner, session, bitness, elevation, handles, threads, cumulative I/O, full path. |
 | **Services** | Every Win32 service with its state and hosting PID, and "go to process" to jump from `svchost.exe` to whichever of its fifteen services is busy. |
-| **Startup** | All six places a program can register to run at logon — including the 32-bit `Run` key everyone forgets — with each entry's real enabled state. |
+| **Startup** | Canonical user/machine `Run` and `RunOnce` registry views plus both Startup folders, including Task Manager approval state. |
+| **System** | Windows edition/build, computer model, firmware, processor, memory, storage, graphics, network hardware, and live machine totals. |
 
-Actions: end task, end process tree (children first), suspend, resume,
+Actions: end task, end process tree best-effort from the current snapshot (children first), suspend, resume,
 priority, open file location, copy details, start/stop a service.
 
 ### Search
@@ -63,7 +65,7 @@ user:system               owned by SYSTEM — unambiguously
 | `F5` | Re-read services and startup entries |
 | `Ctrl+F` | Search |
 | `Esc` | Clear the search, then the selection |
-| `Ctrl+1`…`6` | Switch view |
+| `Ctrl+1`…`8` | Switch view |
 
 ---
 
@@ -99,7 +101,7 @@ The portable half of the crate — the model, the theming, the formatting,
 the rate arithmetic — builds and tests on any platform:
 
 ```bash
-cargo test --lib          # on Linux or macOS: the ~80% that isn't Win32
+cargo test --lib          # on Linux or macOS: the portable model and utilities
 ```
 
 ## Theming
@@ -149,7 +151,7 @@ has made the window unusable.
 - **Per-process network throughput.** No Win32 call provides it; Task
   Manager reads an ETW kernel session, which means a continuous trace and
   the privileges one needs. Rustaman shows open TCP/UDP endpoint counts
-  instead — cheap, exact, and unprivileged.
+  instead — cheap, IPv4+IPv6 aware, and unprivileged.
 - **Enable or disable startup entries.** It reports what is registered and
   whether it is enabled. Toggling one means writing another program's
   registry state, which is not something to add without a flow designed

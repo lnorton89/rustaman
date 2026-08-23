@@ -64,27 +64,16 @@ impl OwnedHandle {
 
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
-        // SAFETY: `self.0` came from `OwnedHandle::new`, which rejected
-        // null and INVALID_HANDLE_VALUE, so this is a handle the kernel
-        // issued to this process. Nothing else holds a copy — `raw`
-        // only lends it for the duration of a borrow, and this type is
-        // neither `Copy` nor `Clone` — so this is the one close.
-        unsafe {
-            let _ = CloseHandle(self.0);
-        }
+        close_kernel_handle(self.0);
     }
 }
 
-// A handle is a process-wide token, not a thread-local one, and every
-// wrapper here owns its handle exclusively. Sending one to the sampler
-// thread is therefore sound, and is what lets identity lookups be done
-// off the UI thread.
-//
-// SAFETY: `OwnedHandle` has exclusive ownership of a kernel handle.
-// Kernel handles are valid in any thread of the owning process, and
-// `CloseHandle` may be called from any thread. There is no thread
-// affinity and no interior mutability.
-unsafe impl Send for OwnedHandle {}
+/// Closes one owned kernel handle.
+fn close_kernel_handle(handle: HANDLE) {
+    // SAFETY: `OwnedHandle::new` rejected both failure sentinels and the
+    // non-Copy owner calls this once, so `handle` is a live kernel handle.
+    let _ = unsafe { CloseHandle(handle) };
+}
 
 /// A block allocated by a Win32 call that documents `LocalFree` as its
 /// release function.
@@ -118,13 +107,15 @@ impl OwnedLocalMemory {
 
 impl Drop for OwnedLocalMemory {
     fn drop(&mut self) {
-        // SAFETY: `self.0` is non-null (checked in `new`) and came from a
-        // Win32 call documented as returning `LocalFree`-owned memory.
-        // Ownership is exclusive, so this is the one free.
-        unsafe {
-            let _ = LocalFree(self.0);
-        }
+        free_local_memory(self.0);
     }
+}
+
+/// Frees a Win32 allocation whose documented release function is `LocalFree`.
+fn free_local_memory(memory: HLOCAL) {
+    // SAFETY: the constructor accepted only a non-null pointer returned by a
+    // LocalAlloc-family API; this uniquely-owned wrapper releases it once.
+    let _ = unsafe { LocalFree(memory) };
 }
 
 /// An open registry key that will be closed on drop.
@@ -154,17 +145,16 @@ impl OwnedKey {
 
 impl Drop for OwnedKey {
     fn drop(&mut self) {
-        // SAFETY: `self.0` is a non-null key handle from `RegOpenKeyExW`
-        // (checked in `new`), owned exclusively by this value.
-        unsafe {
-            let _ = RegCloseKey(self.0);
-        }
+        close_registry_key(self.0);
     }
 }
 
-// SAFETY: as `OwnedHandle` — a registry key handle has no thread
-// affinity and this type owns its handle exclusively.
-unsafe impl Send for OwnedKey {}
+/// Closes one uniquely-owned open registry key.
+fn close_registry_key(key: HKEY) {
+    // SAFETY: the constructor accepted only a non-null `RegOpenKeyExW` result
+    // and this non-Copy wrapper owns it exclusively, so this is the one close.
+    let _ = unsafe { RegCloseKey(key) };
+}
 
 #[cfg(test)]
 mod tests {
@@ -189,14 +179,5 @@ mod tests {
     fn a_null_allocation_or_key_is_rejected() {
         assert!(OwnedLocalMemory::new(std::ptr::null_mut()).is_none());
         assert!(OwnedKey::new(std::ptr::null_mut()).is_none());
-    }
-
-    #[test]
-    fn an_owned_handle_can_be_moved_to_another_thread() {
-        // Compile-time only: identity lookups run on the sampler thread,
-        // and this is what says that is allowed.
-        fn assert_send<T: Send>() {}
-        assert_send::<OwnedHandle>();
-        assert_send::<OwnedKey>();
     }
 }

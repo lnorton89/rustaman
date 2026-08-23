@@ -35,6 +35,7 @@ use crate::model::sort::SortKey;
 use crate::model::tree::{Entry, Forest, Layout};
 use crate::model::{ProcessKey, ProcessKind, ProcessRow};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Everything the flattened row list depends on.
 ///
@@ -101,7 +102,7 @@ impl RowKey {
 #[derive(Default)]
 pub struct Cache {
     /// The rows to draw.
-    entries: Vec<Entry>,
+    entries: Arc<[Entry]>,
     /// The forest they were flattened from, kept so a click on a
     /// disclosure triangle or an "end process tree" can walk it without
     /// rebuilding.
@@ -139,17 +140,19 @@ impl Cache {
         };
         self.matched = visible.as_ref().map_or(0, HashSet::len);
 
-        self.entries = forest.flatten(
-            rows,
-            Layout {
-                sort: key.sort,
-                descending: key.descending,
-                grouped: key.grouped,
-                expanded,
-                collapsed,
-                visible: visible.as_ref(),
-            },
-        );
+        self.entries = forest
+            .flatten(
+                rows,
+                Layout {
+                    sort: key.sort,
+                    descending: key.descending,
+                    grouped: key.grouped,
+                    expanded,
+                    collapsed,
+                    visible: visible.as_ref(),
+                },
+            )
+            .into();
         self.forest = forest;
         self.key = Some(key);
         true
@@ -159,6 +162,12 @@ impl Cache {
     #[must_use]
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// A cheap owned handle for draw closures that also mutate app state.
+    #[must_use]
+    pub fn shared_entries(&self) -> Arc<[Entry]> {
+        Arc::clone(&self.entries)
     }
 
     /// The forest the rows were flattened from.

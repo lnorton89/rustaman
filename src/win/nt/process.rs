@@ -144,14 +144,7 @@ pub fn walk(bytes: &[u8]) -> Vec<RawProcess> {
         let pid = entry.UniqueProcessId as usize as u32;
         let parent_pid = entry.InheritedFromUniqueProcessId as usize as u32;
 
-        // SAFETY: `entry.ImageName.Buffer` points into `bytes`, which is
-        // borrowed for the whole of this function and outlives the call.
-        // `read_entry` has already confirmed a whole entry lies within
-        // `bytes`, so the `UNICODE_STRING` itself was read from valid
-        // memory. A hostile buffer could still hold a bad pointer, but
-        // this buffer was written by the kernel into an allocation this
-        // process owns — it is not attacker-controlled.
-        let name = unsafe { strings::from_unicode_string(&entry.ImageName) };
+        let name = strings::from_unicode_string_in(&entry.ImageName, bytes).unwrap_or_default();
 
         found.push(RawProcess {
             pid,
@@ -236,9 +229,7 @@ fn read_entry(bytes: &[u8], offset: usize) -> Option<SystemProcessInformation> {
     // the struct is a plain integer, pointer, or `UNICODE_STRING`, none
     // of which has an invalid bit pattern, so any byte content is a
     // valid — if possibly meaningless — value.
-    let entry =
-        unsafe { std::ptr::read_unaligned(slice.as_ptr().cast::<SystemProcessInformation>()) };
-    Some(entry)
+    read_process_entry(slice)
 }
 
 /// Whether every one of a process's threads is suspended.
@@ -283,8 +274,9 @@ fn is_suspended(bytes: &[u8], offset: usize, thread_count: u32) -> bool {
         // SAFETY: as `read_entry` — `slice` is exactly one thread record
         // long, valid for reads, and read without an alignment
         // requirement. Every field is a plain integer or pointer.
-        let thread =
-            unsafe { std::ptr::read_unaligned(slice.as_ptr().cast::<SystemThreadInformation>()) };
+        let Some(thread) = read_thread_entry(slice) else {
+            return false;
+        };
         let sleeping = thread.ThreadState == THREAD_STATE_WAITING
             && thread.WaitReason == WAIT_REASON_SUSPENDED;
         if !sleeping {
@@ -292,6 +284,21 @@ fn is_suspended(bytes: &[u8], offset: usize, thread_count: u32) -> bool {
         }
     }
     true
+}
+
+fn read_process_entry(bytes: &[u8]) -> Option<SystemProcessInformation> {
+    if bytes.len() < PROCESS_INFORMATION_SIZE {
+        return None;
+    }
+    // SAFETY: caller checked this kernel buffer contains one complete process record header.
+    Some(unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<SystemProcessInformation>()) })
+}
+fn read_thread_entry(bytes: &[u8]) -> Option<SystemThreadInformation> {
+    if bytes.len() < THREAD_INFORMATION_SIZE {
+        return None;
+    }
+    // SAFETY: caller sliced one complete kernel-written thread entry; unaligned reads are deliberate.
+    Some(unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<SystemThreadInformation>()) })
 }
 
 #[cfg(test)]
@@ -307,63 +314,97 @@ mod tests {
     fn buffer(entries: &[(u32, u32, u32)]) -> Vec<u8> {
         let mut bytes = Vec::new();
         for (pid, threads, next) in entries {
-            let mut entry = SystemProcessInformation {
-                NextEntryOffset: *next,
-                NumberOfThreads: *threads,
-                WorkingSetPrivateSize: 0,
-                HardFaultCount: 0,
-                NumberOfThreadsHighWatermark: 0,
-                CycleTime: 0,
-                CreateTime: 132_000_000_000_000_000,
-                UserTime: 10_000_000,
-                KernelTime: 20_000_000,
-                ImageName: windows_sys::Win32::Foundation::UNICODE_STRING {
-                    Length: 0,
-                    MaximumLength: 0,
-                    Buffer: std::ptr::null_mut(),
-                },
-                BasePriority: 8,
-                UniqueProcessId: (*pid as usize) as _,
-                InheritedFromUniqueProcessId: 0usize as _,
-                HandleCount: 42,
-                SessionId: 1,
-                UniqueProcessKey: 0,
-                PeakVirtualSize: 0,
-                VirtualSize: 4096,
-                PageFaultCount: 0,
-                PeakWorkingSetSize: 0,
-                WorkingSetSize: 8192,
-                QuotaPeakPagedPoolUsage: 0,
-                QuotaPagedPoolUsage: 0,
-                QuotaPeakNonPagedPoolUsage: 0,
-                QuotaNonPagedPoolUsage: 0,
-                PagefileUsage: 2048,
-                PeakPagefileUsage: 0,
-                PrivatePageCount: 0,
-                ReadOperationCount: 0,
-                WriteOperationCount: 0,
-                OtherOperationCount: 0,
-                ReadTransferCount: 100,
-                WriteTransferCount: 200,
-                OtherTransferCount: 300,
-            };
-            // Silence the unused-assignment warning on a field only some
-            // tests care about while keeping the struct literal complete.
-            entry.HardFaultCount = 0;
-
-            let raw: [u8; PROCESS_INFORMATION_SIZE] =
-                // SAFETY: `SystemProcessInformation` is `repr(C)` and
-                // every field is a plain integer or pointer, so its
-                // representation is a valid byte array of exactly this
-                // size (asserted in `types`). This is a test helper
-                // building the byte layout the kernel would write.
-                unsafe { std::mem::transmute(entry) };
+            let mut raw = [0u8; PROCESS_INFORMATION_SIZE];
+            write_field(
+                &mut raw,
+                std::mem::offset_of!(SystemProcessInformation, NextEntryOffset),
+                next.to_ne_bytes(),
+            );
+            write_field(
+                &mut raw,
+                std::mem::offset_of!(SystemProcessInformation, NumberOfThreads),
+                threads.to_ne_bytes(),
+            );
+            for (offset, value) in [
+                (
+                    std::mem::offset_of!(SystemProcessInformation, CreateTime),
+                    132_000_000_000_000_000i64,
+                ),
+                (
+                    std::mem::offset_of!(SystemProcessInformation, UserTime),
+                    10_000_000,
+                ),
+                (
+                    std::mem::offset_of!(SystemProcessInformation, KernelTime),
+                    20_000_000,
+                ),
+                (
+                    std::mem::offset_of!(SystemProcessInformation, ReadTransferCount),
+                    100,
+                ),
+                (
+                    std::mem::offset_of!(SystemProcessInformation, WriteTransferCount),
+                    200,
+                ),
+                (
+                    std::mem::offset_of!(SystemProcessInformation, OtherTransferCount),
+                    300,
+                ),
+            ] {
+                write_field(&mut raw, offset, value.to_ne_bytes());
+            }
+            write_field(
+                &mut raw,
+                std::mem::offset_of!(SystemProcessInformation, BasePriority),
+                8i32.to_ne_bytes(),
+            );
+            for (offset, value) in [
+                (
+                    std::mem::offset_of!(SystemProcessInformation, UniqueProcessId),
+                    *pid as usize,
+                ),
+                (
+                    std::mem::offset_of!(SystemProcessInformation, VirtualSize),
+                    4096,
+                ),
+                (
+                    std::mem::offset_of!(SystemProcessInformation, WorkingSetSize),
+                    8192,
+                ),
+                (
+                    std::mem::offset_of!(SystemProcessInformation, PagefileUsage),
+                    2048,
+                ),
+            ] {
+                write_field(&mut raw, offset, value.to_ne_bytes());
+            }
+            write_field(
+                &mut raw,
+                std::mem::offset_of!(SystemProcessInformation, HandleCount),
+                42u32.to_ne_bytes(),
+            );
+            write_field(
+                &mut raw,
+                std::mem::offset_of!(SystemProcessInformation, SessionId),
+                1u32.to_ne_bytes(),
+            );
             bytes.extend_from_slice(&raw);
             for _ in 0..*threads {
                 bytes.extend_from_slice(&[0u8; THREAD_INFORMATION_SIZE]);
             }
         }
         bytes
+    }
+
+    /// Writes one primitive field into a fabricated kernel record.
+    fn write_field<const N: usize>(record: &mut [u8], offset: usize, value: [u8; N]) {
+        let Some(end) = offset.checked_add(N) else {
+            return;
+        };
+        let Some(slot) = record.get_mut(offset..end) else {
+            return;
+        };
+        slot.copy_from_slice(&value);
     }
 
     /// The byte step from one entry to the next, given a thread count.

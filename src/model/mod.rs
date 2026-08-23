@@ -44,6 +44,7 @@ pub mod sort;
 pub mod tree;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// One process, as of one sample.
@@ -75,6 +76,8 @@ pub struct ProcessRow {
     /// protected processes and for the two pseudo-processes (see
     /// [`ProcessRow::is_pseudo`]).
     pub path: Option<PathBuf>,
+    /// Explorer's small icon for the executable, resolved once per image.
+    pub icon: Option<Arc<ProcessIcon>>,
     /// Owning account, `DOMAIN\user`. Empty when the token could not be
     /// opened, which happens for protected system processes even with
     /// `SeDebugPrivilege`.
@@ -130,6 +133,8 @@ pub struct ProcessRow {
     /// The hard ones alone — the faults that had to reach the disk, and
     /// so the ones that mean a process is thrashing rather than growing.
     pub hard_faults: u64,
+    /// Hard page faults per second over the latest sample interval.
+    pub hard_fault_rate: f64,
     /// Threads in the process.
     pub thread_count: u32,
     /// Open kernel handles. A number that only ever climbs is the
@@ -156,6 +161,19 @@ pub struct ProcessRow {
     pub gpu_memory: u64,
     /// Scheduling priority class.
     pub priority: Priority,
+}
+
+/// Owned shell-icon pixels safe to carry across the sampler/UI boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessIcon {
+    /// Pixel width.
+    pub width: usize,
+    /// Pixel height.
+    pub height: usize,
+    /// Unmultiplied RGBA pixels, row-major.
+    pub rgba: Vec<u8>,
+    /// Representative application colour derived from visible pixels.
+    pub accent: crate::color::Rgb,
 }
 
 impl ProcessRow {
@@ -475,12 +493,17 @@ pub struct Snapshot {
 /// The system-wide counters, as of one sample.
 #[derive(Clone, Debug, Default)]
 pub struct SystemSample {
+    /// Static identity of the machine and its Windows installation.
+    pub info: SystemInfo,
     /// Processor utilisation and the machine's static CPU facts.
     pub cpu: CpuSample,
     /// Physical and committed memory.
     pub memory: MemorySample,
     /// One entry per physical disk.
     pub disks: Vec<DiskSample>,
+    /// Mounted local volumes, shown separately because drive letters do
+    /// not have a one-to-one relationship with physical disks.
+    pub volumes: Vec<VolumeSample>,
     /// One entry per network adapter the machine has — connected or
     /// not, hardware or virtual.
     ///
@@ -502,6 +525,27 @@ pub struct SystemSample {
     pub thread_count: u64,
     /// Total open handles across every process.
     pub handle_count: u64,
+}
+
+/// Static facts used by the System Information view.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SystemInfo {
+    /// Windows computer name.
+    pub computer_name: String,
+    /// Windows product/edition name.
+    pub os_name: String,
+    /// Marketing release such as `24H2`.
+    pub os_version: String,
+    /// Exact Windows build number.
+    pub os_build: String,
+    /// System vendor reported by firmware.
+    pub manufacturer: String,
+    /// System product/model reported by firmware.
+    pub model: String,
+    /// BIOS/UEFI vendor.
+    pub bios_vendor: String,
+    /// BIOS/UEFI version.
+    pub bios_version: String,
 }
 
 impl SystemSample {
@@ -626,9 +670,16 @@ pub struct DiskSample {
     /// bottleneck — throughput does not, because a queue of small random
     /// reads can saturate a disk at a trivial byte rate.
     pub active_percent: f64,
-    /// Total capacity in bytes, summed across the volumes on this disk.
+}
+
+/// One mounted local volume's capacity.
+#[derive(Clone, Debug, Default)]
+pub struct VolumeSample {
+    /// Drive letter with colon, such as `C:`.
+    pub letter: String,
+    /// Total capacity in bytes.
     pub capacity: u64,
-    /// Free space in bytes, summed across the same volumes.
+    /// Free space in bytes.
     pub free: u64,
 }
 

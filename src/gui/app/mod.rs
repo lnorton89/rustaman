@@ -72,19 +72,22 @@ pub enum View {
     Services,
     /// Programs that run at logon.
     Startup,
+    /// Machine, Windows, firmware, and hardware facts.
+    System,
     /// Theme, interval, and the about panel.
     Settings,
 }
 
 impl View {
     /// Every view, in the order the navigation rail lists them.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Processes,
         Self::Performance,
         Self::Memory,
         Self::Details,
         Self::Services,
         Self::Startup,
+        Self::System,
         Self::Settings,
     ];
 
@@ -98,6 +101,7 @@ impl View {
             Self::Details => "Details",
             Self::Services => "Services",
             Self::Startup => "Startup",
+            Self::System => "System",
             Self::Settings => "Settings",
         }
     }
@@ -118,6 +122,7 @@ impl View {
             Self::Details => Icon::Details,
             Self::Services => Icon::Services,
             Self::Startup => Icon::Startup,
+            Self::System => Icon::SystemInfo,
             Self::Settings => Icon::Settings,
         }
     }
@@ -135,6 +140,7 @@ impl View {
             Self::Details => "details",
             Self::Services => "services",
             Self::Startup => "startup",
+            Self::System => "system",
             Self::Settings => "settings",
         }
     }
@@ -176,6 +182,10 @@ pub struct ProcessView {
     pub columns: ColumnOrder,
     /// The flattened rows to draw, and the state they were built from.
     pub rows: rows::Cache,
+    /// GPU textures uploaded from the sampler's per-image shell icons.
+    pub icons: HashMap<std::path::PathBuf, egui::TextureHandle>,
+    /// Snapshot sequence whose icons were last reconciled.
+    pub icon_sequence: u64,
 }
 
 impl Default for ProcessView {
@@ -193,6 +203,8 @@ impl Default for ProcessView {
             selected: None,
             columns: ColumnOrder::new(&crate::gui::ui::processes::DEFAULT_COLUMNS),
             rows: rows::Cache::default(),
+            icons: HashMap::new(),
+            icon_sequence: 0,
         }
     }
 }
@@ -611,6 +623,39 @@ pub struct Toast {
 /// How long a toast stays on screen.
 pub const TOAST_SECONDS: f32 = 5.0;
 
+/// Whether monitoring data is arriving with believable freshness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SamplerHealth {
+    /// Thread has started but no first value is due yet.
+    Starting,
+    /// A snapshot arrived within the freshness window.
+    Live,
+    /// Thread exists but sequence progress is overdue.
+    Stale,
+    /// Thread exited or never started.
+    Stopped,
+}
+
+fn sampler_health(
+    running: bool,
+    since_last: Option<std::time::Duration>,
+    since_start: std::time::Duration,
+    interval: std::time::Duration,
+) -> SamplerHealth {
+    if !running {
+        return SamplerHealth::Stopped;
+    }
+    let deadline = interval
+        .saturating_mul(3)
+        .max(std::time::Duration::from_secs(3));
+    match since_last {
+        Some(age) if age > deadline => SamplerHealth::Stale,
+        Some(_) => SamplerHealth::Live,
+        None if since_start > deadline => SamplerHealth::Stale,
+        None => SamplerHealth::Starting,
+    }
+}
+
 /// A confirmation the user has to answer before something destructive
 /// happens.
 pub enum Pending {
@@ -630,7 +675,7 @@ pub struct App {
     /// The sampler.
     pub engine: Engine,
     /// The most recent snapshot, or `None` before the first arrives.
-    pub snapshot: Option<Snapshot>,
+    pub snapshot: Option<std::sync::Arc<Snapshot>>,
     /// Every available theme.
     pub catalog: Catalog,
     /// The theme in force.
@@ -662,10 +707,16 @@ pub struct App {
     /// Whether the window is maximised, tracked so the title bar's own
     /// button can show the right glyph.
     pub maximised: bool,
+    /// Numeric Win32 window handle, attached by the native launcher.
+    pub(crate) native_window: Option<isize>,
     /// Whether `SeDebugPrivilege` was granted, which the Settings view
     /// reports — it is the difference between a full process list and one
     /// missing half its identity columns.
     pub elevated: bool,
+    /// When the last snapshot reached the UI, for stale-data detection.
+    pub last_snapshot_at: Option<std::time::Instant>,
+    /// When monitoring started, so a missing first sample can go stale.
+    pub engine_started_at: std::time::Instant,
 }
 
 impl App {
@@ -674,7 +725,10 @@ impl App {
     pub fn new(config: Config) -> Self {
         let catalog = Catalog::load();
         let theme = catalog.get(config.theme.as_deref()).clone();
-        let engine = Engine::start(config.interval());
+        // Token privilege is process-wide. Ask once and pass the result
+        // into the sampler rather than adjusting it again on that thread.
+        let elevated = crate::win::privilege::enable();
+        let engine = Engine::start(config.interval(), elevated);
 
         let mut processes = ProcessView::default();
         if let Some(sort) = config.sort {
@@ -722,7 +776,10 @@ impl App {
             // wearing someone else's hat.
             custom_chrome: config.custom_chrome.unwrap_or(true),
             maximised: false,
-            elevated: false,
+            native_window: None,
+            elevated,
+            last_snapshot_at: None,
+            engine_started_at: std::time::Instant::now(),
             config,
         }
     }
@@ -736,6 +793,7 @@ impl App {
         };
         self.record_history(&snapshot);
         self.snapshot = Some(snapshot);
+        self.last_snapshot_at = Some(std::time::Instant::now());
     }
 
     /// Appends one snapshot's figures to the graphs.
@@ -935,10 +993,37 @@ impl App {
     pub fn visible_entries(&self) -> &[Entry] {
         self.active_rows().entries()
     }
+
+    /// Current sampler state, based on thread state and data freshness.
+    #[must_use]
+    pub fn sampler_health(&self) -> SamplerHealth {
+        sampler_health(
+            self.engine.is_running(),
+            self.last_snapshot_at.map(|at| at.elapsed()),
+            self.engine_started_at.elapsed(),
+            self.engine.interval(),
+        )
+    }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let viewport = ui.ctx().input(|input| input.viewport().clone());
+        if let Some(maximised) = viewport.maximized {
+            self.maximised = maximised;
+        }
+        if let Some(size) = restored_window_size(viewport.inner_rect, self.maximised) {
+            self.config.window_size = Some(size);
+        }
+        // Native move/resize enters Windows' own modal interaction loop, so
+        // egui is not guaranteed to observe the pointer-up event. Checking on
+        // every ordinary frame is cheap (read-only unless correction is
+        // needed) and repairs the window immediately after that loop returns.
+        if !self.maximised {
+            if let Some(window) = self.native_window {
+                let _ = crate::win::window::fit_to_work_area(window);
+            }
+        }
         self.poll();
         super::ui::draw(self, ui);
 
@@ -949,13 +1034,10 @@ impl eframe::App for App {
         // monitor's refresh rate, burning a core to animate data that
         // changes once a second.
         //
-        // A shorter tick than the interval so a hover animation, which
-        // runs at HOVER_SECONDS, is not quantised to the sample rate.
-        let tick = self
-            .engine
-            .interval()
-            .min(std::time::Duration::from_millis(50));
-        ui.ctx().request_repaint_after(tick);
+        // egui schedules its own animation frames. This wake exists only
+        // to poll the sampler, so it follows the sampling interval rather
+        // than forcing a permanent 20 Hz idle loop.
+        ui.ctx().request_repaint_after(self.engine.interval());
     }
 
     fn on_exit(&mut self) {
@@ -976,9 +1058,47 @@ impl eframe::App for App {
     }
 }
 
+fn restored_window_size(rect: Option<egui::Rect>, maximised: bool) -> Option<[f32; 2]> {
+    let size = rect?.size();
+    (!maximised && size.x.is_finite() && size.y.is_finite() && size.x > 0.0 && size.y > 0.0)
+        .then_some([size.x, size.y])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sampler_health_is_based_on_freshness_not_only_a_thread_handle() {
+        let interval = std::time::Duration::from_secs(1);
+        assert_eq!(
+            sampler_health(true, None, std::time::Duration::from_secs(1), interval),
+            SamplerHealth::Starting
+        );
+        assert_eq!(
+            sampler_health(
+                true,
+                Some(std::time::Duration::from_secs(5)),
+                interval,
+                interval
+            ),
+            SamplerHealth::Stale
+        );
+        assert_eq!(
+            sampler_health(false, None, std::time::Duration::ZERO, interval),
+            SamplerHealth::Stopped
+        );
+    }
+
+    #[test]
+    fn only_a_restored_window_size_is_persisted() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1234.0, 777.0));
+        assert_eq!(
+            restored_window_size(Some(rect), false),
+            Some([1234.0, 777.0])
+        );
+        assert_eq!(restored_window_size(Some(rect), true), None);
+    }
 
     #[test]
     fn every_view_has_a_label_and_a_stable_id() {
@@ -1123,7 +1243,7 @@ mod tests {
             pid: 999_999,
             started_at: 1,
         });
-        app.snapshot = Some(Snapshot::default());
+        app.snapshot = Some(std::sync::Arc::new(Snapshot::default()));
         assert!(app.selected_row().is_none());
     }
 

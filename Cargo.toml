@@ -24,11 +24,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
-# The sampler thread hands snapshots to the UI thread over a bounded
-# channel. `crossbeam-channel` rather than `std::sync::mpsc` for
-# `try_recv` on a bounded queue with a non-blocking `send` that reports a
-# full queue instead of growing without limit — a sampler that outruns a
-# stalled UI must drop frames, not buffer them.
+# Used by one-shot background UI jobs (services/startup refreshes).
 crossbeam-channel = "0.5"
 
 [target.'cfg(windows)'.dependencies]
@@ -88,6 +84,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
+    "Win32_System_Environment",
     # Physical-disk performance counters (IOCTL_DISK_PERFORMANCE).
     "Win32_System_Ioctl",
     "Win32_System_IO",
@@ -150,6 +147,7 @@ unused_must_use = "forbid"
 unreachable_patterns = "forbid"
 unreachable_pub = "forbid"
 missing_docs = "deny"
+unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]
 unwrap_used = "deny"
@@ -164,3 +162,5 @@ match_wild_err_arm = "deny"
 rest_pat_in_fully_bound_structs = "deny"
 ignored_unit_patterns = "deny"
 allow_attributes = "deny"
+missing_safety_doc = "deny"
+undocumented_unsafe_blocks = "deny"

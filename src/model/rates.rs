@@ -63,6 +63,8 @@ pub struct Counters {
     pub read_bytes: u64,
     /// Cumulative bytes written.
     pub write_bytes: u64,
+    /// Cumulative hard page faults.
+    pub hard_faults: u64,
 }
 
 /// The rates one interval's worth of change works out to.
@@ -74,6 +76,8 @@ pub struct Delta {
     pub read_rate: f64,
     /// Bytes per second written.
     pub write_rate: f64,
+    /// Hard page faults per second.
+    pub hard_fault_rate: f64,
 }
 
 /// Remembers the previous sample's counters so the next one can be a rate.
@@ -126,11 +130,13 @@ impl Rates {
         let read = counters.read_bytes.saturating_sub(previous.read_bytes);
         let write = counters.write_bytes.saturating_sub(previous.write_bytes);
         let cpu_ticks = counters.cpu_ticks.saturating_sub(previous.cpu_ticks);
+        let hard_faults = counters.hard_faults.saturating_sub(previous.hard_faults);
 
         Delta {
             cpu_percent: cpu_percent(cpu_ticks, elapsed, cores),
             read_rate: read as f64 / seconds,
             write_rate: write as f64 / seconds,
+            hard_fault_rate: hard_faults as f64 / seconds,
         }
     }
 
@@ -141,6 +147,14 @@ impl Rates {
     /// an entry per compiler process ever started.
     pub fn retain_live(&mut self, live: &HashSet<ProcessKey>) {
         self.previous.retain(|key, _| live.contains(key));
+    }
+
+    /// Discards every baseline after a failed source read.
+    ///
+    /// A later successful enumeration must start a new baseline; otherwise
+    /// its counter delta spans the failure while its elapsed time does not.
+    pub fn reset(&mut self) {
+        self.previous.clear();
     }
 
     /// How many processes are being tracked.
@@ -227,6 +241,7 @@ mod tests {
             cpu_ticks: 9_999 * SECOND_TICKS,
             read_bytes: 500_000_000,
             write_bytes: 400_000_000,
+            hard_faults: 20,
         };
         let delta = rates.observe(key(100, 1), counters, SECOND, 8);
         assert_eq!(
@@ -243,6 +258,7 @@ mod tests {
             cpu_ticks: 100 * SECOND_TICKS,
             read_bytes: 1_000,
             write_bytes: 2_000,
+            hard_faults: 10,
         };
         let _ = rates.observe(key(100, 1), first, SECOND, 4);
 
@@ -251,6 +267,7 @@ mod tests {
             cpu_ticks: 101 * SECOND_TICKS,
             read_bytes: 1_000 + 4_096,
             write_bytes: 2_000 + 8_192,
+            hard_faults: 14,
         };
         let delta = rates.observe(key(100, 1), second, SECOND, 4);
         assert!(
@@ -260,6 +277,7 @@ mod tests {
         );
         assert!((delta.read_rate - 4_096.0).abs() < 0.01);
         assert!((delta.write_rate - 8_192.0).abs() < 0.01);
+        assert!((delta.hard_fault_rate - 4.0).abs() < 0.01);
     }
 
     #[test]
@@ -303,6 +321,7 @@ mod tests {
                 cpu_ticks: 5_000,
                 read_bytes: 100,
                 write_bytes: 100,
+                hard_faults: 1,
             },
             Duration::ZERO,
             4,
@@ -321,12 +340,14 @@ mod tests {
             cpu_ticks: 1_000 * SECOND_TICKS,
             read_bytes: 1_000_000,
             write_bytes: 1_000_000,
+            hard_faults: 1_000,
         };
         let _ = rates.observe(key(1, 1), high, SECOND, 4);
         let low = Counters {
             cpu_ticks: 1,
             read_bytes: 1,
             write_bytes: 1,
+            hard_faults: 1,
         };
         let delta = rates.observe(key(1, 1), low, SECOND, 4);
         assert_eq!(delta.cpu_percent, 0.0);

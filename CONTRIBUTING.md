@@ -103,7 +103,9 @@ full list with the reasoning; the short version:
   FFI call taking safe Rust arguments; the `unsafe` block contains the
   call and nothing else; a `// SAFETY:` comment stating the reasoning it
   depends on; an owning `Drop` wrapper wherever there is a matching
-  close/free/destroy. Callers and test bodies never need `unsafe`.
+  close/free/destroy. Required unsafe exists only under `src/win`;
+  callers and test bodies never need it. `src/unsafe_check.rs` enforces
+  the location, safe API, test, and one-operation-per-function rules.
 - **A hand-declared kernel struct is pinned by `const _: () = assert!()`
   on its size and field offsets.** A layout that disagrees with the
   kernel produces plausible wrong numbers rather than crashing, so this

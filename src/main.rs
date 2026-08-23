@@ -39,7 +39,7 @@
 #[derive(clap::Parser, Debug)]
 #[command(name = "rustaman", version, about = crate::TAGLINE)]
 struct Cli {
-    /// Start with this theme, by its id, ignoring the saved preference.
+    /// Select this theme for the session and save it as the new preference.
     #[arg(long, value_name = "ID")]
     theme: Option<String>,
 
@@ -108,27 +108,10 @@ fn main() -> std::process::ExitCode {
 /// and for a desktop app it is the right one either way.
 #[cfg(windows)]
 fn report(message: &str) {
-    use rustaman::win::strings;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
-
     // Still written to stderr as well, for the debug build and for anyone
     // running it from a terminal that does have one.
     eprintln!("{message}");
-
-    let text = strings::to_wide(message);
-    let caption = strings::to_wide(rustaman::brand::NAME);
-    // SAFETY: both buffers are live, NUL-terminated UTF-16 strings bound
-    // to locals that outlive the call. A null owner handle makes the box
-    // ownerless, which is correct when there is no window to own it —
-    // which is the only situation this is called in.
-    unsafe {
-        MessageBoxW(
-            std::ptr::null_mut(),
-            text.as_ptr(),
-            caption.as_ptr(),
-            MB_OK | MB_ICONERROR,
-        );
-    }
+    rustaman::win::dialog::show_error(message, rustaman::brand::NAME);
 }
 
 #[cfg(test)]

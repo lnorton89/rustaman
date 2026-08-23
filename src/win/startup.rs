@@ -1,29 +1,30 @@
 // ============================================================================
 // Module:       win::startup
-// Description:  Programs registered to run at logon — the four Run keys and the
-//               two Startup folders — and whether each is enabled.
+// Description:  Programs registered to run at logon — native and 32-bit
+//               Run/RunOnce views plus both Startup folders and enabled state.
 //
 // Dependencies: windows-sys (registry); super::handle::OwnedKey, super::strings
 // ============================================================================
 
 //! What runs at logon.
 //!
-//! ## There are six places, not one
+//! ## Supported locations
 //!
-//! A startup list that reads only `HKCU\...\Run` misses most of what
-//! actually runs. The six this checks:
+//! This covers the canonical per-user and machine Run/RunOnce keys in
+//! their documented registry views, plus both Startup folders.
 //!
 //! | Location | Scope |
 //! |---|---|
 //! | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` | this user |
 //! | `HKLM\Software\Microsoft\Windows\CurrentVersion\Run` | all users |
-//! | `HKLM\Software\WOW6432Node\...\Run` | all users, 32-bit |
 //! | `HKCU\...\RunOnce` | this user, once |
+//! | `HKLM\...\RunOnce` | all users, once |
+//! | 32-bit HKLM `Run` / `RunOnce` registry view | all users, 32-bit |
 //! | The user's Startup folder | this user |
 //! | The common Startup folder | all users |
 //!
-//! The WOW6432Node key is the one most often forgotten, and on a 64-bit
-//! machine it is where every 32-bit installer writes.
+//! Alternate views are requested with `KEY_WOW64_*KEY`; the reserved
+//! physical `WOW6432Node` path is never addressed directly.
 //!
 //! ## Enabled state lives somewhere else entirely
 //!
@@ -51,9 +52,10 @@
 use super::handle::OwnedKey;
 use super::strings;
 use std::path::PathBuf;
+use windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows_sys::Win32::System::Registry::{
     RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
-    KEY_READ,
+    KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
 };
 
 /// One program registered to run at logon.
@@ -90,12 +92,7 @@ impl StartupEntry {
             // only reliable way to handle a path containing spaces.
             rest.split('"').next().unwrap_or(rest)
         } else {
-            // Unquoted: up to the first space. This is genuinely
-            // ambiguous — `C:\Program Files\a.exe` unquoted is
-            // indistinguishable from `C:\Program` with an argument — but
-            // Windows itself resolves it the same way, so matching that
-            // behaviour is the correct answer rather than a compromise.
-            text.split(' ').next().unwrap_or(text)
+            executable_prefix(text).unwrap_or_else(|| text.split(' ').next().unwrap_or(text))
         };
         let path = path.trim();
         (!path.is_empty()).then(|| PathBuf::from(path))
@@ -115,6 +112,8 @@ struct Location {
     label: &'static str,
     /// Whether this location applies to every user.
     all_users: bool,
+    /// Native or alternate registry view.
+    view: u32,
 }
 
 /// Every registry location checked. See the module docs for the table.
@@ -128,6 +127,7 @@ fn locations() -> Vec<Location> {
             ),
             label: "Registry (current user)",
             all_users: false,
+            view: KEY_WOW64_64KEY,
         },
         Location {
             hive: HKEY_LOCAL_MACHINE,
@@ -137,17 +137,17 @@ fn locations() -> Vec<Location> {
             ),
             label: "Registry (all users)",
             all_users: true,
+            view: KEY_WOW64_64KEY,
         },
         Location {
-            // The one most often forgotten. On a 64-bit machine this is
-            // where every 32-bit installer writes.
             hive: HKEY_LOCAL_MACHINE,
-            subkey: r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
+            subkey: r"Software\Microsoft\Windows\CurrentVersion\Run",
             approved: Some(
                 r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32",
             ),
             label: "Registry (all users, 32-bit)",
             all_users: true,
+            view: KEY_WOW64_32KEY,
         },
         Location {
             hive: HKEY_CURRENT_USER,
@@ -155,6 +155,23 @@ fn locations() -> Vec<Location> {
             approved: None,
             label: "Registry (run once)",
             all_users: false,
+            view: KEY_WOW64_64KEY,
+        },
+        Location {
+            hive: HKEY_LOCAL_MACHINE,
+            subkey: r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
+            approved: None,
+            label: "Registry (all users, run once)",
+            all_users: true,
+            view: KEY_WOW64_64KEY,
+        },
+        Location {
+            hive: HKEY_LOCAL_MACHINE,
+            subkey: r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
+            approved: None,
+            label: "Registry (all users, 32-bit, run once)",
+            all_users: true,
+            view: KEY_WOW64_32KEY,
         },
     ]
 }
@@ -164,12 +181,12 @@ fn locations() -> Vec<Location> {
 pub fn enumerate() -> Vec<StartupEntry> {
     let mut found = Vec::new();
     for location in locations() {
-        let Some(key) = open(location.hive, location.subkey) else {
+        let Some(key) = open(location.hive, location.subkey, location.view) else {
             continue;
         };
         let approved = location
             .approved
-            .and_then(|subkey| open(location.hive, subkey));
+            .and_then(|subkey| open(location.hive, subkey, location.view));
         for (name, command) in values(&key) {
             let enabled = approved.as_ref().is_none_or(|key| is_approved(key, &name));
             found.push(StartupEntry {
@@ -190,11 +207,8 @@ pub fn enumerate() -> Vec<StartupEntry> {
 
 /// The two Startup folders' contents.
 ///
-/// Shortcut files rather than registry values, so there is no command
-/// line to parse and no approved-state key — the folders' entries are
-/// recorded in `StartupApproved\StartupFolder`, but a shortcut that is
-/// present is normally one that runs, and the file itself is what the
-/// user acts on.
+/// Shortcut files whose enablement is recorded in
+/// `StartupApproved\StartupFolder`.
 fn folder_entries() -> Vec<StartupEntry> {
     let mut found = Vec::new();
     let folders = [
@@ -213,6 +227,11 @@ fn folder_entries() -> Vec<StartupEntry> {
         ),
     ];
 
+    let approved = open(
+        HKEY_CURRENT_USER,
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder",
+        KEY_WOW64_64KEY,
+    );
     for (path, label, all_users) in folders {
         let Some(path) = path else {
             continue;
@@ -241,7 +260,13 @@ fn folder_entries() -> Vec<StartupEntry> {
                 command: file.to_string_lossy().into_owned(),
                 location: label,
                 all_users,
-                enabled: true,
+                enabled: approved.as_ref().is_none_or(|key| {
+                    let file_name = file
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    is_approved(key, &file_name)
+                }),
             });
         }
     }
@@ -249,22 +274,14 @@ fn folder_entries() -> Vec<StartupEntry> {
 }
 
 /// Opens a registry key for reading.
-fn open(hive: HKEY, subkey: &str) -> Option<OwnedKey> {
+fn open(hive: HKEY, subkey: &str, view: u32) -> Option<OwnedKey> {
     let wide = strings::to_wide(subkey);
     let mut key: HKEY = std::ptr::null_mut();
     // SAFETY: `hive` is a predefined key constant. `wide` is a live,
     // NUL-terminated UTF-16 buffer bound to a local that outlives the
     // call. `key` is a live out-parameter the callee writes an open key
     // into on success; `OwnedKey` then owns and closes it.
-    let status = unsafe {
-        RegOpenKeyExW(
-            hive,
-            wide.as_ptr(),
-            0,
-            KEY_READ,
-            std::ptr::from_mut(&mut key),
-        )
-    };
+    let status = open_registry_key(hive, &wide, view, &mut key);
     if status != 0 {
         return None;
     }
@@ -292,24 +309,15 @@ fn values(key: &OwnedKey) -> Vec<(String, String)> {
         let mut data_length = u32::try_from(data.len()).unwrap_or(0);
         let mut kind = 0u32;
 
-        // SAFETY: `key` is a live registry key opened with KEY_READ.
-        // `name` and `data` are live, uniquely-borrowed buffers whose
-        // lengths are passed alongside them as live out-parameters, and
-        // the callee writes no more than those lengths. The two null
-        // arguments decline the reserved parameter and the class, which
-        // the call permits.
-        let status = unsafe {
-            RegEnumValueW(
-                key.raw(),
-                index,
-                name.as_mut_ptr(),
-                std::ptr::from_mut(&mut name_length),
-                std::ptr::null_mut(),
-                std::ptr::from_mut(&mut kind),
-                data.as_mut_ptr(),
-                std::ptr::from_mut(&mut data_length),
-            )
-        };
+        let status = enumerate_registry_value(
+            key,
+            index,
+            &mut name,
+            &mut name_length,
+            &mut kind,
+            &mut data,
+            &mut data_length,
+        );
         if status == NO_MORE {
             break;
         }
@@ -331,13 +339,68 @@ fn values(key: &OwnedKey) -> Vec<(String, String)> {
         if kind != REG_SZ && kind != REG_EXPAND_SZ {
             continue;
         }
-        let command = string_from_bytes(&data, data_length);
+        let mut command = string_from_bytes(&data, data_length);
+        if kind == REG_EXPAND_SZ {
+            command = expand_environment(&command).unwrap_or(command);
+        }
         if command.is_empty() {
             continue;
         }
         found.push((value_name, command));
     }
     found
+}
+
+/// Reads one indexed registry value into caller-owned buffers.
+fn enumerate_registry_value(
+    key: &OwnedKey,
+    index: u32,
+    name: &mut [u16],
+    name_length: &mut u32,
+    kind: &mut u32,
+    data: &mut [u8],
+    data_length: &mut u32,
+) -> u32 {
+    // SAFETY: `key` is live with `KEY_READ`; both buffers and all length
+    // and type out-parameters are uniquely borrowed for this call. The
+    // null reserved argument is required by the API.
+    unsafe {
+        RegEnumValueW(
+            key.raw(),
+            index,
+            name.as_mut_ptr(),
+            std::ptr::from_mut(name_length),
+            std::ptr::null_mut(),
+            std::ptr::from_mut(kind),
+            data.as_mut_ptr(),
+            std::ptr::from_mut(data_length),
+        )
+    }
+}
+
+/// Expands `%NAME%` references from a `REG_EXPAND_SZ` command.
+fn expand_environment(text: &str) -> Option<String> {
+    let source = strings::to_wide(text);
+    // SAFETY: null output asks for the required UTF-16 length.
+    let needed = expanded_length(&source);
+    if needed == 0 {
+        return None;
+    }
+    let mut output = vec![0u16; usize::try_from(needed).ok()?];
+    // SAFETY: `output` has the exact capacity returned above and both
+    // strings remain live for the call.
+    let written = expand_environment_into(&source, &mut output, needed);
+    (written > 0 && written <= needed).then(|| strings::from_wide_nul(&output))
+}
+
+/// Finds a conventional executable suffix in an unquoted command.
+fn executable_prefix(text: &str) -> Option<&str> {
+    let lower = text.to_ascii_lowercase();
+    [".exe", ".com", ".bat", ".cmd"]
+        .into_iter()
+        .filter_map(|suffix| lower.find(suffix).map(|index| index + suffix.len()))
+        .min()
+        .and_then(|end| text.get(..end))
 }
 
 /// Decodes a `REG_SZ` value's bytes as UTF-16.
@@ -376,21 +439,44 @@ fn is_approved(key: &OwnedKey, name: &str) -> bool {
     // a live, uniquely-borrowed buffer of `length` bytes, which is what
     // the length out-parameter states. The null reserved argument is
     // documented as required.
-    let status = unsafe {
-        RegQueryValueExW(
-            key.raw(),
-            wide.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::from_mut(&mut kind),
-            data.as_mut_ptr(),
-            std::ptr::from_mut(&mut length),
-        )
-    };
+    let status = query_registry_value(key.raw(), &wide, &mut kind, &mut data, &mut length);
     if status != 0 || length == 0 {
         // No entry: never toggled, therefore enabled.
         return true;
     }
     data.first().is_none_or(|flag| flag % 2 == 0)
+}
+
+fn open_registry_key(hive: HKEY, name: &[u16], view: u32, key: &mut HKEY) -> u32 {
+    // SAFETY: hive is predefined, name is NUL-terminated, and key is a live output pointer.
+    unsafe { RegOpenKeyExW(hive, name.as_ptr(), 0, KEY_READ | view, key) }
+}
+fn expanded_length(source: &[u16]) -> u32 {
+    // SAFETY: source is live and NUL-terminated; null output is the documented size query.
+    unsafe { ExpandEnvironmentStringsW(source.as_ptr(), std::ptr::null_mut(), 0) }
+}
+fn expand_environment_into(source: &[u16], output: &mut [u16], needed: u32) -> u32 {
+    // SAFETY: source is NUL-terminated and output has the queried capacity; neither is retained.
+    unsafe { ExpandEnvironmentStringsW(source.as_ptr(), output.as_mut_ptr(), needed) }
+}
+fn query_registry_value(
+    key: HKEY,
+    name: &[u16],
+    kind: &mut u32,
+    data: &mut [u8],
+    length: &mut u32,
+) -> u32 {
+    // SAFETY: key is live; name is NUL-terminated and outputs are live writable buffers.
+    unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            kind,
+            data.as_mut_ptr(),
+            length,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -474,8 +560,8 @@ mod tests {
         // 64-bit machine it is where every 32-bit installer writes.
         let all = locations();
         assert!(
-            all.iter().any(|l| l.subkey.contains("WOW6432Node")),
-            "the 32-bit Run key must be among the locations checked"
+            all.iter().any(|l| l.view == KEY_WOW64_32KEY),
+            "the 32-bit registry view must be among the locations checked"
         );
         assert!(all.iter().any(|l| l.subkey.ends_with("RunOnce")));
         assert!(all.iter().any(|l| l.hive == HKEY_CURRENT_USER));
@@ -519,6 +605,7 @@ mod tests {
         let Some(key) = open(
             HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run",
+            KEY_WOW64_64KEY,
         ) else {
             return;
         };
@@ -530,6 +617,11 @@ mod tests {
 
     #[test]
     fn a_key_that_does_not_exist_opens_to_nothing() {
-        assert!(open(HKEY_CURRENT_USER, r"Software\NoSuchKeyRustaman").is_none());
+        assert!(open(
+            HKEY_CURRENT_USER,
+            r"Software\NoSuchKeyRustaman",
+            KEY_WOW64_64KEY
+        )
+        .is_none());
     }
 }

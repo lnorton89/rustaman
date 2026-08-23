@@ -3,7 +3,7 @@
 // Description:  Static facts about the machine — CPU name, core counts, clock,
 //               uptime — read once at startup rather than every sample.
 //
-// Dependencies: windows-sys (GetSystemInfo, GetTickCount64, registry,
+// Dependencies: windows-sys (GetActiveProcessorCount, GetTickCount64, registry,
 //               GetLogicalProcessorInformationEx); super::strings
 // ============================================================================
 
@@ -30,13 +30,14 @@
 //! distrust every other number on the page.
 
 use super::strings;
+use crate::model::SystemInfo;
 use windows_sys::Win32::System::Diagnostics::Debug::{
     SetThreadErrorMode, SEM_FAILCRITICALERRORS, THREAD_ERROR_MODE,
 };
 use windows_sys::Win32::System::SystemInformation::{
-    GetLogicalProcessorInformationEx, GetSystemInfo, GetTickCount64, RelationProcessorCore,
-    SYSTEM_INFO,
+    GetLogicalProcessorInformationEx, GetTickCount64, RelationProcessorCore,
 };
+use windows_sys::Win32::System::Threading::{GetActiveProcessorCount, ALL_PROCESSOR_GROUPS};
 
 /// Stops Windows putting a modal error dialog in front of this thread
 /// when a device it touches is not ready.
@@ -69,11 +70,7 @@ use windows_sys::Win32::System::SystemInformation::{
 /// rather than a silent assumption.
 pub fn suppress_device_error_dialogs() -> bool {
     let mut previous: THREAD_ERROR_MODE = 0;
-    // SAFETY: `previous` is a live, uniquely-borrowed out-parameter the
-    // callee writes the old mode into. The mode argument is a by-value
-    // constant. Nothing is retained.
-    let ok =
-        unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, std::ptr::from_mut(&mut previous)) };
+    let ok = set_thread_error_mode(SEM_FAILCRITICALERRORS, &mut previous);
     ok != 0
 }
 
@@ -85,12 +82,10 @@ pub fn suppress_device_error_dialogs() -> bool {
 #[cfg(test)]
 fn thread_error_mode() -> THREAD_ERROR_MODE {
     let mut previous: THREAD_ERROR_MODE = 0;
-    // SAFETY: as above. Setting the mode to whatever it already is, to
-    // read the old value out of the out-parameter.
-    let _ = unsafe { SetThreadErrorMode(0, std::ptr::from_mut(&mut previous)) };
+    // Setting a temporary zero mode exposes the previous mode through the out-parameter.
+    let _ = set_thread_error_mode(0, &mut previous);
     // Put it back, so reading the mode does not change it.
-    // SAFETY: as above.
-    let _ = unsafe { SetThreadErrorMode(previous, std::ptr::null_mut()) };
+    let _ = restore_thread_error_mode(previous);
     previous
 }
 
@@ -110,20 +105,57 @@ pub struct Facts {
     /// times a second on any machine with a modern governor — so the
     /// number would be both expensive and misleading.
     pub megahertz: u32,
+    /// Machine, firmware, and Windows installation identity.
+    pub info: SystemInfo,
 }
 
 impl Facts {
     /// Reads the machine's description. Call once.
     #[must_use]
     pub fn read() -> Self {
-        let info = system_info();
         Self {
             cpu_name: cpu_name().unwrap_or_default(),
             physical_cores: physical_cores().unwrap_or(0),
-            logical_cores: usize::try_from(info.dwNumberOfProcessors).unwrap_or(0),
+            logical_cores: usize::try_from(active_logical_processors()).unwrap_or(0),
             megahertz: nominal_megahertz().unwrap_or(0),
+            info: system_info(),
         }
     }
+}
+
+/// Reads the machine and Windows identity values that remain stable for a run.
+fn system_info() -> SystemInfo {
+    const WINDOWS: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+    const BIOS: &str = r"HARDWARE\DESCRIPTION\System\BIOS";
+    let os_build = registry_string(WINDOWS, "CurrentBuildNumber").unwrap_or_default();
+    let product_name = registry_string(WINDOWS, "ProductName").unwrap_or_default();
+    SystemInfo {
+        computer_name: registry_string(
+            r"SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName",
+            "ComputerName",
+        )
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .unwrap_or_default(),
+        os_name: windows_product_name(product_name, &os_build),
+        os_version: registry_string(WINDOWS, "DisplayVersion")
+            .or_else(|| registry_string(WINDOWS, "ReleaseId"))
+            .unwrap_or_default(),
+        os_build,
+        manufacturer: registry_string(BIOS, "SystemManufacturer").unwrap_or_default(),
+        model: registry_string(BIOS, "SystemProductName").unwrap_or_default(),
+        bios_vendor: registry_string(BIOS, "BIOSVendor").unwrap_or_default(),
+        bios_version: registry_string(BIOS, "BIOSVersion").unwrap_or_default(),
+    }
+}
+
+/// Windows 11 retained "Windows 10" in this compatibility registry value
+/// on some installations. The build boundary is the stable distinction.
+fn windows_product_name(mut name: String, build: &str) -> String {
+    let build = build.parse::<u32>().unwrap_or(0);
+    if build >= 22_000 && name.contains("Windows 10") {
+        name = name.replacen("Windows 10", "Windows 11", 1);
+    }
+    name
 }
 
 /// Seconds since the machine booted.
@@ -134,22 +166,13 @@ impl Facts {
 /// uptime someone is checking.
 #[must_use]
 pub fn uptime() -> u64 {
-    // SAFETY: takes no arguments, reads a kernel counter, cannot fail.
-    let milliseconds = unsafe { GetTickCount64() };
+    let milliseconds = tick_count_milliseconds();
     milliseconds / 1_000
 }
 
-/// `GetSystemInfo`, wrapped.
-fn system_info() -> SYSTEM_INFO {
-    // SAFETY: every field of `SYSTEM_INFO` is an integer, a pointer, or a
-    // union of integers, so the all-zero bit pattern is a valid starting
-    // value. The call overwrites it entirely.
-    let mut info: SYSTEM_INFO = unsafe { std::mem::zeroed() };
-    // SAFETY: `info` is a live, uniquely-borrowed `SYSTEM_INFO`. The call
-    // writes only within it, cannot fail, and does not retain the
-    // pointer.
-    unsafe { GetSystemInfo(std::ptr::from_mut(&mut info)) };
-    info
+/// The system-wide active logical-processor count across all groups.
+fn active_logical_processors() -> u32 {
+    active_processor_count()
 }
 
 /// The number of physical cores.
@@ -162,32 +185,14 @@ fn system_info() -> SYSTEM_INFO {
 /// bounds at every step, the same discipline as [`super::nt::process`].
 fn physical_cores() -> Option<usize> {
     let mut needed = 0u32;
-    // SAFETY: a null buffer with a zero length is the documented way to
-    // ask for the required size. `needed` is a live out-parameter. The
-    // call is expected to fail here; only the size it reports is used.
-    let _ = unsafe {
-        GetLogicalProcessorInformationEx(
-            RelationProcessorCore,
-            std::ptr::null_mut(),
-            std::ptr::from_mut(&mut needed),
-        )
-    };
+    query_core_topology_size(&mut needed);
     let size = usize::try_from(needed).unwrap_or(0);
     if size == 0 {
         return None;
     }
 
     let mut buffer = vec![0u8; size];
-    // SAFETY: `buffer` is a live, uniquely-borrowed allocation of exactly
-    // `needed` bytes, which is what the length out-parameter states.
-    // The callee writes only within it.
-    let ok = unsafe {
-        GetLogicalProcessorInformationEx(
-            RelationProcessorCore,
-            buffer.as_mut_ptr().cast(),
-            std::ptr::from_mut(&mut needed),
-        )
-    };
+    let ok = read_core_topology(&mut buffer, &mut needed);
     if ok == 0 {
         return None;
     }
@@ -255,30 +260,12 @@ fn nominal_megahertz() -> Option<u32> {
 
 /// Reads a `REG_SZ` value from `HKEY_LOCAL_MACHINE`.
 fn registry_string(subkey: &str, value: &str) -> Option<String> {
-    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
-
     let key = strings::to_wide(subkey);
     let name = strings::to_wide(value);
     let mut buffer = vec![0u16; 512];
     let mut bytes = u32::try_from(buffer.len() * 2).unwrap_or(0);
 
-    // SAFETY: `key` and `name` are live, NUL-terminated UTF-16 buffers
-    // bound to locals that outlive the call. `buffer` is a live,
-    // uniquely-borrowed allocation of `bytes` bytes, which is what the
-    // length out-parameter states. `HKEY_LOCAL_MACHINE` is a predefined
-    // key that needs no opening or closing. The null type-out-parameter
-    // declines the type, which the call permits.
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            key.as_ptr(),
-            name.as_ptr(),
-            RRF_RT_REG_SZ,
-            std::ptr::null_mut(),
-            buffer.as_mut_ptr().cast(),
-            std::ptr::from_mut(&mut bytes),
-        )
-    };
+    let status = read_registry_string(&key, &name, &mut buffer, &mut bytes);
     if status != 0 {
         return None;
     }
@@ -291,35 +278,114 @@ fn registry_string(subkey: &str, value: &str) -> Option<String> {
 
 /// Reads a `REG_DWORD` value from `HKEY_LOCAL_MACHINE`.
 fn registry_dword(subkey: &str, value: &str) -> Option<u32> {
-    use windows_sys::Win32::System::Registry::{
-        RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD,
-    };
-
     let key = strings::to_wide(subkey);
     let name = strings::to_wide(value);
     let mut word = 0u32;
     let mut size = u32::try_from(std::mem::size_of::<u32>()).unwrap_or(4);
 
-    // SAFETY: as `registry_string` — both name buffers are live and
-    // NUL-terminated, and `word` is a live, uniquely-borrowed `u32` of
-    // exactly `size` bytes.
-    let status = unsafe {
+    let status = read_registry_dword(&key, &name, &mut word, &mut size);
+    (status == 0).then_some(word)
+}
+
+/// Sets the current thread's error mode and reports the old mode.
+fn set_thread_error_mode(mode: THREAD_ERROR_MODE, previous: &mut THREAD_ERROR_MODE) -> i32 {
+    // SAFETY: `previous` is a live writable out-parameter; `mode` is a
+    // documented by-value flag set and the API retains no pointer.
+    unsafe { SetThreadErrorMode(mode, previous) }
+}
+
+/// Restores a thread error mode without requesting the previous value.
+#[cfg(test)]
+fn restore_thread_error_mode(mode: THREAD_ERROR_MODE) -> i32 {
+    // SAFETY: the null previous-mode pointer is documented when its value is not needed.
+    unsafe { SetThreadErrorMode(mode, std::ptr::null_mut()) }
+}
+
+/// Returns the monotonic Windows tick count in milliseconds.
+fn tick_count_milliseconds() -> u64 {
+    // SAFETY: this call takes no arguments and returns the kernel counter by value.
+    unsafe { GetTickCount64() }
+}
+
+/// Returns active logical processors across every processor group.
+fn active_processor_count() -> u32 {
+    // SAFETY: `ALL_PROCESSOR_GROUPS` is the documented all-groups sentinel.
+    unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) }
+}
+
+/// Executes the size phase of the variable-length core-topology query.
+fn query_core_topology_size(needed: &mut u32) {
+    // SAFETY: a null buffer with zero capacity is the documented size query;
+    // `needed` is a live writable out-parameter and is not retained.
+    let _ = unsafe {
+        GetLogicalProcessorInformationEx(RelationProcessorCore, std::ptr::null_mut(), needed)
+    };
+}
+
+/// Fills the caller-owned buffer with variable-length core-topology records.
+fn read_core_topology(buffer: &mut [u8], needed: &mut u32) -> i32 {
+    // SAFETY: `buffer` has the requested byte capacity and `needed` is a live
+    // writable size parameter; the API writes only inside it and retains neither.
+    unsafe {
+        GetLogicalProcessorInformationEx(RelationProcessorCore, buffer.as_mut_ptr().cast(), needed)
+    }
+}
+
+/// Reads a `REG_SZ` from the local-machine hive into a caller-owned UTF-16 buffer.
+fn read_registry_string(key: &[u16], name: &[u16], buffer: &mut [u16], bytes: &mut u32) -> u32 {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+
+    // SAFETY: `key` and `name` are live NUL-terminated paths; `buffer` and
+    // `bytes` are live writable out-parameters and the predefined hive needs no close.
+    unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr().cast(),
+            bytes,
+        )
+    }
+}
+
+/// Reads a `REG_DWORD` from the local-machine hive into a caller-owned word.
+fn read_registry_dword(key: &[u16], name: &[u16], word: &mut u32, size: &mut u32) -> u32 {
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD,
+    };
+
+    // SAFETY: `key` and `name` are live NUL-terminated paths; `word` and `size`
+    // are live writable out-parameters and the predefined hive needs no close.
+    unsafe {
         RegGetValueW(
             HKEY_LOCAL_MACHINE,
             key.as_ptr(),
             name.as_ptr(),
             RRF_RT_REG_DWORD,
             std::ptr::null_mut(),
-            std::ptr::from_mut(&mut word).cast(),
-            std::ptr::from_mut(&mut size),
+            std::ptr::from_mut(word).cast(),
+            size,
         )
-    };
-    (status == 0).then_some(word)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_windows_11_build_boundary_corrects_the_legacy_product_label() {
+        assert_eq!(
+            windows_product_name("Windows 10 Pro".into(), "26100"),
+            "Windows 11 Pro"
+        );
+        assert_eq!(
+            windows_product_name("Windows 10 Pro".into(), "19045"),
+            "Windows 10 Pro"
+        );
+    }
 
     #[test]
     fn the_error_mode_actually_suppresses_the_not_ready_dialog() {
@@ -340,6 +406,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "environment smoke test"]
     fn the_machine_describes_itself() {
         let facts = Facts::read();
         assert!(

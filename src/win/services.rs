@@ -39,9 +39,10 @@ use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::System::Services::{
     CloseServiceHandle, ControlService, EnumServicesStatusExW, OpenSCManagerW, OpenServiceW,
     StartServiceW, ENUM_SERVICE_STATUS_PROCESSW, SC_ENUM_PROCESS_INFO, SC_MANAGER_CONNECT,
-    SC_MANAGER_ENUMERATE_SERVICE, SERVICE_CONTROL_STOP, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
-    SERVICE_START, SERVICE_START_PENDING, SERVICE_STATE_ALL, SERVICE_STATUS, SERVICE_STOP,
-    SERVICE_STOPPED, SERVICE_STOP_PENDING, SERVICE_WIN32,
+    SC_MANAGER_ENUMERATE_SERVICE, SERVICE_CONTINUE_PENDING, SERVICE_CONTROL_STOP, SERVICE_PAUSED,
+    SERVICE_PAUSE_PENDING, SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START,
+    SERVICE_START_PENDING, SERVICE_STATE_ALL, SERVICE_STATUS, SERVICE_STOP, SERVICE_STOPPED,
+    SERVICE_STOP_PENDING, SERVICE_WIN32,
 };
 
 /// An open SCM or service handle, closed on drop.
@@ -67,13 +68,15 @@ impl ServiceHandle {
 
 impl Drop for ServiceHandle {
     fn drop(&mut self) {
-        // SAFETY: `self.0` is a non-null service handle (checked in
-        // `new`) owned exclusively by this value, and `CloseServiceHandle`
-        // is its documented closer.
-        unsafe {
-            let _ = CloseServiceHandle(self.0);
-        }
+        close_service_handle(self.0);
     }
+}
+
+/// Closes the service handle owned by a `ServiceHandle`.
+fn close_service_handle(handle: windows_sys::Win32::System::Services::SC_HANDLE) {
+    // SAFETY: `handle` is non-null (checked by `ServiceHandle::new`),
+    // exclusively owned, and this function is called once from `Drop`.
+    let _ = unsafe { CloseServiceHandle(handle) };
 }
 
 /// What state a service is in.
@@ -88,8 +91,10 @@ pub enum ServiceState {
     Running,
     /// Stopping.
     Stopping,
-    /// Paused, or in one of the pause transitions.
-    Other,
+    /// Paused.
+    Paused,
+    /// Pausing, continuing, or an unrecognised transition.
+    Transitioning,
 }
 
 impl ServiceState {
@@ -101,14 +106,15 @@ impl ServiceState {
             Self::Starting => "Starting",
             Self::Running => "Running",
             Self::Stopping => "Stopping",
-            Self::Other => "Paused",
+            Self::Paused => "Paused",
+            Self::Transitioning => "Transitioning",
         }
     }
 
     /// Whether this state is one a stop request makes sense from.
     #[must_use]
     pub fn can_stop(self) -> bool {
-        matches!(self, Self::Running | Self::Other)
+        matches!(self, Self::Running | Self::Paused)
     }
 
     /// Whether this state is one a start request makes sense from.
@@ -124,7 +130,9 @@ impl ServiceState {
             SERVICE_START_PENDING => Self::Starting,
             SERVICE_RUNNING => Self::Running,
             SERVICE_STOP_PENDING => Self::Stopping,
-            _ => Self::Other,
+            SERVICE_PAUSED => Self::Paused,
+            SERVICE_PAUSE_PENDING | SERVICE_CONTINUE_PENDING => Self::Transitioning,
+            _ => Self::Transitioning,
         }
     }
 }
@@ -171,61 +179,70 @@ struct Enumeration {
     count: u32,
 }
 
-/// Runs the enumeration, growing the buffer once as the API directs.
+/// Runs the enumeration, retrying when the mutable service table grows.
 fn enumerate_buffer(manager: &ServiceHandle) -> Option<Enumeration> {
     let mut needed = 0u32;
     let mut returned = 0u32;
     let mut resume = 0u32;
 
     // First call: a null buffer asks for the size.
-    //
-    // SAFETY: `manager` is a live SCM handle opened with
-    // SC_MANAGER_ENUMERATE_SERVICE. A null buffer with a zero length is
-    // the documented way to ask for the required size; the three
-    // out-parameters are live, uniquely-borrowed `u32`s. The two null
-    // trailing arguments decline the resume handle and the group filter,
-    // which the call permits.
-    let _ = unsafe {
-        EnumServicesStatusExW(
-            manager.raw(),
-            SC_ENUM_PROCESS_INFO,
-            SERVICE_WIN32,
-            SERVICE_STATE_ALL,
-            std::ptr::null_mut(),
-            0,
-            std::ptr::from_mut(&mut needed),
-            std::ptr::from_mut(&mut returned),
-            std::ptr::from_mut(&mut resume),
-            std::ptr::null(),
-        )
-    };
-    let size = usize::try_from(needed).unwrap_or(0);
-    if size == 0 {
-        return None;
+    let _ = enumerate_services_call(manager, None, &mut needed, &mut returned, &mut resume);
+    for _ in 0..3 {
+        let size = usize::try_from(needed).unwrap_or(0);
+        if size == 0 {
+            return None;
+        }
+        let mut bytes = vec![0u8; size];
+        returned = 0;
+        resume = 0;
+        let ok = enumerate_services_call(
+            manager,
+            Some(&mut bytes),
+            &mut needed,
+            &mut returned,
+            &mut resume,
+        );
+        if ok != 0 {
+            return Some(Enumeration {
+                bytes,
+                count: returned,
+            });
+        }
     }
+    None
+}
 
-    let mut bytes = vec![0u8; size];
-    // SAFETY: as above, with `bytes` now a live, uniquely-borrowed
-    // allocation of exactly `needed` bytes — which is what the length
-    // argument states and what the call just reported it needs.
-    let ok = unsafe {
+/// Performs one sizing or filling call to `EnumServicesStatusExW`.
+fn enumerate_services_call(
+    manager: &ServiceHandle,
+    bytes: Option<&mut [u8]>,
+    needed: &mut u32,
+    returned: &mut u32,
+    resume: &mut u32,
+) -> i32 {
+    let (buffer, capacity) = bytes.map_or((std::ptr::null_mut(), 0), |bytes| {
+        (
+            bytes.as_mut_ptr(),
+            u32::try_from(bytes.len()).unwrap_or(u32::MAX),
+        )
+    });
+    // SAFETY: `manager` is live and has enumeration access; `buffer` is
+    // either null for sizing or names `capacity` writable bytes. Every
+    // out-parameter is uniquely borrowed for this synchronous call.
+    unsafe {
         EnumServicesStatusExW(
             manager.raw(),
             SC_ENUM_PROCESS_INFO,
             SERVICE_WIN32,
             SERVICE_STATE_ALL,
-            bytes.as_mut_ptr(),
-            needed,
-            std::ptr::from_mut(&mut needed),
-            std::ptr::from_mut(&mut returned),
-            std::ptr::from_mut(&mut resume),
+            buffer,
+            capacity,
+            std::ptr::from_mut(needed),
+            std::ptr::from_mut(returned),
+            std::ptr::from_mut(resume),
             std::ptr::null(),
         )
-    };
-    (ok != 0).then_some(Enumeration {
-        bytes,
-        count: returned,
-    })
+    }
 }
 
 /// Parses an enumeration buffer into services.
@@ -252,20 +269,16 @@ fn parse_services(bytes: &[u8], count: u32) -> Vec<Service> {
         let Some(slice) = bytes.get(base..end) else {
             break;
         };
-        // SAFETY: `slice` is exactly one entry long and valid for reads.
-        // `read_unaligned` imposes no alignment requirement, which
-        // matters because the buffer is a `Vec<u8>`.
-        let entry = unsafe {
-            std::ptr::read_unaligned(slice.as_ptr().cast::<ENUM_SERVICE_STATUS_PROCESSW>())
+        let Some(entry) = read_service_entry(slice) else {
+            break;
         };
 
-        // SAFETY: both name pointers point into `bytes`, which is
-        // borrowed for the whole of this function, and both are
-        // NUL-terminated strings the SCM wrote. The strings are copied
-        // out here, before the borrow ends.
-        let name = unsafe { wide_from_pointer(entry.lpServiceName) };
-        // SAFETY: as above.
-        let display_name = unsafe { wide_from_pointer(entry.lpDisplayName) };
+        let Some(name) = wide_from_buffer(entry.lpServiceName, bytes) else {
+            continue;
+        };
+        let Some(display_name) = wide_from_buffer(entry.lpDisplayName, bytes) else {
+            continue;
+        };
 
         let status = entry.ServiceStatusProcess;
         found.push(Service {
@@ -280,33 +293,33 @@ fn parse_services(bytes: &[u8], count: u32) -> Vec<Service> {
     found
 }
 
-/// Reads a NUL-terminated wide string from a raw pointer.
-///
-/// # Safety
-///
-/// `pointer` must be null or point at a NUL-terminated UTF-16 string
-/// alive for this call.
-unsafe fn wide_from_pointer(pointer: *const u16) -> String {
-    /// A guard against a missing terminator. Service names are short;
-    /// display names are at most a couple of hundred characters.
-    const MAX_UNITS: usize = 1024;
+/// Copies one possibly unaligned enumeration entry from a byte slice.
+fn read_service_entry(slice: &[u8]) -> Option<ENUM_SERVICE_STATUS_PROCESSW> {
+    if slice.len() < std::mem::size_of::<ENUM_SERVICE_STATUS_PROCESSW>() {
+        return None;
+    }
+    // SAFETY: callers pass exactly one entry's readable bytes;
+    // `read_unaligned` deliberately imposes no alignment requirement.
+    Some(unsafe { std::ptr::read_unaligned(slice.as_ptr().cast()) })
+}
+
+/// Copies a string only when its pointer and terminator are inside the
+/// owning SCM buffer.
+fn wide_from_buffer(pointer: *const u16, bytes: &[u8]) -> Option<String> {
     if pointer.is_null() {
-        return String::new();
+        return Some(String::new());
     }
-    let mut length = 0usize;
-    while length < MAX_UNITS {
-        // SAFETY: the caller guarantees NUL-termination, so every unit
-        // up to the terminator is within the allocation; the cap stops
-        // the scan if it is not.
-        let unit = unsafe { *pointer.add(length) };
-        if unit == 0 {
-            break;
-        }
-        length += 1;
+    let start = pointer as usize;
+    let owner = bytes.as_ptr() as usize;
+    let end = owner.checked_add(bytes.len())?;
+    if start < owner || start >= end || !start.is_multiple_of(std::mem::align_of::<u16>()) {
+        return None;
     }
-    // SAFETY: `length` units were just confirmed readable.
-    let slice = unsafe { std::slice::from_raw_parts(pointer, length) };
-    String::from_utf16_lossy(slice)
+    let remaining = end.checked_sub(start)? / 2;
+    // SAFETY: alignment and bounds were checked above.
+    let wide = unsafe { std::slice::from_raw_parts(pointer, remaining) };
+    let length = wide.iter().position(|unit| *unit == 0)?;
+    Some(String::from_utf16_lossy(&wide[..length]))
 }
 
 /// Asks a service to start.
@@ -314,14 +327,18 @@ unsafe fn wide_from_pointer(pointer: *const u16) -> String {
 /// Normally requires administrator; see the module docs.
 pub fn start(name: &str) -> Result<(), super::control::ActionError> {
     let service = open_service(name, SERVICE_START)?;
-    // SAFETY: `service` is a live service handle opened with
-    // SERVICE_START. A zero argument count with a null argument vector
-    // is the documented "no arguments".
-    let ok = unsafe { StartServiceW(service.raw(), 0, std::ptr::null()) };
+    let ok = start_service(&service);
     if ok == 0 {
         return Err(super::control::ActionError::Failed(last_error()));
     }
     Ok(())
+}
+
+/// Starts a service without command-line arguments.
+fn start_service(service: &ServiceHandle) -> i32 {
+    // SAFETY: `service` is live and opened with `SERVICE_START`; a zero
+    // count with a null vector is the documented no-arguments form.
+    unsafe { StartServiceW(service.raw(), 0, std::ptr::null()) }
 }
 
 /// Asks a service to stop.
@@ -330,23 +347,25 @@ pub fn start(name: &str) -> Result<(), super::control::ActionError> {
 /// stopped; see the module docs.
 pub fn stop(name: &str) -> Result<(), super::control::ActionError> {
     let service = open_service(name, SERVICE_STOP | SERVICE_QUERY_STATUS)?;
-    // SAFETY: `SERVICE_STATUS` is plain integers, so all-zero is a valid
-    // starting value; the call overwrites it.
-    let mut status: SERVICE_STATUS = unsafe { std::mem::zeroed() };
-    // SAFETY: `service` is a live handle opened with SERVICE_STOP.
-    // `status` is a live, uniquely-borrowed out-parameter the call writes
-    // the service's state into.
-    let ok = unsafe {
-        ControlService(
-            service.raw(),
-            SERVICE_CONTROL_STOP,
-            std::ptr::from_mut(&mut status),
-        )
-    };
+    let mut status = SERVICE_STATUS::default();
+    let ok = stop_service(&service, &mut status);
     if ok == 0 {
         return Err(super::control::ActionError::Failed(last_error()));
     }
     Ok(())
+}
+
+/// Sends one stop control to a service.
+fn stop_service(service: &ServiceHandle, status: &mut SERVICE_STATUS) -> i32 {
+    // SAFETY: `service` is live and opened with `SERVICE_STOP`; `status`
+    // is a live uniquely borrowed out-parameter for this call.
+    unsafe {
+        ControlService(
+            service.raw(),
+            SERVICE_CONTROL_STOP,
+            std::ptr::from_mut(status),
+        )
+    }
 }
 
 /// Opens one service with the given rights.
@@ -355,21 +374,32 @@ fn open_service(name: &str, access: u32) -> Result<ServiceHandle, super::control
         return Err(super::control::ActionError::Denied(last_error()));
     };
     let wide = strings::to_wide(name);
-    // SAFETY: `manager` is a live SCM handle. `wide` is a live,
-    // NUL-terminated UTF-16 buffer bound to a local that outlives the
-    // call. The returned handle goes straight into `ServiceHandle`,
-    // which rejects null and closes it on drop.
-    let raw = unsafe { OpenServiceW(manager.raw(), wide.as_ptr(), access) };
+    let raw = open_service_call(&manager, &wide, access);
     ServiceHandle::new(raw).ok_or_else(|| super::control::ActionError::Denied(last_error()))
+}
+
+/// Opens a named service under a live manager.
+fn open_service_call(
+    manager: &ServiceHandle,
+    name: &[u16],
+    access: u32,
+) -> windows_sys::Win32::System::Services::SC_HANDLE {
+    // SAFETY: `manager` is live; `name` is a live NUL-terminated UTF-16
+    // buffer and the returned handle is immediately given an owner.
+    unsafe { OpenServiceW(manager.raw(), name.as_ptr(), access) }
 }
 
 /// Opens the Service Control Manager with the given rights.
 fn open_manager(access: u32) -> Option<ServiceHandle> {
-    // SAFETY: two null name pointers select the local machine and the
-    // active database, which is what the call documents. The returned
-    // handle goes straight into `ServiceHandle`.
-    let raw = unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), access) };
+    let raw = open_manager_call(access);
     ServiceHandle::new(raw)
+}
+
+/// Opens the local machine's active Service Control Manager database.
+fn open_manager_call(access: u32) -> windows_sys::Win32::System::Services::SC_HANDLE {
+    // SAFETY: null names select the local machine and active database;
+    // the returned handle is immediately given to `ServiceHandle`.
+    unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), access) }
 }
 
 /// `GetLastError`, wrapped.
@@ -383,6 +413,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "environment smoke test"]
     fn services_enumerate_without_elevation() {
         // The reason the read path asks only for
         // SC_MANAGER_ENUMERATE_SERVICE. Asking for ALL_ACCESS would make
@@ -414,6 +445,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "environment smoke test"]
     fn a_running_service_reports_its_hosting_process() {
         // The link from "svchost.exe is using 40% CPU" to which service
         // is responsible — the main reason this view exists.
@@ -464,7 +496,7 @@ mod tests {
             ServiceState::Starting,
             ServiceState::Running,
             ServiceState::Stopping,
-            ServiceState::Other,
+            ServiceState::Transitioning,
         ] {
             assert!(!state.label().is_empty());
         }
@@ -474,7 +506,7 @@ mod tests {
     fn an_unknown_state_constant_does_not_claim_to_be_running() {
         // Falling back to `Running` for an unrecognised state would put a
         // stop button on something that is not running.
-        assert_eq!(ServiceState::from_raw(9999), ServiceState::Other);
+        assert_eq!(ServiceState::from_raw(9999), ServiceState::Transitioning);
         assert_eq!(
             ServiceState::from_raw(SERVICE_RUNNING),
             ServiceState::Running

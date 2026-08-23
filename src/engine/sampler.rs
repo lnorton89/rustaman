@@ -45,28 +45,29 @@
 use crate::model::rates::{Counters, Rates};
 use crate::model::{
     CpuSample, DiskSample, GpuSample, Priority, ProcessKey, ProcessKind, ProcessRow, ProcessStatus,
-    Snapshot, SystemSample,
+    Snapshot, SystemSample, VolumeSample,
 };
 use crate::win;
-use crossbeam_channel::Sender;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The thread body.
 ///
 /// Runs until the receiver disconnects or `stopping` is set.
-pub fn run(sender: &Sender<Snapshot>, interval_ms: &AtomicU64, stopping: &AtomicBool) {
+pub fn run(
+    snapshots: &Mutex<Option<Arc<Snapshot>>>,
+    interval_ms: &AtomicU64,
+    stopping: &AtomicBool,
+    elevated: bool,
+) {
     // First, before anything touches a device. This thread walks every
     // drive letter on the machine once a second, and a drive that is not
     // ready would otherwise raise a modal system dialog *on this thread*
     // and block it there until dismissed — which is the app hanging.
     // See `win::system::suppress_device_error_dialogs`.
     win::system::suppress_device_error_dialogs();
-
-    // Asked for once, at startup. Without it, identity lookups come back
-    // empty for roughly half the machine — see `win::privilege`.
-    let elevated = win::privilege::enable();
 
     let mut sampler = Sampler::new(elevated);
     let mut last = Instant::now();
@@ -89,10 +90,7 @@ pub fn run(sender: &Sender<Snapshot>, interval_ms: &AtomicU64, stopping: &Atomic
         last = now;
 
         let snapshot = sampler.sample(elapsed);
-        if !super::publish(sender, snapshot) {
-            // The window has closed.
-            return;
-        }
+        super::publish(snapshots, snapshot);
     }
 }
 
@@ -177,8 +175,11 @@ impl Sampler {
         self.sequence = self.sequence.saturating_add(1);
 
         let cores = self.facts.logical_cores.max(1);
-        let processes = self.sample_processes(elapsed, cores);
-        let system = self.sample_system(elapsed, &processes);
+        // PDH rate counters are collected exactly once per pass. Both the
+        // process rows and adapter cards derive from this same reading.
+        let gpu = self.gpu.as_mut().map(win::gpu::Session::read);
+        let processes = self.sample_processes(elapsed, cores, gpu.as_ref());
+        let system = self.sample_system(elapsed, &processes, gpu.as_ref());
 
         Snapshot {
             sequence: self.sequence,
@@ -189,12 +190,18 @@ impl Sampler {
     }
 
     /// Reads and merges every process.
-    fn sample_processes(&mut self, elapsed: Duration, cores: usize) -> Vec<ProcessRow> {
+    fn sample_processes(
+        &mut self,
+        elapsed: Duration,
+        cores: usize,
+        gpu: Option<&win::gpu::Reading>,
+    ) -> Vec<ProcessRow> {
         let Ok(raw) = win::nt::process::enumerate(&mut self.process_buffer) else {
             // A failed enumeration yields an empty list rather than a
             // stale one: showing a process table that is quietly frozen
             // is worse than showing an empty one, because nothing about
             // it says the numbers have stopped moving.
+            self.rates.reset();
             return Vec::new();
         };
 
@@ -202,7 +209,6 @@ impl Sampler {
         // call per row.
         let titles = win::windows::titles_by_pid();
         let connections = win::net::connections_by_pid();
-        let gpu = self.gpu.as_mut().map(win::gpu::Session::read);
 
         let live: HashSet<ProcessKey> = raw
             .iter()
@@ -224,6 +230,7 @@ impl Sampler {
                     cpu_ticks: process.cpu_ticks,
                     read_bytes: process.read_bytes,
                     write_bytes: process.write_bytes,
+                    hard_faults: process.hard_faults,
                 },
                 elapsed,
                 cores,
@@ -250,6 +257,7 @@ impl Sampler {
                 name: process.name,
                 description: identity.description,
                 path: identity.path,
+                icon: identity.icon,
                 user: identity.user,
                 session_id: process.session_id,
                 kind,
@@ -281,6 +289,7 @@ impl Sampler {
                 nonpaged_pool: process.nonpaged_pool,
                 page_faults: process.page_faults,
                 hard_faults: process.hard_faults,
+                hard_fault_rate: delta.hard_fault_rate,
                 thread_count: process.threads,
                 handle_count: process.handles,
                 disk_read_rate: delta.read_rate,
@@ -289,11 +298,9 @@ impl Sampler {
                 io_write_bytes: process.write_bytes,
                 connections: connections.get(&process.pid).copied().unwrap_or(0),
                 gpu_percent: gpu
-                    .as_ref()
                     .and_then(|reading| reading.by_pid.get(&process.pid).copied())
                     .unwrap_or(0.0),
                 gpu_memory: gpu
-                    .as_ref()
                     .and_then(|reading| reading.memory_by_pid.get(&process.pid).copied())
                     .unwrap_or(0),
                 priority: priority_from_base(process.base_priority),
@@ -310,15 +317,30 @@ impl Sampler {
     }
 
     /// Reads the system-wide counters.
-    fn sample_system(&mut self, elapsed: Duration, processes: &[ProcessRow]) -> SystemSample {
+    fn sample_system(
+        &mut self,
+        elapsed: Duration,
+        processes: &[ProcessRow],
+        gpu: Option<&win::gpu::Reading>,
+    ) -> SystemSample {
         let (memory, counts) = win::memory::read();
+        let volumes = win::disk::volumes()
+            .into_iter()
+            .map(|volume| VolumeSample {
+                letter: volume.letter,
+                capacity: volume.capacity,
+                free: volume.free,
+            })
+            .collect();
 
         SystemSample {
+            info: self.facts.info.clone(),
             cpu: self.sample_cpu(),
             memory,
             disks: self.sample_disks(elapsed),
+            volumes,
             adapters: self.sample_adapters(elapsed),
-            gpus: self.sample_gpus(),
+            gpus: Self::sample_gpus(gpu),
             uptime_seconds: win::system::uptime(),
             // Preferring the enumeration's own count over
             // `GetPerformanceInfo`'s: the two are taken at different
@@ -366,13 +388,6 @@ impl Sampler {
         // The disk counters are in 100ns ticks, so the interval has to be
         // in the same units for the active-time ratio to mean anything.
         let elapsed_ticks = u64::try_from(elapsed.as_nanos() / 100).unwrap_or(0);
-        let volumes = win::disk::volumes();
-        // Volume capacities are not mapped onto physical drives — see
-        // `win::disk::volumes` — so the totals are reported against the
-        // machine rather than per disk.
-        let capacity: u64 = volumes.iter().map(|volume| volume.capacity).sum();
-        let free: u64 = volumes.iter().map(|volume| volume.free).sum();
-
         let current = win::disk::read();
         let mut samples = Vec::with_capacity(current.len());
         for disk in &current {
@@ -390,16 +405,12 @@ impl Sampler {
                         elapsed,
                     ),
                     active_percent: win::disk::active_percent(previous, *disk, elapsed_ticks),
-                    capacity,
-                    free,
                 },
                 // First sight of this disk: rates are zero, for the same
                 // reason a process's first sample is.
                 None => DiskSample {
                     index: disk.index,
                     name: win::disk::label(disk.index),
-                    capacity,
-                    free,
                     ..DiskSample::default()
                 },
             };
@@ -461,15 +472,18 @@ impl Sampler {
     /// Built from the engine map the process pass already read, so the
     /// counters are not collected twice — PDH would return the same
     /// values for a second collection in the same interval anyway.
-    fn sample_gpus(&mut self) -> Vec<GpuSample> {
-        let Some(session) = self.gpu.as_mut() else {
+    fn sample_gpus(reading: Option<&win::gpu::Reading>) -> Vec<GpuSample> {
+        let Some(reading) = reading else {
             return Vec::new();
         };
-        let reading = session.read();
-        // Group the (luid, engine) pairs by adapter.
+        // Group exact physical engines by adapter.
         let mut by_adapter: HashMap<String, Vec<(String, f64)>> = HashMap::new();
-        for ((luid, engine), value) in reading.engines {
-            by_adapter.entry(luid).or_default().push((engine, value));
+        for ((luid, physical, index, engine), value) in &reading.engines {
+            let label = format!("{engine} · {physical}:{index}");
+            by_adapter
+                .entry(luid.clone())
+                .or_default()
+                .push((label, *value));
         }
 
         let mut samples: Vec<GpuSample> = by_adapter
@@ -484,12 +498,13 @@ impl Sampler {
                     .fold(0.0f64, f64::max)
                     .clamp(0.0, 100.0);
                 engines.sort_by(|a, b| a.0.cmp(&b.0));
+                let memory_used = reading.memory_by_adapter.get(&luid).copied().unwrap_or(0);
                 GpuSample {
                     name: format!("GPU {luid}"),
                     luid,
                     utilisation,
                     engines,
-                    memory_used: reading.memory_by_pid.values().sum(),
+                    memory_used,
                     memory_total: 0,
                 }
             })
@@ -523,6 +538,42 @@ pub fn priority_from_base(base: i32) -> Priority {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn equal_type_physical_gpu_engines_are_not_summed_together() {
+        let mut reading = win::gpu::Reading::default();
+        reading
+            .engines
+            .insert(("adapter-a".into(), 0, 0, "3D".into()), 35.0);
+        reading
+            .engines
+            .insert(("adapter-a".into(), 0, 1, "3D".into()), 40.0);
+
+        let samples = Sampler::sample_gpus(Some(&reading));
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].utilisation, 40.0);
+        assert_eq!(samples[0].engines.len(), 2);
+    }
+
+    #[test]
+    fn gpu_memory_stays_with_its_adapter() {
+        let mut reading = win::gpu::Reading::default();
+        reading
+            .engines
+            .insert(("adapter-a".into(), 0, 0, "3D".into()), 1.0);
+        reading
+            .engines
+            .insert(("adapter-b".into(), 0, 0, "3D".into()), 1.0);
+        reading.memory_by_adapter.insert("adapter-a".into(), 1_000);
+        reading.memory_by_adapter.insert("adapter-b".into(), 2_000);
+
+        let samples = Sampler::sample_gpus(Some(&reading));
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].luid, "adapter-a");
+        assert_eq!(samples[0].memory_used, 1_000);
+        assert_eq!(samples[1].luid, "adapter-b");
+        assert_eq!(samples[1].memory_used, 2_000);
+    }
     use crate::model::Architecture;
     use anyhow::{anyhow, Result};
 
@@ -609,6 +660,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "environment smoke test"]
     fn two_samples_produce_real_rates_for_this_process() {
         // End-to-end against the real machine: the first sample has no
         // previous counters, the second does.

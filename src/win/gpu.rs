@@ -53,7 +53,8 @@ use std::collections::HashMap;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhOpenQueryW, PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE,
+    PdhOpenQueryW, PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE,
+    PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE,
 };
 
 /// The counter path for engine utilisation, across every instance.
@@ -72,6 +73,10 @@ pub struct Instance {
     pub luid: String,
     /// The engine type, e.g. `3D`, `Copy`, `VideoDecode`.
     pub engine: String,
+    /// The physical-engine group published by the driver.
+    pub physical: u32,
+    /// The exact engine number within the physical group.
+    pub engine_index: u32,
 }
 
 /// A live PDH query, closed on drop.
@@ -86,11 +91,7 @@ impl Query {
     /// Opens a PDH query against the local machine.
     fn open() -> Option<Self> {
         let mut handle: HANDLE = std::ptr::null_mut();
-        // SAFETY: a null data-source pointer selects the local machine
-        // and a zero user-data value is the documented "none". `handle`
-        // is a live, uniquely-borrowed out-parameter the callee writes a
-        // query handle into on success; this `Query` then owns it.
-        let status = unsafe { PdhOpenQueryW(std::ptr::null(), 0, std::ptr::from_mut(&mut handle)) };
+        let status = open_local_query(&mut handle);
         (status == 0 && !handle.is_null()).then_some(Self(handle))
     }
 
@@ -105,56 +106,38 @@ impl Query {
     fn add(&self, path: &str) -> Option<HANDLE> {
         let wide = strings::to_wide(path);
         let mut counter: HANDLE = std::ptr::null_mut();
-        // SAFETY: `self.0` is a live query handle. `wide` is a live,
-        // NUL-terminated UTF-16 buffer bound to a local that outlives the
-        // call. `counter` is a live out-parameter. The counter handle is
-        // owned by the query and is closed with it, so it needs no
-        // wrapper of its own.
-        let status = unsafe {
-            PdhAddEnglishCounterW(self.0, wide.as_ptr(), 0, std::ptr::from_mut(&mut counter))
-        };
+        let status = add_english_counter(self.0, &wide, &mut counter);
         (status == 0 && !counter.is_null()).then_some(counter)
     }
 
     /// Collects one round of counter data.
     fn collect(&self) -> bool {
-        // SAFETY: `self.0` is a live query handle; the call takes it by
-        // value and retains nothing.
-        let status = unsafe { PdhCollectQueryData(self.0) };
+        let status = collect_query_data(self.0);
         status == 0
     }
 }
 
-// SAFETY: a PDH query handle has no thread affinity — it is an opaque
-// kernel-side object addressed by handle, like the process handles in
-// `super::handle` — and `Query` owns its handle exclusively, with no
-// interior mutability and no `Clone`. Moving one to the sampler thread
-// is what lets the GPU counters be read off the UI thread.
-unsafe impl Send for Query {}
-
 impl Drop for Query {
     fn drop(&mut self) {
-        // SAFETY: `self.0` is a live query handle owned exclusively by
-        // this value, and this is the one close.
-        unsafe {
-            let _ = PdhCloseQuery(self.0);
-        }
+        close_query(self.0);
     }
 }
 
 /// One reading of the GPU counters.
 #[derive(Clone, Debug, Default)]
 pub struct Reading {
-    /// Utilisation per (adapter LUID, engine type), as a percentage.
+    /// Utilisation per exact physical engine, as a percentage.
     ///
     /// Summed across the processes sharing an engine, because that is
     /// what the adapter's own utilisation means.
-    pub engines: HashMap<(String, String), f64>,
+    pub engines: HashMap<(String, u32, u32, String), f64>,
     /// Utilisation per process, as a percentage, taking the busiest
     /// engine that process is using.
     pub by_pid: HashMap<u32, f64>,
     /// Dedicated video memory per process, in bytes.
     pub memory_by_pid: HashMap<u32, u64>,
+    /// Dedicated video memory per adapter LUID, in bytes.
+    pub memory_by_adapter: HashMap<String, u64>,
 }
 
 /// A PDH session held open across samples.
@@ -175,11 +158,6 @@ pub struct Session {
     /// Whether a first collection has been made. See the struct docs.
     primed: bool,
 }
-
-// SAFETY: `Session` owns a `Query` (which is `Send`, see above) plus two
-// counter handles that belong to that query and are closed with it. None
-// has thread affinity, and `Session` is neither `Clone` nor `Sync`.
-unsafe impl Send for Session {}
 
 impl Session {
     /// Opens a session, or `None` if PDH or the counters are unavailable.
@@ -227,13 +205,17 @@ impl Session {
                 let Some(instance) = parse_instance(&name) else {
                     continue;
                 };
-                // An adapter's utilisation for one engine type is the sum
-                // over the processes using it; the *adapter's* figure is
-                // then the maximum over engine types, which the caller
-                // takes. See the module docs.
+                // Sum processes only when they refer to the same exact
+                // physical engine. Distinct engines with the same type
+                // run in parallel and must remain distinct.
                 *reading
                     .engines
-                    .entry((instance.luid.clone(), instance.engine.clone()))
+                    .entry((
+                        instance.luid.clone(),
+                        instance.physical,
+                        instance.engine_index,
+                        instance.engine.clone(),
+                    ))
                     .or_insert(0.0) += value;
                 if let Some(pid) = instance.pid {
                     let slot = reading.by_pid.entry(pid).or_insert(0.0);
@@ -254,12 +236,13 @@ impl Session {
                 };
                 // A process can hold memory on several adapters; the
                 // total is what the column means.
-                *reading.memory_by_pid.entry(pid).or_insert(0) +=
-                    if value.is_finite() && value > 0.0 {
-                        value as u64
-                    } else {
-                        0
-                    };
+                let bytes = if value.is_finite() && value > 0.0 {
+                    value as u64
+                } else {
+                    0
+                };
+                *reading.memory_by_pid.entry(pid).or_insert(0) += bytes;
+                *reading.memory_by_adapter.entry(instance.luid).or_insert(0) += bytes;
             }
         }
 
@@ -277,36 +260,14 @@ impl Session {
 fn formatted_array(counter: HANDLE) -> Vec<(String, f64)> {
     let mut size = 0u32;
     let mut count = 0u32;
-    // SAFETY: a null buffer is the documented way to ask for the
-    // required size. Both out-parameters are live, uniquely-borrowed
-    // values. The call is expected to fail; only the size is used.
-    let _ = unsafe {
-        PdhGetFormattedCounterArrayW(
-            counter,
-            PDH_FMT_DOUBLE,
-            std::ptr::from_mut(&mut size),
-            std::ptr::from_mut(&mut count),
-            std::ptr::null_mut(),
-        )
-    };
+    query_formatted_array_size(counter, &mut size, &mut count);
     let capacity = usize::try_from(size).unwrap_or(0);
     if capacity == 0 {
         return Vec::new();
     }
 
     let mut buffer = vec![0u8; capacity];
-    // SAFETY: `buffer` is a live, uniquely-borrowed allocation of exactly
-    // `size` bytes, which is what the size out-parameter states. The
-    // callee writes the item array and the instance-name strings into it.
-    let status = unsafe {
-        PdhGetFormattedCounterArrayW(
-            counter,
-            PDH_FMT_DOUBLE,
-            std::ptr::from_mut(&mut size),
-            std::ptr::from_mut(&mut count),
-            buffer.as_mut_ptr().cast(),
-        )
-    };
+    let status = read_formatted_array(counter, &mut size, &mut count, &mut buffer);
     if status != 0 {
         return Vec::new();
     }
@@ -326,66 +287,127 @@ fn formatted_array(counter: HANDLE) -> Vec<(String, f64)> {
         let Some(slice) = buffer.get(base..end) else {
             break;
         };
-        // SAFETY: `slice` is exactly one item long and valid for reads.
-        // `read_unaligned` imposes no alignment requirement, which
-        // matters because the backing buffer is a `Vec<u8>`.
-        let item = unsafe {
-            std::ptr::read_unaligned(slice.as_ptr().cast::<PDH_FMT_COUNTERVALUE_ITEM_W>())
+        let Some(item) = read_counter_item(slice) else {
+            break;
         };
         if item.szName.is_null() {
             continue;
         }
-        // SAFETY: `szName` points at a NUL-terminated UTF-16 string
-        // inside `buffer`, which is alive for the rest of this function.
-        // The string is copied out before the buffer is dropped.
-        let name = unsafe { wide_from_pointer(item.szName) };
-        // SAFETY: the value union was formatted as `PDH_FMT_DOUBLE`
-        // above, so the `doubleValue` arm is the populated one.
-        let value = unsafe { value_of(&item.FmtValue) };
-        found.push((name, value));
+        let Some(name) = wide_from_buffer(item.szName, &buffer) else {
+            continue;
+        };
+        if let Some(value) = formatted_double(&item.FmtValue) {
+            found.push((name, value));
+        }
     }
     found
 }
 
-/// Reads the double out of a formatted counter value.
-///
-/// # Safety
-///
-/// The value must have been formatted with `PDH_FMT_DOUBLE`, which is
-/// what makes `doubleValue` the live arm of the union.
-unsafe fn value_of(value: &PDH_FMT_COUNTERVALUE) -> f64 {
-    // SAFETY: the caller guarantees the union was formatted as a double.
+/// Reads a double produced by this module's `PDH_FMT_DOUBLE` query.
+fn formatted_double(value: &PDH_FMT_COUNTERVALUE) -> Option<f64> {
+    if value.CStatus != PDH_CSTATUS_VALID_DATA && value.CStatus != PDH_CSTATUS_NEW_DATA {
+        return None;
+    }
+    // SAFETY: `read_formatted_array` always requests `PDH_FMT_DOUBLE`, so
+    // this item's populated union arm is `doubleValue`.
     let raw = unsafe { value.Anonymous.doubleValue };
     if raw.is_finite() && raw >= 0.0 {
-        raw
+        Some(raw)
     } else {
-        0.0
+        None
     }
 }
 
-/// Reads a NUL-terminated wide string from a raw pointer.
-///
-/// # Safety
-///
-/// `pointer` must be non-null and point at a NUL-terminated UTF-16 string
-/// alive for this call.
-unsafe fn wide_from_pointer(pointer: *const u16) -> String {
-    /// A guard against a missing terminator rather than a real limit —
-    /// a PDH instance name is well under a hundred characters.
-    const MAX_UNITS: usize = 512;
-    let mut length = 0usize;
-    while length < MAX_UNITS {
-        // SAFETY: the caller guarantees the string is NUL-terminated, so
-        // every unit up to the terminator is within the allocation.
-        let unit = unsafe { *pointer.add(length) };
-        if unit == 0 {
-            break;
-        }
-        length += 1;
+/// Copies a NUL-terminated UTF-16 name only when the pointer and the
+/// terminator are both inside the owning PDH buffer.
+fn wide_from_buffer(pointer: *const u16, buffer: &[u8]) -> Option<String> {
+    let start = pointer as usize;
+    let buffer_start = buffer.as_ptr() as usize;
+    let buffer_end = buffer_start.checked_add(buffer.len())?;
+    if start < buffer_start
+        || start >= buffer_end
+        || !start.is_multiple_of(std::mem::align_of::<u16>())
+    {
+        return None;
     }
-    // SAFETY: `length` units were just confirmed readable.
-    let slice = unsafe { std::slice::from_raw_parts(pointer, length) };
-    String::from_utf16_lossy(slice)
+    let byte_offset = start.checked_sub(buffer_start)?;
+    let bytes = buffer.get(byte_offset..)?;
+    let units = bytes.len() / std::mem::size_of::<u16>();
+    let wide = u16_slice_in_buffer(pointer, units, buffer);
+    let length = wide.iter().position(|unit| *unit == 0)?;
+    Some(String::from_utf16_lossy(&wide[..length]))
+}
+
+/// Opens a PDH query on the local computer.
+fn open_local_query(handle: &mut HANDLE) -> u32 {
+    // SAFETY: a null data-source selects the local computer; `handle` is a
+    // live writable out-parameter and the API retains neither pointer.
+    unsafe { PdhOpenQueryW(std::ptr::null(), 0, handle) }
+}
+
+/// Adds an invariant-English PDH counter to a live query.
+fn add_english_counter(query: HANDLE, path: &[u16], counter: &mut HANDLE) -> u32 {
+    // SAFETY: `query` is owned by `Query`; `path` is live and NUL-terminated;
+    // `counter` is a live writable out-parameter, and nothing is retained.
+    unsafe { PdhAddEnglishCounterW(query, path.as_ptr(), 0, counter) }
+}
+
+/// Collects one sample from a live PDH query.
+fn collect_query_data(query: HANDLE) -> u32 {
+    // SAFETY: `query` is a live handle owned by `Query`; the API retains nothing.
+    unsafe { PdhCollectQueryData(query) }
+}
+
+/// Closes the exclusively-owned PDH query handle.
+fn close_query(query: HANDLE) {
+    // SAFETY: `Query` owns this live handle and Drop invokes this exactly once.
+    let _ = unsafe { PdhCloseQuery(query) };
+}
+
+/// Asks PDH how many bytes and items a formatted counter array requires.
+fn query_formatted_array_size(counter: HANDLE, size: &mut u32, count: &mut u32) {
+    // SAFETY: a null buffer is PDH's documented size query; both references are
+    // live writable out-parameters and the API retains none of them.
+    let _ = unsafe {
+        PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, size, count, std::ptr::null_mut())
+    };
+}
+
+/// Fetches one formatted counter array into its exact byte buffer.
+fn read_formatted_array(
+    counter: HANDLE,
+    size: &mut u32,
+    count: &mut u32,
+    buffer: &mut [u8],
+) -> u32 {
+    // SAFETY: `buffer` has the byte capacity requested by PDH; `size` and
+    // `count` are live out-parameters. PDH writes only within that buffer.
+    unsafe {
+        PdhGetFormattedCounterArrayW(
+            counter,
+            PDH_FMT_DOUBLE,
+            size,
+            count,
+            buffer.as_mut_ptr().cast(),
+        )
+    }
+}
+
+/// Reads one packed PDH item from the byte buffer without assuming alignment.
+fn read_counter_item(bytes: &[u8]) -> Option<PDH_FMT_COUNTERVALUE_ITEM_W> {
+    if bytes.len() < std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>() {
+        return None;
+    }
+    // SAFETY: the caller gives exactly `size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>()`
+    // bytes from the PDH output buffer; `read_unaligned` accepts its byte alignment.
+    Some(unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<PDH_FMT_COUNTERVALUE_ITEM_W>()) })
+}
+
+/// Reinterprets the checked aligned tail of PDH's backing buffer as UTF-16.
+fn u16_slice_in_buffer(pointer: *const u16, units: usize, _buffer: &[u8]) -> &[u16] {
+    // SAFETY: `wide_from_buffer` proved `pointer` is aligned and that exactly
+    // `units` complete u16s remain within its still-live backing byte buffer.
+    unsafe { std::slice::from_raw_parts(pointer, units) }
 }
 
 /// Decodes a PDH instance name.
@@ -420,12 +442,26 @@ pub fn parse_instance(name: &str) -> Option<Instance> {
 
     // `engtype_` is last in the name, so everything after it is the type.
     let engine = field(name, "engtype_").unwrap_or("").to_string();
+    let physical = field(name, "phys_")
+        .and_then(|rest| rest.split('_').next())
+        .and_then(|digits| digits.parse::<u32>().ok())
+        .unwrap_or(0);
+    let engine_index = field(name, "eng_")
+        .and_then(|rest| rest.split('_').next())
+        .and_then(|digits| digits.parse::<u32>().ok())
+        .unwrap_or(0);
 
     // A name carrying none of the three is not one of these counters.
     if pid.is_none() && luid.is_empty() && engine.is_empty() {
         return None;
     }
-    Some(Instance { pid, luid, engine })
+    Some(Instance {
+        pid,
+        luid,
+        engine,
+        physical,
+        engine_index,
+    })
 }
 
 #[cfg(test)]

@@ -60,11 +60,11 @@ const MAP_MINIMUM: f32 = 380.0;
 
 /// What the map leaves below itself for the machine's own summary and
 /// the key, when no tile is picked.
-const SUMMARY_HEIGHT: f32 = 190.0;
+const SUMMARY_HEIGHT: f32 = 204.0;
 
 /// What it leaves for a picked process's breakdown, which is taller: a
 /// composition bar, its key, and two rows of readouts.
-const BREAKDOWN_HEIGHT: f32 = 250.0;
+const BREAKDOWN_HEIGHT: f32 = 216.0;
 
 /// The narrowest a tile may be before its label is left off.
 ///
@@ -103,8 +103,16 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     toolbar(app, ui, &theme, &snapshot);
     ui.add_space(chrome::TOOLBAR_GAP);
 
+    // Capture the viewport before entering the ScrollArea. Inside a scroll
+    // area's content Ui, `available_height` describes its scrollable canvas,
+    // not reliably the visible pane. Using it to size the map made the map
+    // claim nearly the whole pane and then appended the summary below it,
+    // manufacturing a scrollbar even on a tall window.
+    let viewport_height = ui.available_height();
+
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
         .show(ui, |ui| {
             // The same trailing trim the Performance view takes, and for
             // the same reason: nothing here is a dense table that has to
@@ -119,18 +127,22 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
             // given more room does not merely look better, it shows more
             // of the machine, because every extra square point is
             // another process over the fold-in threshold.
-            let reserved = if app.memory_view.selected.is_some() {
-                BREAKDOWN_HEIGHT
-            } else {
-                SUMMARY_HEIGHT
-            };
-            let height = (ui.available_height() - reserved - chrome::SECTION_GAP).max(MAP_MINIMUM);
+            let height = map_height(viewport_height, app.memory_view.selected.is_some());
 
             map(app, ui, &theme, &snapshot, height);
             ui.add_space(chrome::SECTION_GAP);
             breakdown(app, ui, &theme, &snapshot);
-            ui.add_space(chrome::SECTION_GAP);
         });
+}
+
+/// Height left for the treemap after the appropriate lower summary.
+fn map_height(viewport_height: f32, selected: bool) -> f32 {
+    let reserved = if selected {
+        BREAKDOWN_HEIGHT
+    } else {
+        SUMMARY_HEIGHT
+    };
+    (viewport_height - reserved).max(MAP_MINIMUM)
 }
 
 /// The row above the map: what is being measured, and the machine's own
@@ -299,7 +311,7 @@ fn map(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot, height:
         }
 
         let under = pointer.is_some_and(|at| placed.contains(at));
-        let (name, base, selected) = match slice {
+        let (name, amount, base, selected) = match slice {
             Slice::Process(row) => {
                 if under {
                     hovered = Some(row);
@@ -309,6 +321,7 @@ fn map(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot, height:
                 }
                 (
                     row.display_name().to_string(),
+                    measure.of(row),
                     // Coloured by *kind*, the one fact that groups the
                     // tiles into something navigable: the apps in one
                     // hue, the machine's own processes in another. A hue
@@ -323,7 +336,12 @@ fn map(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot, height:
             // a tile that highlights under the pointer while doing
             // nothing when clicked is a worse lie than one that stays
             // still.
-            Slice::Others { count } => (format!("{count} smaller"), theme.border_strong, false),
+            Slice::Others { count } => (
+                format!("{count} smaller"),
+                weights.get(tile.index).copied().unwrap_or(0.0) as u64,
+                theme.border_strong,
+                false,
+            ),
         };
 
         let fill = if selected {
@@ -349,6 +367,20 @@ fn map(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot, height:
                 label,
                 theme::rgb(theme.text),
             );
+            if placed.width() >= 82.0 && placed.height() >= theme::ROW_HEIGHT * 2.0 {
+                let amount = widgets::truncated(
+                    ui,
+                    &crate::format::bytes(amount),
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    theme.text_muted,
+                    placed.width() - SPACE_SM,
+                );
+                ui.painter().galley(
+                    placed.left_top() + Vec2::new(SPACE_XS, theme::ROW_HEIGHT),
+                    amount,
+                    theme::rgb(theme.text_muted),
+                );
+            }
         }
     }
 
@@ -503,7 +535,7 @@ fn breakdown(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) {
             theme,
             width,
             "Hard faults",
-            &crate::format::count(row.hard_faults),
+            &format!("{:.1}/s", row.hard_fault_rate),
         );
     });
 }
@@ -667,6 +699,19 @@ fn find(snapshot: &Snapshot, key: ProcessKey) -> Option<&ProcessRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_roomy_memory_view_does_not_manufacture_scroll_overflow() {
+        let viewport = 700.0;
+        assert_eq!(map_height(viewport, false), viewport - SUMMARY_HEIGHT);
+        assert_eq!(map_height(viewport, true), viewport - BREAKDOWN_HEIGHT);
+    }
+
+    #[test]
+    fn a_short_memory_view_preserves_the_readable_map_floor() {
+        assert_eq!(map_height(320.0, false), MAP_MINIMUM);
+        assert_eq!(map_height(320.0, true), MAP_MINIMUM);
+    }
 
     #[test]
     fn the_readout_columns_share_the_row_without_overflowing_it() {

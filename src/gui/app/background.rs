@@ -23,6 +23,16 @@
 
 use crossbeam_channel::{bounded, Receiver};
 
+/// State of a one-shot background read.
+pub enum Poll<T> {
+    /// Worker is still running.
+    Pending,
+    /// Worker returned a value.
+    Ready(T),
+    /// Worker exited, panicked, or could not be spawned.
+    Failed,
+}
+
 /// One in-flight background read of a `T`.
 pub struct BackgroundRead<T> {
     /// Where the result arrives. Depth one: there is only ever one
@@ -56,8 +66,12 @@ impl<T: Send + 'static> BackgroundRead<T> {
 
     /// The result, if the read has finished since the last poll.
     #[must_use]
-    pub fn poll(&self) -> Option<T> {
-        self.receiver.try_recv().ok()
+    pub fn poll(&self) -> Poll<T> {
+        match self.receiver.try_recv() {
+            Ok(value) => Poll::Ready(value),
+            Err(crossbeam_channel::TryRecvError::Empty) => Poll::Pending,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => Poll::Failed,
+        }
     }
 }
 
@@ -72,7 +86,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut seen = None;
         while Instant::now() < deadline {
-            if let Some(value) = read.poll() {
+            if let Poll::Ready(value) = read.poll() {
                 seen = Some(value);
                 break;
             }
@@ -85,11 +99,8 @@ mod tests {
     fn polling_before_the_work_finishes_yields_nothing() {
         let (sender, receiver) = bounded::<u32>(1);
         let read = BackgroundRead { receiver };
-        assert_eq!(
-            read.poll(),
-            None,
-            "nothing has been sent yet, so this must not block or fabricate a value"
-        );
+        assert!(matches!(read.poll(), Poll::Pending));
         drop(sender);
+        assert!(matches!(read.poll(), Poll::Failed));
     }
 }

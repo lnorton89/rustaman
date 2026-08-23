@@ -71,18 +71,35 @@ const COLUMNS: [(SortKey, f32); 10] = [
     (SortKey::Session, 68.0),
 ];
 
-/// How wide the table's content is, in a pane of `pane` points.
+/// Whether the columns fit the pane, and what to do about it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Fit {
+    /// They fit. The table scrolls itself vertically, which keeps its
+    /// header pinned and puts its scrollbar against the pane's own
+    /// edge. This is the state the view is in at the size the app opens
+    /// at with the inspector closed, and it is worth keeping rather
+    /// than paying the cost below unconditionally.
+    Pane,
+    /// They do not, so one scroll area owns both axes, with the content
+    /// this wide.
+    Scroll(f32),
+}
+
+/// Decides between the two, for a pane of `pane` points.
 ///
-/// The columns' own width when the pane cannot afford them, so the
-/// surplus becomes scroll; the pane's width when it can, so the
-/// trailing spacer absorbs the slack and no scrollbar appears. Split
-/// out from the drawing so the three cases below can be stated as
-/// arithmetic rather than as a screenshot.
-fn content_width(pane: f32, spacing: f32, scrollbar: f32) -> f32 {
-    let wanted: f32 = COLUMNS.iter().map(|(_, width)| width).sum::<f32>()
-        + spacing * COLUMNS.len() as f32
-        + scrollbar;
-    wanted.max(pane)
+/// `bar` is the lane a vertical scrollbar takes, and it is subtracted
+/// from the pane rather than added to what the columns want. Adding it
+/// puts the content over the viewport by exactly that lane in the case
+/// where the columns *fit*, which shows a horizontal scrollbar under a
+/// table with nothing to scroll to.
+fn fit(pane: f32, spacing: f32, bar: f32) -> Fit {
+    let wanted: f32 =
+        COLUMNS.iter().map(|(_, width)| width).sum::<f32>() + spacing * COLUMNS.len() as f32;
+    if wanted <= pane - bar {
+        Fit::Pane
+    } else {
+        Fit::Scroll(wanted)
+    }
 }
 
 /// The width of the inspector pane.
@@ -225,33 +242,98 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect) {
     // all along. Note this is not a case that can be designed away by
     // choosing better widths: `MIN_SIZE` lets the window down to 780
     // points, so *no* fixed column set fits every size the app allows.
-    let content = content_width(
+    let fit = fit(
         pane.width(),
         ui.spacing().item_spacing.x,
         ui.spacing().scroll.allocated_width(),
     );
 
-    egui::ScrollArea::horizontal()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // The content is at least the pane, so a wide window has no
-            // scrollbar and the trailing spacer below takes up the
-            // slack exactly as it used to. Narrower, and the surplus
-            // becomes scroll rather than loss.
-            ui.set_min_width(content);
-            table_body(
-                app,
-                ui,
-                theme,
-                pane,
-                content,
-                &entries,
-                &snapshot,
-                &mut clicked,
-                &mut sort_clicked,
-                &mut action,
-            );
-        });
+    // Both axes on *one* scroll area, rather than a horizontal one
+    // wrapped around the table's own vertical scroll.
+    //
+    // Nesting them looks right and is not: a scrollbar is drawn at the
+    // edge of the content it scrolls, so the table's vertical scrollbar
+    // landed at the right-hand edge of 932 points of columns. In a pane
+    // of 588 that is three hundred points off-screen, and the table
+    // read as a list that simply ran off the bottom of the window with
+    // no way to scroll it. The horizontal bar then sliced the last row
+    // in half for good measure.
+    //
+    // One scroll area puts both bars at the edges of the *viewport*,
+    // where they are visible and where they say how much more there is
+    // in each direction.
+    match fit {
+        // Nothing overflows, so nothing is wrapped: the table scrolls
+        // itself, its header stays pinned and its scrollbar sits
+        // against the pane's edge, exactly as before any of this.
+        Fit::Pane => table_body(
+            app,
+            ui,
+            theme,
+            pane,
+            true,
+            &entries,
+            &snapshot,
+            &mut clicked,
+            &mut sort_clicked,
+            &mut action,
+        ),
+        Fit::Scroll(content) => {
+            // No hand-rolled clip on the *ui* here: the rows are
+            // already held to the pane by `widgets::row_clip`, which
+            // has to do it because a row's fill is painted through
+            // `set_clip_rect` and that replaces the clip in force
+            // rather than intersecting it. Clipping the ui as well
+            // would have hidden the earlier fault rather than fixing
+            // it — the rows would stop at the pane's edge while the
+            // scrollbar that reaches them stayed off-screen.
+            egui::ScrollArea::both()
+                // Named, and it has to be.
+                //
+                // A `ScrollArea` keys its stored state — offsets, and
+                // whether each bar is showing — on an id derived from
+                // its parent `Ui`. The inspector beside this table has
+                // a scroll area of its own, and the two collided: one
+                // state entry, written twice a frame with different
+                // values. egui requests a repaint whenever a bar's
+                // visibility changes from what the state says, so the
+                // two areas sat flipping that flag at each other and
+                // the window never stopped repainting. The offscreen
+                // harness is what caught it — it exceeded its step
+                // limit with two `scroll_area.rs:1524` repaint causes
+                // and nothing else in the list, which is one cause per
+                // area rather than one per axis.
+                //
+                // Nothing about that is visible in a screenshot, and on
+                // a real machine it shows only as a fan spinning up on
+                // an idle process list.
+                .id_salt("details-table")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // `set_width`, not `set_min_width`: min alone
+                    // leaves `available_width` at the viewport, and a
+                    // *resizable* `egui_extras` table refits its
+                    // columns to whatever that says — so the table
+                    // would narrow itself back to the pane it is
+                    // supposed to be scrolling past. Fixing the width
+                    // at what the columns want is what makes the
+                    // content a constant.
+                    ui.set_width(content);
+                    table_body(
+                        app,
+                        ui,
+                        theme,
+                        pane,
+                        false,
+                        &entries,
+                        &snapshot,
+                        &mut clicked,
+                        &mut sort_clicked,
+                        &mut action,
+                    );
+                });
+        }
+    }
 }
 
 /// The table proper, inside the horizontal scroll area.
@@ -267,26 +349,58 @@ fn table_body(
     ui: &mut Ui,
     theme: &Palette,
     pane: egui::Rect,
-    content: f32,
+    // Whether the table is drawn straight into the pane, rather than
+    // inside a scroll area that already owns both axes.
+    //
+    // It governs the vertical scroll and the trailing spacer together,
+    // because they are the same question: a table filling the pane
+    // scrolls itself and has slack to absorb, and a table inside a
+    // scroll area does neither. Two viewports in one is what put the
+    // vertical scrollbar three hundred points off-screen; a spacer
+    // absorbing slack that does not exist is what made its width
+    // disagree with the scroll area's.
+    fills_pane: bool,
     entries: &[Entry],
     snapshot: &crate::model::Snapshot,
     clicked: &mut Option<ProcessKey>,
     sort_clicked: &mut Option<SortKey>,
     action: &mut Option<Action>,
 ) {
-    // Spans the content rather than the visible pane, so a row hovered
-    // while scrolled right is still hovered along its whole length.
-    let viewport = egui::Rect::from_min_max(
-        egui::pos2(pane.left(), ui.cursor().top()),
-        egui::pos2(pane.left() + content, pane.bottom()),
-    );
+    // The *visible* pane, deliberately, even though the content may be
+    // wider than it.
+    //
+    // A row's background is painted through `Painter::set_clip_rect`,
+    // which **replaces** the clip in force rather than intersecting it
+    // — that is what lets one cell's fill widen across the whole row.
+    // The cost is that this rect is the only thing standing between the
+    // row and the rest of the window: a content-wide rect here escapes
+    // the scroll area's own clip, and the table paints its rows straight
+    // across the inspector. Which is the bug the horizontal scrolling
+    // was added to fix, arriving back by another door.
+    //
+    // Scrolled right, the cells beyond this edge are clipped away, and
+    // that is correct: they are off-screen.
+    let viewport = egui::Rect::from_min_max(egui::pos2(pane.left(), ui.cursor().top()), pane.max);
 
     theme::quiet_column_rules(ui);
+    let body_height = widgets::table_body_height(ui, viewport.height());
     let mut builder = TableBuilder::new(ui)
         .resizable(true)
-        .vscroll(true)
+        // The scroll area above owns both axes now. A table that also
+        // scrolled itself would be a second viewport inside the first,
+        // which is where the unreachable scrollbar came from.
+        //
+        // `TableBody::rows` still only draws what is visible: it takes
+        // its range from the ui's clip rect, and inside a scroll area
+        // that is the viewport either way. Four hundred processes still
+        // cost a screenful of rows to draw.
+        // `TableBody::rows` only draws what is visible either way: it
+        // takes its range from the ui's clip rect, which is the
+        // viewport whichever scroll area owns it. Four hundred
+        // processes still cost a screenful of rows to draw.
+        .vscroll(fills_pane)
         .min_scrolled_height(0.0)
-        .max_scroll_height((viewport.height() - HEADER_HEIGHT).max(0.0))
+        .max_scroll_height(body_height)
         .auto_shrink([true, false])
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .sense(Sense::click());
@@ -303,7 +417,9 @@ fn table_body(
     // The trailing spacer that absorbs the window's slack; see
     // `super::processes` on why the absorbing column has to be one with
     // nothing in it.
-    builder = builder.column(Column::remainder().clip(true));
+    if fills_pane {
+        builder = builder.column(Column::remainder().clip(true));
+    }
 
     builder
         .header(HEADER_HEIGHT, |mut header| {
@@ -330,7 +446,9 @@ fn table_body(
             }
             // The spacer's heading, which is empty. Skipping it leaves
             // the header one cell short of the body.
-            header.col(|_| {});
+            if fills_pane {
+                header.col(|_| {});
+            }
         })
         .body(|body| {
             body.rows(ROW_HEIGHT, entries.len(), |mut row| {
@@ -368,7 +486,9 @@ fn table_body(
                 // The trailing spacer is a real column and has to be
                 // filled, or the row stops one column short of the
                 // window's edge.
-                row.spacer();
+                if fills_pane {
+                    row.spacer();
+                }
 
                 let response = row.response();
                 if response.clicked() {
@@ -595,56 +715,83 @@ mod tests {
     const SCROLLBAR: f32 = 12.0;
 
     #[test]
-    fn the_columns_fit_the_window_the_app_opens_at() {
+    fn the_columns_fit_the_window_the_app_opens_at() -> anyhow::Result<()> {
         // The common state of this view: default window, no inspector.
-        // A horizontal scrollbar here would be one in the case that is
-        // not an edge case at all, which is a sizing problem rather than
-        // a scrolling one — so it is worth a test of its own even though
-        // overflow is now handled.
+        // It has to come out `Pane`, and for two reasons rather than
+        // one. A horizontal scrollbar under a table with nothing to
+        // scroll to is the visible half; the invisible half is that
+        // wrapping it would cost the pinned header and put its vertical
+        // scrollbar at the edge of the content instead of the pane.
         let Some(window) = crate::gui::DEFAULT_SIZE.first() else {
-            return;
+            return Ok(());
         };
         let pane = pane_for(*window, false);
-        assert!(
-            (content_width(pane, SPACING, SCROLLBAR) - pane).abs() < f32::EPSILON,
-            "the ten columns do not fit the {window}-point window with the              inspector closed, so the view opens with a horizontal scrollbar"
+        assert_eq!(
+            fit(pane, SPACING, SCROLLBAR),
+            Fit::Pane,
+            "the ten columns do not fit the {window}-point window with the              inspector closed, so the view opens wrapped in a scroll area              it does not need"
         );
+        Ok(())
     }
 
     #[test]
-    fn opening_the_inspector_scrolls_rather_than_dropping_columns() {
-        // The bug this whole arrangement exists for. The columns want
+    fn opening_the_inspector_scrolls_rather_than_dropping_columns() -> anyhow::Result<()> {
+        // The bug the whole arrangement exists for. The columns want
         // about 838 points and the pane beside an open inspector has
-        // about 592, and the previous answer — a clip — did not shorten
+        // about 592, and the original answer — a clip — did not shorten
         // the overflowing column, it removed Threads, Handles, Arch and
-        // Session outright, with no scrollbar to say so.
+        // Session outright with nothing on screen to say so.
         let Some(window) = crate::gui::DEFAULT_SIZE.first() else {
-            return;
+            return Ok(());
         };
-        let pane = pane_for(*window, true);
-        let content = content_width(pane, SPACING, SCROLLBAR);
-        assert!(
-            content > pane,
-            "the content is {content} in a pane of {pane}, so nothing              overflows and the scroll wrapper is dead code — if the              columns really do fit now, delete it rather than this test"
-        );
-
         let total: f32 = COLUMNS.iter().map(|(_, width)| width).sum();
+        let Fit::Scroll(content) = fit(pane_for(*window, true), SPACING, SCROLLBAR) else {
+            anyhow::bail!(
+                "the columns fit beside an open inspector, so the scroll                  branch is dead code — if that is really true now, delete                  it rather than this test"
+            );
+        };
         assert!(
             content >= total,
-            "the content is {content} but the columns alone want {total},              so the table is still being asked to draw in less room than              it needs and a column will be cut off"
+            "the content is {content} but the columns alone want {total},              so the table is still being asked to draw in less room than it              needs and a column is cut off"
         );
+        Ok(())
     }
 
     #[test]
-    fn the_narrowest_window_the_app_allows_still_reaches_every_column() {
+    fn the_narrowest_window_the_app_allows_still_reaches_every_column() -> anyhow::Result<()> {
         // `MIN_SIZE` is well under what the columns want, which is why
         // no fixed set of widths can be the answer here: whatever they
         // are shrunk to, some allowed window is narrower.
-        let pane = pane_for(780.0, false);
         let total: f32 = COLUMNS.iter().map(|(_, width)| width).sum();
+        let Fit::Scroll(content) = fit(pane_for(780.0, false), SPACING, SCROLLBAR) else {
+            anyhow::bail!("the narrowest allowed window does not scroll");
+        };
         assert!(
-            content_width(pane, SPACING, SCROLLBAR) >= total,
+            content >= total,
             "the narrowest allowed window cannot reach all ten columns"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_scrollbar_lane_comes_out_of_the_pane_rather_than_the_columns() {
+        // The repaint loop, stated as arithmetic. Charging the vertical
+        // scrollbar's lane to the *content* makes the content exceed
+        // the viewport by exactly that lane in the case where the
+        // columns fit — a scroll area whose content disagrees with its
+        // own viewport every frame, which egui resolves by asking for
+        // another frame, forever.
+        //
+        // So a pane with room for the columns and the lane is `Pane`,
+        // and a pane with room for the columns but *not* the lane is
+        // not silently treated as though it had both.
+        let columns: f32 =
+            COLUMNS.iter().map(|(_, width)| width).sum::<f32>() + SPACING * COLUMNS.len() as f32;
+        assert_eq!(fit(columns + SCROLLBAR, SPACING, SCROLLBAR), Fit::Pane);
+        assert_eq!(
+            fit(columns, SPACING, SCROLLBAR),
+            Fit::Scroll(columns),
+            "a pane exactly as wide as the columns has no room left for              the scrollbar, and pretending otherwise is the loop"
         );
     }
 
