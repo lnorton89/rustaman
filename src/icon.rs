@@ -455,16 +455,19 @@ mod tests {
     /// enum's variants at runtime, and `wildcard_enum_match_arm` being
     /// denied means the `match` in `strokes` already fails the build for
     /// a variant nobody drew. This list is what makes the *tests* cover
-    /// it too, and the length assertion below is what catches a variant
-    /// added to the enum and not to this list.
-    const ALL: [Icon; 25] = [
-        Icon::Windows,
+    /// it too, and the block below is what keeps it honest.
+    ///
+    /// Kept in the enum's own declaration order, which is not
+    /// decoration: the check below reads each entry's discriminant, and
+    /// the order is what makes a missing entry show up as a gap.
+    const ALL: [Icon; 26] = [
         Icon::Processes,
         Icon::Performance,
         Icon::Memory,
         Icon::Details,
         Icon::Services,
         Icon::Startup,
+        Icon::SystemInfo,
         Icon::Settings,
         Icon::ChevronRight,
         Icon::ChevronDown,
@@ -483,7 +486,54 @@ mod tests {
         Icon::Copy,
         Icon::Folder,
         Icon::Leaf,
+        Icon::Windows,
     ];
+
+    // `ALL` names each icon exactly once, checked when the tests are
+    // compiled rather than when they are run.
+    //
+    // This replaced a comment claiming a length assertion did the job.
+    // There was no such assertion, and the cost of that was not
+    // theoretical: `Icon::SystemInfo` sat in the enum, drawn and
+    // shipped in the nav rail, and exempt from all three geometry tests
+    // below for as long as nobody noticed it was missing from the list.
+    //
+    // `Icon` is field-less and declares no explicit discriminants, so
+    // `as usize` yields each variant's position in the enum — 0 for the
+    // first, one more for each after it. That is the enumeration Rust
+    // will not give at runtime, and it costs nothing to read. A list
+    // that omits an entry leaves a gap, which pushes the last
+    // discriminant past the end of `seen`; a list that repeats one
+    // trips the duplicate check.
+    //
+    // What this cannot see is a variant appended to the enum and to
+    // `strokes` but never to `ALL`, because nothing in the language
+    // reports how many variants there are. `strokes` will not compile
+    // until the new variant is drawn — `wildcard_enum_match_arm` is
+    // denied — so the author is already in this file; the remaining gap
+    // is that they may not look down here. Closing it properly needs
+    // `std::mem::variant_count`, which is still unstable.
+    const _: () = {
+        let mut seen = [false; ALL.len()];
+        let mut index = 0;
+        while index < ALL.len() {
+            let variant = ALL[index] as usize;
+            assert!(
+                variant < seen.len(),
+                "an Icon variant is missing from ALL: the entries do not \
+                 cover a contiguous run from the first variant, so one of \
+                 them is exempt from every geometry test below"
+            );
+            assert!(!seen[variant], "ALL names the same icon twice");
+            seen[variant] = true;
+            index += 1;
+        }
+        let mut variant = 0;
+        while variant < seen.len() {
+            assert!(seen[variant], "an Icon variant is missing from ALL");
+            variant += 1;
+        }
+    };
 
     #[test]
     fn every_icon_stays_inside_the_grid() -> Result<()> {
