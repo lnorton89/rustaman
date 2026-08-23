@@ -335,11 +335,41 @@ mod tests {
         // than as a pixel measurement, because that is the actual
         // contract between a view and its pane, and it is the one a
         // clip that replaces rather than intersects can break.
-        for view in [View::Processes, View::Details] {
+        for view in [
+            View::Processes,
+            View::Details,
+            View::Services,
+            View::Startup,
+        ] {
             let snapshot = a_long_list();
             let mut app = App::new(crate::config::Config::default());
             app.view = view;
             app.snapshot = Some(std::sync::Arc::new(snapshot));
+
+            // Both of these lists are read on their view's own schedule
+            // rather than by the sampler, and a view that has never
+            // refreshed starts a background read on its first frame and
+            // draws its empty state — which paints nothing and would
+            // pass this test without testing anything.
+            app.services.services = (0..400)
+                .map(|index| crate::win::services::Service {
+                    name: format!("svc{index}"),
+                    display_name: format!("Service {index}"),
+                    state: crate::win::services::ServiceState::Running,
+                    pid: Some(index + 4),
+                })
+                .collect();
+            app.services.refreshed = Some(std::time::Instant::now());
+            app.startup.entries = (0..400)
+                .map(|index| crate::win::startup::StartupEntry {
+                    name: format!("entry{index}"),
+                    command: format!(r"C:\Program Files\App{index}\app.exe"),
+                    location: "HKCU Run",
+                    all_users: false,
+                    enabled: true,
+                })
+                .collect();
+            app.startup.refreshed = app.services.refreshed;
 
             let window =
                 egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1180.0, 760.0));
@@ -363,17 +393,13 @@ mod tests {
                     ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| match view {
                         View::Processes => processes::draw(&mut app, ui),
                         View::Details => details::draw(&mut app, ui),
+                        View::Services => services::draw(&mut app, ui),
+                        View::Startup => services::draw_startup(&mut app, ui),
                         // Named rather than wildcarded, so a view added
                         // later is a compile error here and somebody has
-                        // to decide whether it belongs in this test.
-                        // Services and Startup want a fabricated service
-                        // list; the rest are not tables.
-                        View::Performance
-                        | View::Memory
-                        | View::Services
-                        | View::Startup
-                        | View::System
-                        | View::Settings => {}
+                        // to decide whether it belongs. The rest are not
+                        // tables and cannot exhibit this.
+                        View::Performance | View::Memory | View::System | View::Settings => {}
                     });
                 },
             );
