@@ -183,12 +183,41 @@ fn refresh_visible_services(app: &mut App) {
 /// The services table.
 fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     refresh_visible_services(app);
-    let visible = app.services.visible.clone();
-
-    if visible.is_empty() {
+    if app.services.visible.is_empty() {
         widgets::empty_state(ui, theme, "No services match that search");
         return;
     }
+
+    /// Every column but the one that takes the slack.
+    const FIXED: f32 = 180.0 + 90.0 + 70.0 + 200.0;
+    /// The floor under the Name column.
+    const LEAST: f32 = 220.0;
+
+    let pane = ui.available_rect_before_wrap();
+    let Some(content) = overflow(
+        pane.width(),
+        ui.spacing().item_spacing.x,
+        ui.spacing().scroll.allocated_width(),
+        FIXED,
+        LEAST,
+        5,
+    ) else {
+        table_body(app, ui, theme, pane, true);
+        return;
+    };
+
+    egui::ScrollArea::both()
+        .id_salt("service-table")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.set_width(content);
+            table_body(app, ui, theme, pane, false);
+        });
+}
+
+/// The service table proper, once [`table`] has decided whether it fits.
+fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fills_pane: bool) {
+    let visible = app.services.visible.clone();
 
     let mut clicked: Option<String> = None;
     let mut sort_clicked: Option<ServiceSortKey> = None;
@@ -210,22 +239,23 @@ fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                     .collect()
             });
 
-    // Captured before the builder borrows the `Ui`; see
+    // The pane the caller measured, not this ui's own rect — inside a
+    // scroll area those are different things. See
     // `widgets::row_background` on why a row needs it.
-    let viewport = ui.available_rect_before_wrap();
+    let viewport = pane;
 
     theme::quiet_column_rules(ui);
     ui.set_clip_rect(viewport);
     let body_height = widgets::table_body_height(ui, viewport.height());
     TableBuilder::new(ui)
         .resizable(true)
-        .vscroll(true)
+        .vscroll(fills_pane)
         .min_scrolled_height(0.0)
         .max_scroll_height(body_height)
         .auto_shrink([true, false])
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .sense(Sense::click())
-        .column(Column::remainder().at_least(220.0).clip(true))
+        .column(flexible(!fills_pane, 220.0))
         .column(
             Column::initial(180.0)
                 .at_least(80.0)
@@ -600,30 +630,116 @@ fn refresh_visible_startup(app: &mut App) {
     app.startup.visible_key = Some(key);
 }
 
+/// How wide a table's content wants to be, when that is more than the
+/// pane can give it.
+///
+/// `None` means it fits and the table can be drawn straight into the
+/// pane, scrolling itself vertically with its header pinned.
+///
+/// Both tables here have one column that takes up the slack — Name in
+/// the service list, Command in the startup list — declared as a
+/// `remainder()` with a floor under it. That floor is not a request:
+/// `at_least` wins, so the total can exceed the pane, and the column at
+/// the far end is then cut off at the pane's edge with no scrollbar and
+/// nothing on screen to say a column was lost. At the smallest window
+/// the app allows, the startup list wants 672 points against a pane of
+/// 588 and the command line is sliced mid-path.
+///
+/// `bar` comes out of the pane rather than being added to what the
+/// columns want; see `super::details::fit` for why that direction
+/// matters.
+fn overflow(
+    pane: f32,
+    spacing: f32,
+    bar: f32,
+    fixed: f32,
+    least: f32,
+    columns: usize,
+) -> Option<f32> {
+    let wanted = fixed + least + spacing * columns as f32;
+    (wanted > pane - bar).then_some(wanted)
+}
+
+/// The column that takes the slack.
+///
+/// A `remainder()` when the table fills its pane. When it does not,
+/// there is no slack to take and a `remainder()` would size itself from
+/// an available width that the scrollbars change — a width that argues
+/// with the scroll area every frame about how wide the content is.
+fn flexible(scrolling: bool, least: f32) -> Column {
+    if scrolling {
+        Column::initial(least)
+            .at_least(least)
+            .resizable(true)
+            .clip(true)
+    } else {
+        Column::remainder().at_least(least).clip(true)
+    }
+}
+
 /// The startup table.
 fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     refresh_visible_startup(app);
-    let entries = app.startup.visible.clone();
-
-    if entries.is_empty() {
+    if app.startup.visible.is_empty() {
         widgets::empty_state(ui, theme, "No startup entries match that search");
         return;
     }
+
+    /// Every column but the one that takes the slack.
+    const FIXED: f32 = 240.0 + 90.0 + 150.0;
+    /// The floor under the Command column.
+    const LEAST: f32 = 160.0;
+
+    let pane = ui.available_rect_before_wrap();
+    let Some(content) = overflow(
+        pane.width(),
+        ui.spacing().item_spacing.x,
+        ui.spacing().scroll.allocated_width(),
+        FIXED,
+        LEAST,
+        4,
+    ) else {
+        startup_table_body(app, ui, theme, pane, true);
+        return;
+    };
+
+    // One scroll area owning both axes; see `super::details` for why
+    // only one of them may, and why it has to be named.
+    egui::ScrollArea::both()
+        .id_salt("startup-table")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.set_width(content);
+            startup_table_body(app, ui, theme, pane, false);
+        });
+}
+
+/// The startup table proper, once [`startup_table`] has decided whether
+/// it fits.
+fn startup_table_body(
+    app: &mut App,
+    ui: &mut Ui,
+    theme: &Palette,
+    pane: egui::Rect,
+    fills_pane: bool,
+) {
+    let entries = app.startup.visible.clone();
 
     let mut clicked: Option<String> = None;
     let mut sort_clicked: Option<StartupSortKey> = None;
     let mut reveal: Option<std::path::PathBuf> = None;
 
-    // Captured before the builder borrows the `Ui`; see
+    // The pane the caller measured, not this ui's own rect — inside a
+    // scroll area those are different things. See
     // `widgets::row_background` on why a row needs it.
-    let viewport = ui.available_rect_before_wrap();
+    let viewport = pane;
 
     theme::quiet_column_rules(ui);
     ui.set_clip_rect(viewport);
     let body_height = widgets::table_body_height(ui, viewport.height());
     TableBuilder::new(ui)
         .resizable(true)
-        .vscroll(true)
+        .vscroll(fills_pane)
         .min_scrolled_height(0.0)
         .max_scroll_height(body_height)
         .auto_shrink([true, false])
@@ -650,7 +766,7 @@ fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
                 .resizable(true)
                 .clip(true),
         )
-        .column(Column::remainder().at_least(160.0).clip(true))
+        .column(flexible(!fills_pane, 160.0))
         .header(HEADER_HEIGHT, |mut header| {
             for (index, key) in [
                 StartupSortKey::Name,
@@ -785,6 +901,72 @@ pub const ROW_GAP: f32 = SPACE_MD;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pane a view is given, for a window `window` points wide.
+    ///
+    /// Stated the way the window computes it rather than as a number,
+    /// so a change to the rail or the content inset moves these with it.
+    fn pane_for(window: f32) -> f32 {
+        window - theme::NAV_WIDTH - theme::PAD * 2.0
+    }
+
+    /// `egui_extras` puts `item_spacing.x` between columns and reserves
+    /// a lane for the vertical scrollbar.
+    const SPACING: f32 = theme::SPACE_SM;
+    const SCROLLBAR: f32 = 12.0;
+
+    /// The service list's columns: Name's floor, then the rest.
+    const SERVICE: (f32, f32, usize) = (180.0 + 90.0 + 70.0 + 200.0, 220.0, 5);
+    /// The startup list's: Name, Status and Location, then Command's floor.
+    const STARTUP: (f32, f32, usize) = (240.0 + 90.0 + 150.0, 160.0, 4);
+
+    #[test]
+    fn both_lists_fit_the_window_the_app_opens_at() -> anyhow::Result<()> {
+        // The state these views are usually in. A horizontal scrollbar
+        // here would be one in the case that is not an edge case, which
+        // is a sizing problem rather than a scrolling one.
+        let Some(window) = crate::gui::DEFAULT_SIZE.first() else {
+            return Ok(());
+        };
+        let pane = pane_for(*window);
+        for (name, (fixed, least, columns)) in [("service", SERVICE), ("startup", STARTUP)] {
+            assert!(
+                overflow(pane, SPACING, SCROLLBAR, fixed, least, columns).is_none(),
+                "the {name} list does not fit the {window}-point window, so the                  view opens with a horizontal scrollbar"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn both_lists_scroll_at_the_smallest_window_rather_than_losing_a_column() -> anyhow::Result<()>
+    {
+        // The bug. `at_least` on a `remainder()` is not a request — it
+        // wins — so the total exceeded the pane and the column at the
+        // far end was cut off at the pane's edge, with no scrollbar and
+        // nothing to say a column had been lost. The startup list's
+        // command line, which is the one thing that view exists to
+        // show, was sliced mid-path.
+        //
+        // Note the paint-extent test in `super::super` cannot catch
+        // this: these tables clip correctly, so nothing is painted
+        // outside the pane. The loss is entirely silent, which is why
+        // it is stated here as arithmetic instead.
+        let pane = pane_for(780.0);
+        for (name, (fixed, least, columns)) in [("service", SERVICE), ("startup", STARTUP)] {
+            let Some(content) = overflow(pane, SPACING, SCROLLBAR, fixed, least, columns) else {
+                anyhow::bail!(
+                    "the {name} list is said to fit a {pane}-point pane, so the                      scroll branch is dead code — if the columns really do fit                      now, delete it rather than this test"
+                );
+            };
+            assert!(
+                content >= fixed + least,
+                "the {name} list would scroll to {content}, which is less than                  the {} its columns need — a column is still cut off, just                  inside a scroll area now",
+                fixed + least
+            );
+        }
+        Ok(())
+    }
 
     fn service(name: &str, display: &str, state: ServiceState) -> Service {
         Service {
