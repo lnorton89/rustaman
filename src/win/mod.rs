@@ -55,7 +55,7 @@
 //! - [`control`] is the write side: end, suspend, resume, priority,
 //!   affinity.
 //!
-//! ## Windows 10 is the floor
+//! ## Windows 10 is the floor, and Windows 11 is where some of it lands
 //!
 //! This targets Windows 10 1809 (build 17763) and later. Anything newer
 //! than that is *probed*, never assumed: [`dwm::set_dark_titlebar`] asks
@@ -64,6 +64,29 @@
 //! task manager that refuses to start, or that starts and shows an empty
 //! window, because one optional counter is missing would be worse than
 //! one that quietly omits a column.
+//!
+//! Three things here exist only on 11, and each degrades differently:
+//!
+//! - **Efficiency mode** ([`control::efficiency_of`],
+//!   [`control::set_efficiency`]). The *write* has worked since Windows
+//!   10 1709; the *read* returns `ERROR_INVALID_PARAMETER` on 10. So on
+//!   10 every process reads as unknown, no marks are drawn, and the menu
+//!   item is withheld — gated on the build number rather than on the
+//!   call failing, because an item that reports success and changes
+//!   nothing a person can see is worse than one that is not there.
+//! - **Hybrid core kinds** ([`system::Facts::core_kinds`]). The
+//!   `EfficiencyClass` field has existed since Windows 10 1607 and was
+//!   zero on every part that shipped before Alder Lake. A machine where
+//!   it is uniformly zero is reported as uniform, which is the truth
+//!   about it rather than a missing feature.
+//! - **Rounded corners and the border colour**
+//!   ([`dwm::set_rounded_corners`], [`dwm::set_border_colour`]). Both
+//!   refuse on 10 and the window is square with a system-coloured edge,
+//!   which is what it was before either was asked for.
+//!
+//! The build number itself comes from the registry rather than from
+//! `GetVersionEx` — see [`crate::model::SystemInfo::is_windows_11`] on
+//! why the API that answers this question does not answer it.
 
 pub mod app_icon;
 pub mod control;

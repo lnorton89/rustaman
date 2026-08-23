@@ -717,6 +717,20 @@ pub struct App {
     pub last_snapshot_at: Option<std::time::Instant>,
     /// When monitoring started, so a missing first sample can go stale.
     pub engine_started_at: std::time::Instant,
+    /// Efficiency-mode changes this app has made and the sampler has not
+    /// caught up with yet.
+    ///
+    /// The sampler reads quality of service on a rolling sweep rather
+    /// than for every row every second, so a process's state can be a
+    /// few seconds stale — which is fine for a flag somebody else
+    /// changed and not fine at all for the one the user just clicked.
+    /// An entry here says "this is what it is now", and it is dropped
+    /// the moment a snapshot agrees.
+    ///
+    /// Not a cache and not a source of truth: it never invents a state
+    /// for a process nobody touched, so the worst it can be wrong about
+    /// is a toggle that failed silently between the sweep's passes.
+    pub efficiency_overrides: HashMap<ProcessKey, bool>,
 }
 
 impl App {
@@ -780,8 +794,52 @@ impl App {
             elevated,
             last_snapshot_at: None,
             engine_started_at: std::time::Instant::now(),
+            efficiency_overrides: HashMap::new(),
             config,
         }
+    }
+
+    /// A process's efficiency mode, with any change this app has made
+    /// since the last sweep folded in.
+    ///
+    /// Every read of the flag goes through here rather than at the
+    /// row — the context menu's tick, the row's mark and the details
+    /// pane all have to agree, and three call sites reaching into the
+    /// override map by hand is how two of them end up disagreeing.
+    #[must_use]
+    pub fn efficiency_of(&self, row: &crate::model::ProcessRow) -> crate::model::Efficiency {
+        match self.efficiency_overrides.get(&row.key()) {
+            Some(true) => crate::model::Efficiency::Reduced,
+            Some(false) => crate::model::Efficiency::Standard,
+            None => row.efficiency,
+        }
+    }
+
+    /// Drops overrides the sampler has caught up with, and any whose
+    /// process has exited.
+    ///
+    /// Called once per snapshot rather than per frame: an override that
+    /// outlives its process is a leak, and one that outlives the sweep
+    /// that confirmed it would pin the row to a state it no longer has
+    /// if something else changed it.
+    fn settle_efficiency_overrides(&mut self, snapshot: &Snapshot) {
+        if self.efficiency_overrides.is_empty() {
+            return;
+        }
+        let observed: HashMap<ProcessKey, crate::model::Efficiency> = snapshot
+            .processes
+            .iter()
+            .map(|row| (row.key(), row.efficiency))
+            .collect();
+        self.efficiency_overrides.retain(|key, wanted| {
+            match observed.get(key) {
+                // Gone: the process exited.
+                None => false,
+                // The sweep has not reached it since the change.
+                Some(crate::model::Efficiency::Unknown) => true,
+                Some(seen) => seen.is_reduced() != *wanted,
+            }
+        });
     }
 
     /// Takes any new snapshot and folds it into the history rings.
@@ -792,6 +850,7 @@ impl App {
             return;
         };
         self.record_history(&snapshot);
+        self.settle_efficiency_overrides(&snapshot);
         self.snapshot = Some(snapshot);
         self.last_snapshot_at = Some(std::time::Instant::now());
     }

@@ -161,6 +161,13 @@ pub struct ProcessRow {
     pub gpu_memory: u64,
     /// Scheduling priority class.
     pub priority: Priority,
+    /// Whether the process is running under reduced quality of service —
+    /// Windows 11's "Efficiency mode".
+    ///
+    /// [`Efficiency::Unknown`] until the sampler's sweep has reached
+    /// this process, which is a real state and not a placeholder: see
+    /// [`Efficiency`].
+    pub efficiency: Efficiency,
 }
 
 /// Owned shell-icon pixels safe to carry across the sampler/UI boundary.
@@ -470,6 +477,104 @@ impl Priority {
     }
 }
 
+/// A process's quality-of-service state — Windows 11's "Efficiency mode".
+///
+/// EcoQoS is the one genuinely new thing Windows 11 gave the process
+/// table. A process marked this way is scheduled on the efficiency cores
+/// where the machine has them, clocked down where it does not, and
+/// deprioritised against everything else — which is what makes a
+/// background updater cost battery rather than responsiveness.
+///
+/// Three states rather than a `bool`, and the third is the important
+/// one. Reading this costs a handle per process (see
+/// [`crate::engine::sampler`]), so it is swept a bounded slice at a time
+/// rather than read for every row every second — which means a row that
+/// has only just appeared genuinely has no answer yet.
+/// [`Efficiency::Unknown`] says so, where a `bool` would have to claim
+/// "off" and be wrong for a second on exactly the processes a user is
+/// watching most closely.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub enum Efficiency {
+    /// Not read yet, or the process refused to be opened.
+    #[default]
+    Unknown,
+    /// Scheduled normally.
+    Standard,
+    /// Throttled: `PROCESS_POWER_THROTTLING_EXECUTION_SPEED` is set.
+    Reduced,
+}
+
+impl Efficiency {
+    /// The word for one process, in a details pane or a tooltip.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => crate::format::DASH,
+            Self::Standard => "Off",
+            Self::Reduced => "On",
+        }
+    }
+
+    /// Whether the row should carry the mark.
+    ///
+    /// Only [`Efficiency::Reduced`] does. An unknown state draws nothing
+    /// rather than drawing an "off" mark it cannot vouch for.
+    #[must_use]
+    pub fn is_reduced(self) -> bool {
+        self == Self::Reduced
+    }
+}
+
+/// Where one logical processor sits in a hybrid CPU's topology.
+///
+/// Windows reports an *efficiency class* per physical core, and from
+/// Alder Lake and Snapdragon X on it is no longer the same for every
+/// core on the die. A machine with eight performance cores and sixteen
+/// efficiency cores graphs twenty-four tiles that behave nothing alike —
+/// the scheduler parks work on the small ones until it has to spill —
+/// and a grid that labels them all "CPU n" makes that read as noise.
+///
+/// Collapsed to two named kinds plus "uniform" rather than carrying the
+/// raw class number: Windows permits more than two classes and some
+/// parts do have three, but the distinction a person is looking for is
+/// "is this one of the fast ones", and a column of class ordinals does
+/// not answer it. See `win::system` for how the classes collapse.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub enum CoreKind {
+    /// Every core on this machine is the same. The overwhelmingly common
+    /// case, and the one where saying anything at all would be noise.
+    #[default]
+    Uniform,
+    /// One of the highest efficiency class the machine reports — a
+    /// P-core.
+    Performance,
+    /// Anything below that — an E-core.
+    Efficient,
+}
+
+impl CoreKind {
+    /// The full word, for a tooltip.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Uniform => "Logical processor",
+            Self::Performance => "Performance core",
+            Self::Efficient => "Efficiency core",
+        }
+    }
+
+    /// The single letter a grid tile has room for, or nothing when the
+    /// machine is uniform and the letter would say nothing.
+    #[must_use]
+    pub fn marker(self) -> Option<&'static str> {
+        match self {
+            Self::Uniform => None,
+            Self::Performance => Some("P"),
+            Self::Efficient => Some("E"),
+        }
+    }
+}
+
 /// One complete sample of the machine.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -538,6 +643,10 @@ pub struct SystemInfo {
     pub os_version: String,
     /// Exact Windows build number.
     pub os_build: String,
+    /// The update build revision — the part after the dot in
+    /// `26100.4652`, which is what actually distinguishes one patched
+    /// machine from another. Empty when it could not be read.
+    pub build_revision: String,
     /// System vendor reported by firmware.
     pub manufacturer: String,
     /// System product/model reported by firmware.
@@ -546,6 +655,44 @@ pub struct SystemInfo {
     pub bios_vendor: String,
     /// BIOS/UEFI version.
     pub bios_version: String,
+}
+
+/// The first build number that is Windows 11.
+///
+/// There is no "is this Windows 11" call. `GetVersionEx` is deprecated
+/// and lies to an app whose manifest does not claim the version,
+/// `VerifyVersionInfo` needs the same manifest, and the registry's
+/// `ProductName` still reads "Windows 10" on plenty of upgraded 11
+/// installs — see `win::system::windows_product_name`. The build number
+/// is the one thing on the machine that does not equivocate, and 22000
+/// is where 11 starts.
+pub const WINDOWS_11_BUILD: u32 = 22_000;
+
+impl SystemInfo {
+    /// The build as a person writes it: `26100.4652`, or just the build
+    /// when the revision is unknown.
+    #[must_use]
+    pub fn build_display(&self) -> String {
+        let build = self.os_build.trim();
+        let revision = self.build_revision.trim();
+        match (build.is_empty(), revision.is_empty()) {
+            (true, _) => String::new(),
+            (false, true) => build.to_string(),
+            (false, false) => format!("{build}.{revision}"),
+        }
+    }
+
+    /// Whether this is Windows 11 or later.
+    ///
+    /// The gate on every feature in the app that only exists there. A
+    /// machine whose build number could not be read reads as *not* 11,
+    /// which is the safe direction: the worst case is a menu item that
+    /// is missing on a machine that could have used it, against an item
+    /// that is present and silently does nothing.
+    #[must_use]
+    pub fn is_windows_11(&self) -> bool {
+        self.os_build.trim().parse::<u32>().unwrap_or(0) >= WINDOWS_11_BUILD
+    }
 }
 
 impl SystemSample {
@@ -615,6 +762,45 @@ pub struct CpuSample {
     /// the current frequency needs a counter that costs a great deal
     /// more to read than it is worth.
     pub megahertz: u32,
+    /// What kind of core each entry in [`CpuSample::per_core`] is, on a
+    /// hybrid machine.
+    ///
+    /// Same length and same order as `per_core`, or **empty** on a
+    /// machine whose topology could not be read — never a vector of
+    /// defaults, so a view can tell "every core is the same" from "we do
+    /// not know". See [`CoreKind`].
+    pub core_kinds: Vec<CoreKind>,
+}
+
+impl CpuSample {
+    /// The performance and efficiency core counts, on a machine that has
+    /// both.
+    ///
+    /// `None` on a uniform machine, which is what stops the Performance
+    /// page printing "16 performance + 0 efficiency" on a desktop Ryzen
+    /// — an accurate sentence that implies a distinction the machine
+    /// does not have.
+    #[must_use]
+    pub fn hybrid_counts(&self) -> Option<(usize, usize)> {
+        let performance = self
+            .core_kinds
+            .iter()
+            .filter(|kind| **kind == CoreKind::Performance)
+            .count();
+        let efficient = self
+            .core_kinds
+            .iter()
+            .filter(|kind| **kind == CoreKind::Efficient)
+            .count();
+        (performance > 0 && efficient > 0).then_some((performance, efficient))
+    }
+
+    /// The kind of logical processor `index`, or [`CoreKind::Uniform`]
+    /// when the topology is unknown or says they are all alike.
+    #[must_use]
+    pub fn core_kind(&self, index: usize) -> CoreKind {
+        self.core_kinds.get(index).copied().unwrap_or_default()
+    }
 }
 
 /// Physical and committed memory.
@@ -1032,6 +1218,111 @@ mod tests {
                 "{user} is an ordinary account"
             );
         }
+    }
+
+    #[test]
+    fn an_unread_efficiency_state_draws_no_mark() {
+        // The whole reason the state is three-valued. The sampler sweeps
+        // QoS a slice of the process list at a time, so a row can
+        // genuinely have no answer yet — and a mark that appeared for
+        // "off" would be claiming one.
+        assert!(!Efficiency::Unknown.is_reduced());
+        assert!(!Efficiency::Standard.is_reduced());
+        assert!(Efficiency::Reduced.is_reduced());
+        assert_eq!(
+            Efficiency::default(),
+            Efficiency::Unknown,
+            "a row that nothing has filled in must not default to a claim"
+        );
+        assert_eq!(Efficiency::Unknown.label(), crate::format::DASH);
+    }
+
+    #[test]
+    fn a_uniform_machine_reports_no_core_split() {
+        let uniform = CpuSample {
+            core_kinds: vec![CoreKind::Uniform; 8],
+            ..CpuSample::default()
+        };
+        assert_eq!(uniform.hybrid_counts(), None);
+        assert_eq!(uniform.core_kind(0), CoreKind::Uniform);
+        assert_eq!(
+            CoreKind::Uniform.marker(),
+            None,
+            "a marker on every tile of a uniform machine says nothing"
+        );
+
+        // And a machine whose topology could not be read at all reports
+        // the same way, rather than as a machine of nothing but E-cores.
+        let unknown = CpuSample::default();
+        assert_eq!(unknown.hybrid_counts(), None);
+        assert_eq!(unknown.core_kind(3), CoreKind::Uniform);
+    }
+
+    #[test]
+    fn a_hybrid_machine_counts_each_kind() {
+        let mut kinds = vec![CoreKind::Performance; 8];
+        kinds.extend(vec![CoreKind::Efficient; 16]);
+        let cpu = CpuSample {
+            core_kinds: kinds,
+            ..CpuSample::default()
+        };
+        assert_eq!(cpu.hybrid_counts(), Some((8, 16)));
+        assert_eq!(cpu.core_kind(0), CoreKind::Performance);
+        assert_eq!(cpu.core_kind(23), CoreKind::Efficient);
+        // Past the end of a topology shorter than the core list, which
+        // is what a machine with a second processor group produces.
+        assert_eq!(cpu.core_kind(64), CoreKind::Uniform);
+        assert_eq!(CoreKind::Performance.marker(), Some("P"));
+        assert_eq!(CoreKind::Efficient.marker(), Some("E"));
+    }
+
+    #[test]
+    fn the_build_is_shown_with_its_revision_when_there_is_one() {
+        let mut info = SystemInfo {
+            os_build: "26100".to_string(),
+            build_revision: "4652".to_string(),
+            ..SystemInfo::default()
+        };
+        assert_eq!(info.build_display(), "26100.4652");
+
+        info.build_revision = String::new();
+        assert_eq!(
+            info.build_display(),
+            "26100",
+            "no revision means no trailing dot"
+        );
+
+        info.os_build = String::new();
+        assert_eq!(
+            info.build_display(),
+            "",
+            "an unknown build is empty, so the caller's own fallback shows"
+        );
+    }
+
+    #[test]
+    fn windows_11_is_decided_by_the_build_and_nothing_else() {
+        // Not by `ProductName`, which still reads "Windows 10" on plenty
+        // of upgraded installs — see `win::system::windows_product_name`.
+        let eleven = SystemInfo {
+            os_build: "22000".to_string(),
+            os_name: "Windows 10 Pro".to_string(),
+            ..SystemInfo::default()
+        };
+        assert!(eleven.is_windows_11(), "22000 is where 11 starts");
+
+        let ten = SystemInfo {
+            os_build: "21999".to_string(),
+            os_name: "Windows 11 Pro".to_string(),
+            ..SystemInfo::default()
+        };
+        assert!(!ten.is_windows_11());
+
+        let unreadable = SystemInfo::default();
+        assert!(
+            !unreadable.is_windows_11(),
+            "an unknown build reads as not 11: a missing menu item beats              one that reports success and changes nothing"
+        );
     }
 
     #[test]

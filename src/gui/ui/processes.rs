@@ -336,6 +336,14 @@ fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fil
         return;
     };
 
+    // Read once for the whole table rather than per row: it is a fact
+    // about the machine, and the context menu is the only thing that
+    // needs it. Efficiency mode exists as a scheduling policy on Windows
+    // 10 too, but the QoS levels it selects between were introduced with
+    // 11 — offering it on 10 would be a menu item that reports success
+    // and changes nothing a person can observe.
+    let windows_11 = snapshot.system.info.is_windows_11();
+
     let mut clicked: Option<ProcessKey> = None;
     let mut toggled: Option<ProcessKey> = None;
     let mut group_toggled: Option<ProcessKind> = None;
@@ -554,7 +562,16 @@ fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fil
                                         .as_ref()
                                         .and_then(|path| app.processes.icons.get(path));
                                     disclosure = name_cell(
-                                        ui, theme, process, texture, *depth, *children, *expanded,
+                                        ui,
+                                        theme,
+                                        process,
+                                        texture,
+                                        app.efficiency_of(process),
+                                        Placement {
+                                            depth: *depth,
+                                            children: *children,
+                                            expanded: *expanded,
+                                        },
                                     );
                                 }
                                 Some(column) => {
@@ -579,8 +596,11 @@ fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fil
                         if response.double_clicked() && *children > 0 {
                             toggled = Some(key);
                         }
+                        let efficiency = app.efficiency_of(process);
                         response.context_menu(|ui| {
-                            if let Some(chosen) = context_menu(ui, theme, process) {
+                            if let Some(chosen) =
+                                context_menu(ui, theme, process, efficiency, windows_11)
+                            {
                                 clicked = Some(key);
                                 action = Some(chosen);
                             }
@@ -700,15 +720,36 @@ fn group_cell(ui: &mut Ui, theme: &Palette, key: SortKey, totals: &Totals) {
 }
 
 /// Draws the name cell. Returns whether the disclosure triangle was hit.
+/// Where a row sits in the process tree.
+///
+/// The three values travel together everywhere — the indent is derived
+/// from the depth, the disclosure only exists when there are children,
+/// and its direction is the expansion — so they are passed as one thing
+/// rather than as three positional `usize`s and `bool`s that a caller
+/// can silently swap.
+#[derive(Clone, Copy)]
+struct Placement {
+    /// How deep in the tree, which is the indent.
+    depth: u16,
+    /// How many children the row has; zero draws no disclosure.
+    children: usize,
+    /// Whether those children are showing.
+    expanded: bool,
+}
+
 fn name_cell(
     ui: &mut Ui,
     theme: &Palette,
     process: &ProcessRow,
     texture: Option<&egui::TextureHandle>,
-    depth: u16,
-    children: usize,
-    expanded: bool,
+    efficiency: crate::model::Efficiency,
+    placement: Placement,
 ) -> bool {
+    let Placement {
+        depth,
+        children,
+        expanded,
+    } = placement;
     let mut hit = false;
     ui.horizontal_centered(|ui| {
         ui.add_space(SPACE_XS + f32::from(depth) * INDENT);
@@ -763,10 +804,22 @@ fn name_cell(
             (false, true) => &[("Admin", theme.text_muted)],
             (false, false) => &[],
         };
+        // The efficiency mark is reserved for alongside the chips rather
+        // than drawn after them and hoped for. The Name column clips,
+        // and anything laid out past the label's own width is cut at the
+        // column edge — a half-drawn leaf reads as a rendering fault,
+        // where a name two characters shorter reads as a long name.
+        //
+        /// The mark's edge. Smaller than the shell icon on the other side
+        /// of the name: this is an annotation on the row, not a second
+        /// thing identifying it.
+        const MARK: f32 = 14.0;
+        let marked = efficiency.is_reduced();
         let reserved: f32 = chips
             .iter()
             .map(|(text, _)| widgets::status_chip_width(ui, text) + SPACE_XS)
-            .sum();
+            .sum::<f32>()
+            + if marked { MARK + SPACE_XS } else { 0.0 };
 
         let name_width = (ui.available_width() - reserved).max(0.0);
         let font = egui::TextStyle::Body.resolve(ui.style());
@@ -774,6 +827,21 @@ fn name_cell(
         let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
         ui.painter()
             .galley(rect.left_top(), galley, theme::rgb(theme.text));
+
+        if marked {
+            ui.add_space(SPACE_XS);
+            let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(MARK), Sense::hover());
+            icons::paint(
+                ui.painter(),
+                rect,
+                crate::icon::Icon::Leaf,
+                theme::rgb(theme.text_muted),
+            );
+            response.on_hover_text(
+                "Efficiency mode: throttled and scheduled on the \
+                 efficiency cores where the machine has them",
+            );
+        }
 
         for (text, colour) in chips {
             ui.add_space(SPACE_XS);
@@ -934,7 +1002,13 @@ fn metric_cell(
 }
 
 /// The right-click menu for a row. Returns the action chosen, if any.
-fn context_menu(ui: &mut Ui, theme: &Palette, process: &ProcessRow) -> Option<Action> {
+fn context_menu(
+    ui: &mut Ui,
+    theme: &Palette,
+    process: &ProcessRow,
+    efficiency: crate::model::Efficiency,
+    windows_11: bool,
+) -> Option<Action> {
     let key = process.key();
     let mut chosen = None;
     // The pseudo-processes cannot be acted on at all; the menu says so
@@ -967,6 +1041,30 @@ fn context_menu(ui: &mut Ui, theme: &Palette, process: &ProcessRow) -> Option<Ac
             Action::Suspend(key)
         });
         ui.close();
+    }
+
+    // Windows 11 only, and absent rather than greyed out on 10: a
+    // disabled item invites the question "how do I enable it", and the
+    // answer is "install a different operating system".
+    if windows_11 {
+        // A checkbox rather than two items, because it is one state with
+        // two values — and it is drawn from the *observed* state, which
+        // is why it can read "unknown" at all. The sampler sweeps QoS a
+        // slice of the process list at a time (see
+        // `crate::engine::sampler`), so a row that has only just
+        // appeared genuinely has no answer yet, and a checkbox that
+        // showed unticked would be claiming one.
+        let mut on = efficiency.is_reduced();
+        let label = match efficiency {
+            crate::model::Efficiency::Unknown => "Efficiency mode (reading…)",
+            crate::model::Efficiency::Standard | crate::model::Efficiency::Reduced => {
+                "Efficiency mode"
+            }
+        };
+        if ui.checkbox(&mut on, label).changed() {
+            chosen = Some(Action::SetEfficiency(key, on));
+            ui.close();
+        }
     }
 
     ui.menu_button("Set priority", |ui| {

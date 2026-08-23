@@ -64,8 +64,8 @@ mod windows {
     use rustaman::gui::app::{App, PerformanceFocus, View};
     use rustaman::model::history::Series;
     use rustaman::model::{
-        AdapterKind, AdapterSample, AdapterState, CpuSample, DiskSample, GpuSample, MemorySample,
-        Snapshot, SystemSample,
+        AdapterKind, AdapterSample, AdapterState, CoreKind, CpuSample, DiskSample, Efficiency,
+        GpuSample, MemorySample, Snapshot, SystemSample,
     };
     use std::path::PathBuf;
 
@@ -770,15 +770,32 @@ mod windows {
                     model: "Desktop".to_string(),
                     bios_vendor: "INSYDE Corp.".to_string(),
                     bios_version: "03.03".to_string(),
+                    build_revision: "4652".to_string(),
                 },
                 cpu: CpuSample {
                     total_percent: 23.5,
                     kernel_percent: 6.1,
                     per_core: (0..16).map(|core| f64::from(core) * 4.0 + 3.0).collect(),
-                    name: "AMD Ryzen 9 5950X 16-Core Processor".to_string(),
-                    physical_cores: 16,
+                    name: "Intel Core Ultra 7 265K".to_string(),
+                    physical_cores: 12,
                     logical_cores: 16,
                     megahertz: 3400,
+                    // A hybrid machine, because the desktop this is run
+                    // from is almost certainly not one and the P/E
+                    // markers, the "8 performance + 8 efficiency cores"
+                    // heading and the Topology row have nowhere else to
+                    // be seen. Eight fast cores first, then eight small
+                    // ones: the order Windows reports them in, and the
+                    // order the grid has to survive.
+                    core_kinds: (0..16)
+                        .map(|core| {
+                            if core < 8 {
+                                CoreKind::Performance
+                            } else {
+                                CoreKind::Efficient
+                            }
+                        })
+                        .collect(),
                 },
                 memory: MemorySample {
                     total: 68_719_476_736,
@@ -932,6 +949,17 @@ mod windows {
                     ProcessStatus::Suspended
                 } else {
                     ProcessStatus::Running
+                },
+                // Three states across the table, because all three
+                // draw differently and only one of them draws a mark:
+                // the throttled row gets the leaf, the unread row gets
+                // nothing, and everything else gets nothing for a
+                // different reason. A scene where every row is
+                // `Standard` cannot tell the last two apart.
+                efficiency: match row.pid {
+                    5560 => Efficiency::Reduced,
+                    9020 => Efficiency::Unknown,
+                    _ => Efficiency::Standard,
                 },
                 cpu_percent: row.cpu / 16.0,
                 cpu_time_ms: row.handles as u64 * 97,

@@ -1,10 +1,12 @@
 // ============================================================================
 // Module:       win::system
-// Description:  Static facts about the machine — CPU name, core counts, clock,
-//               uptime — read once at startup rather than every sample.
+// Description:  Static facts about the machine — CPU name, core counts, the
+//               hybrid P/E split, clock, uptime — read once at startup rather
+//               than every sample.
 //
 // Dependencies: windows-sys (GetActiveProcessorCount, GetTickCount64, registry,
-//               GetLogicalProcessorInformationEx); super::strings
+//               GetLogicalProcessorInformationEx); super::strings;
+//               crate::model for CoreKind and SystemInfo
 // ============================================================================
 
 //! The machine's own description.
@@ -105,6 +107,10 @@ pub struct Facts {
     /// times a second on any machine with a modern governor — so the
     /// number would be both expensive and misleading.
     pub megahertz: u32,
+    /// What kind of core each logical processor is, on a hybrid machine.
+    ///
+    /// Empty when the topology could not be read. See [`core_kinds`].
+    pub core_kinds: Vec<crate::model::CoreKind>,
     /// Machine, firmware, and Windows installation identity.
     pub info: SystemInfo,
 }
@@ -113,11 +119,19 @@ impl Facts {
     /// Reads the machine's description. Call once.
     #[must_use]
     pub fn read() -> Self {
+        // One topology query answers both questions. It is the expensive
+        // call in here — an ask-then-fetch pair over a buffer the kernel
+        // fills with a record per core — and asking twice for two fields
+        // out of the same records would be the waste, not the walk.
+        let topology = core_topology();
         Self {
             cpu_name: cpu_name().unwrap_or_default(),
-            physical_cores: physical_cores().unwrap_or(0),
+            physical_cores: topology
+                .as_ref()
+                .map_or(0, |buffer| count_core_records(buffer)),
             logical_cores: usize::try_from(active_logical_processors()).unwrap_or(0),
             megahertz: nominal_megahertz().unwrap_or(0),
+            core_kinds: topology.as_deref().map(core_kinds).unwrap_or_default(),
             info: system_info(),
         }
     }
@@ -141,6 +155,12 @@ fn system_info() -> SystemInfo {
             .or_else(|| registry_string(WINDOWS, "ReleaseId"))
             .unwrap_or_default(),
         os_build,
+        // The revision is a DWORD beside the build string, and it is the
+        // half that moves: two machines on 26100 can be a year of
+        // patches apart, and the number that says which is this one.
+        build_revision: registry_dword(WINDOWS, "UBR")
+            .map(|revision| revision.to_string())
+            .unwrap_or_default(),
         manufacturer: registry_string(BIOS, "SystemManufacturer").unwrap_or_default(),
         model: registry_string(BIOS, "SystemProductName").unwrap_or_default(),
         bios_vendor: registry_string(BIOS, "BIOSVendor").unwrap_or_default(),
@@ -175,15 +195,18 @@ fn active_logical_processors() -> u32 {
     active_processor_count()
 }
 
-/// The number of physical cores.
+/// The raw `RelationProcessorCore` buffer — one record per physical
+/// core.
 ///
-/// See the module docs on why `dwNumberOfProcessors` is not this.
+/// Both the physical core count and the hybrid core kinds come out of
+/// this, and see the module docs on why `dwNumberOfProcessors` is
+/// neither.
 ///
 /// The call uses the ask-then-fetch protocol, and its result is a
 /// *variable-length* record chain rather than an array — each record
 /// states its own size — so the walk steps by the stated size and checks
 /// bounds at every step, the same discipline as [`super::nt::process`].
-fn physical_cores() -> Option<usize> {
+fn core_topology() -> Option<Vec<u8>> {
     let mut needed = 0u32;
     query_core_topology_size(&mut needed);
     let size = usize::try_from(needed).unwrap_or(0);
@@ -196,26 +219,32 @@ fn physical_cores() -> Option<usize> {
     if ok == 0 {
         return None;
     }
-    Some(count_core_records(&buffer))
+    Some(buffer)
 }
 
-/// Counts the records in a `RelationProcessorCore` buffer.
+/// Byte offset of a record's `Size` field: past the 4-byte
+/// `Relationship`.
+const SIZE_OFFSET: usize = 4;
+
+/// The smallest a record can be and still hold its own header.
+const MIN_RECORD: usize = 8;
+
+/// Walks a `RelationProcessorCore` buffer, handing each record's own
+/// bytes to `visit`.
 ///
 /// The records are `SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX`, which is
 /// *variable-length* — its trailing group array extends past the struct —
 /// so it cannot be read as a fixed-size value the way [`super::nt`]'s
 /// records can, and this walks raw bytes instead.
 ///
-/// Split out so the walk can be reasoned about on its own. Each record's first two fields are its relationship and its size;
-/// the size is what the walk steps by, and a zero or oversized one ends
-/// the walk rather than looping or reading past the buffer.
-fn count_core_records(buffer: &[u8]) -> usize {
-    /// Byte offset of the `Size` field: past the 4-byte `Relationship`.
-    const SIZE_OFFSET: usize = 4;
-    /// The smallest a record can be and still hold its own header.
-    const MIN_RECORD: usize = 8;
-
-    let mut count = 0usize;
+/// Split out so the walk can be reasoned about on its own, and so the
+/// two things read out of this buffer — how many cores there are, and
+/// what kind each one is — do not each carry their own copy of the
+/// bounds reasoning. Each record's first two fields are its relationship
+/// and its size; the size is what the walk steps by, and a zero or
+/// oversized one ends the walk rather than looping or reading past the
+/// buffer.
+fn for_each_core_record(buffer: &[u8], mut visit: impl FnMut(&[u8])) {
     let mut offset = 0usize;
     while offset + MIN_RECORD <= buffer.len() {
         let Some(bytes) = buffer.get(offset + SIZE_OFFSET..offset + MIN_RECORD) else {
@@ -231,10 +260,150 @@ fn count_core_records(buffer: &[u8]) -> usize {
         if size < MIN_RECORD || offset.saturating_add(size) > buffer.len() {
             break;
         }
-        count += 1;
+        let Some(record) = buffer.get(offset..offset + size) else {
+            break;
+        };
+        visit(record);
         offset += size;
     }
+}
+
+/// Counts the records in a `RelationProcessorCore` buffer.
+fn count_core_records(buffer: &[u8]) -> usize {
+    let mut count = 0usize;
+    for_each_core_record(buffer, |_| count += 1);
     count
+}
+
+/// What kind of core each logical processor belongs to.
+///
+/// **The Windows 11 half of the topology.** Before Alder Lake and
+/// Snapdragon X every core on a die was the same and this field was
+/// always zero; on a hybrid machine `EfficiencyClass` is what separates
+/// the eight cores that finish work from the sixteen that save battery,
+/// and it is the only place Windows says so.
+///
+/// The classes are collapsed rather than reported raw: the highest class
+/// the machine names is [`CoreKind::Performance`] and everything below
+/// it is [`CoreKind::Efficient`]. Windows permits more than two — some
+/// parts do have three, with a low-power island below the E-cores — but
+/// the question a person has in front of a core grid is "is this one of
+/// the fast ones", and a tile labelled `2` does not answer it.
+///
+/// ## Only the first processor group is mapped
+///
+/// [`super::nt::cpu::read`] gets its per-core times from
+/// `SystemProcessorPerformanceInformation`, which reports the calling
+/// thread's processor group and no other — at most 64 entries. So the
+/// index space this has to line up with is group-relative, and mapping
+/// any other group's affinity bits into it would attribute one group's
+/// core kinds to another's tiles. A machine large enough to have a
+/// second group is not a hybrid laptop.
+fn core_kinds(buffer: &[u8]) -> Vec<crate::model::CoreKind> {
+    use crate::model::CoreKind;
+
+    let classes = efficiency_classes(buffer);
+    let Some(top) = classes.iter().flatten().copied().max() else {
+        // No record named a processor in this group: report nothing
+        // rather than a vector of defaults, so a view can tell an
+        // unreadable topology from a uniform one.
+        return Vec::new();
+    };
+    if top == 0 {
+        // Every core is the same, which is every machine before the
+        // hybrid parts and most of them since.
+        return vec![CoreKind::Uniform; classes.len()];
+    }
+    classes
+        .into_iter()
+        .map(|class| match class {
+            Some(class) if class == top => CoreKind::Performance,
+            Some(_) => CoreKind::Efficient,
+            // A processor no core record claimed. Saying nothing about
+            // it is right; guessing is not.
+            None => CoreKind::Uniform,
+        })
+        .collect()
+}
+
+/// The raw efficiency class of each logical processor in the first
+/// processor group, indexed by its number within that group.
+///
+/// The offsets are into `SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX`'s
+/// `Processor` arm: `Relationship` and `Size` take the first eight
+/// bytes, the union that follows is pointer-aligned, and inside it
+/// `Flags` and `EfficiencyClass` are the first two bytes, twenty
+/// reserved bytes and a `WORD GroupCount` follow, and the
+/// `GROUP_AFFINITY` array begins after them. Every read is bounds
+/// checked against the record the walk handed over, so a record shorter
+/// than it claims yields nothing rather than reading into the next one.
+fn efficiency_classes(buffer: &[u8]) -> Vec<Option<u8>> {
+    /// `EfficiencyClass`, one byte past `Flags` at the head of the union.
+    const CLASS_OFFSET: usize = 9;
+    /// `GroupCount`, past `Flags`, `EfficiencyClass` and twenty reserved.
+    const GROUP_COUNT_OFFSET: usize = 30;
+    /// The first `GROUP_AFFINITY`, which the union's alignment puts here
+    /// on both 32- and 64-bit.
+    const GROUP_MASK_OFFSET: usize = 32;
+    /// `GROUP_AFFINITY`: a pointer-wide `KAFFINITY`, a `WORD Group`, and
+    /// three reserved words.
+    const AFFINITY_SIZE: usize = std::mem::size_of::<usize>() + 8;
+    /// Processors per group, which is what `KAFFINITY` can address.
+    const GROUP_WIDTH: usize = 64;
+
+    let mut classes: Vec<Option<u8>> = Vec::new();
+    for_each_core_record(buffer, |record| {
+        let Some(&class) = record.get(CLASS_OFFSET) else {
+            return;
+        };
+        let Some(groups) = read_u16(record, GROUP_COUNT_OFFSET) else {
+            return;
+        };
+        for group in 0..usize::from(groups) {
+            let base = GROUP_MASK_OFFSET + group * AFFINITY_SIZE;
+            let (Some(mask), Some(number)) = (
+                read_usize(record, base),
+                read_u16(record, base + std::mem::size_of::<usize>()),
+            ) else {
+                break;
+            };
+            // See the note on the first group in `core_kinds`.
+            if number != 0 {
+                continue;
+            }
+            for processor in 0..GROUP_WIDTH {
+                if mask & (1usize << processor) == 0 {
+                    continue;
+                }
+                if classes.len() <= processor {
+                    classes.resize(processor + 1, None);
+                }
+                if let Some(slot) = classes.get_mut(processor) {
+                    *slot = Some(class);
+                }
+            }
+        }
+    });
+    classes
+}
+
+/// A little-endian `u16` at `offset`, or `None` past the end.
+fn read_u16(record: &[u8], offset: usize) -> Option<u16> {
+    let bytes = record.get(offset..offset.checked_add(2)?)?;
+    Some(u16::from_le_bytes(<[u8; 2]>::try_from(bytes).ok()?))
+}
+
+/// A little-endian pointer-wide word at `offset`, or `None` past the end.
+///
+/// Pointer-wide because that is what `KAFFINITY` is: eight bytes on the
+/// 64-bit builds this ships as, four on a 32-bit one, and reading the
+/// wrong width would take the group number as part of the mask.
+fn read_usize(record: &[u8], offset: usize) -> Option<usize> {
+    let width = std::mem::size_of::<usize>();
+    let bytes = record.get(offset..offset.checked_add(width)?)?;
+    let mut word = [0u8; std::mem::size_of::<usize>()];
+    word.copy_from_slice(bytes);
+    Some(usize::from_le_bytes(word))
 }
 
 /// The processor's marketing name, from the registry.
@@ -496,6 +665,123 @@ mod tests {
     fn an_empty_buffer_yields_no_records() {
         assert_eq!(count_core_records(&[]), 0);
         assert_eq!(count_core_records(&[0u8; 4]), 0, "less than one header");
+    }
+
+    /// One `RelationProcessorCore` record naming `processors` in group
+    /// zero at `class`.
+    ///
+    /// Built here rather than taken from a machine because the machine
+    /// this runs on has exactly one topology and the layout has to be
+    /// right for the others too — a hybrid part, a uniform one, and a
+    /// record that lies about its own length.
+    fn core_record(class: u8, processors: &[usize]) -> Vec<u8> {
+        // Header, union head, reserved, group count, one affinity.
+        let size = 32 + std::mem::size_of::<usize>() + 8;
+        let mut record = vec![0u8; size];
+        if let Some(slot) = record.get_mut(4..8) {
+            slot.copy_from_slice(&u32::try_from(size).unwrap_or(0).to_le_bytes());
+        }
+        // Relationship stays zero: `RelationProcessorCore`.
+        if let Some(slot) = record.get_mut(9) {
+            *slot = class;
+        }
+        if let Some(slot) = record.get_mut(30..32) {
+            slot.copy_from_slice(&1u16.to_le_bytes());
+        }
+        let mask = processors
+            .iter()
+            .fold(0usize, |mask, processor| mask | (1usize << processor));
+        if let Some(slot) = record.get_mut(32..32 + std::mem::size_of::<usize>()) {
+            slot.copy_from_slice(&mask.to_le_bytes());
+        }
+        record
+    }
+
+    #[test]
+    fn a_hybrid_topology_names_the_fast_cores_and_the_rest() {
+        // Two performance cores with two threads each, then four
+        // efficiency cores with one — an Alder Lake i5 in miniature.
+        let mut buffer = Vec::new();
+        buffer.extend(core_record(1, &[0, 1]));
+        buffer.extend(core_record(1, &[2, 3]));
+        for processor in 4..8 {
+            buffer.extend(core_record(0, &[processor]));
+        }
+
+        let kinds = core_kinds(&buffer);
+        assert_eq!(kinds.len(), 8, "eight logical processors were named");
+        assert_eq!(
+            &kinds[..4],
+            &[crate::model::CoreKind::Performance; 4],
+            "the highest efficiency class is the performance one"
+        );
+        assert_eq!(&kinds[4..], &[crate::model::CoreKind::Efficient; 4]);
+        assert_eq!(count_core_records(&buffer), 6, "six physical cores");
+    }
+
+    #[test]
+    fn a_uniform_machine_says_so_rather_than_inventing_a_split() {
+        // Every core class zero, which is every machine before the
+        // hybrid parts. Calling half of them "efficiency cores" because
+        // they all tie for the top class would be a distinction the
+        // machine does not have.
+        let mut buffer = Vec::new();
+        for core in 0..4 {
+            buffer.extend(core_record(0, &[core * 2, core * 2 + 1]));
+        }
+        let kinds = core_kinds(&buffer);
+        assert_eq!(kinds, vec![crate::model::CoreKind::Uniform; 8]);
+
+        let sample = crate::model::CpuSample {
+            core_kinds: kinds,
+            ..crate::model::CpuSample::default()
+        };
+        assert_eq!(
+            sample.hybrid_counts(),
+            None,
+            "a uniform machine has no performance/efficiency split to print"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_topology_reports_nothing_rather_than_defaults() {
+        // Empty, not a vector of `Uniform`: the Performance view has to
+        // be able to tell "all the same" from "we could not ask".
+        assert!(core_kinds(&[]).is_empty());
+        assert!(core_kinds(&[0u8; 4]).is_empty(), "less than one header");
+    }
+
+    #[test]
+    fn a_record_shorter_than_its_own_fields_yields_no_classes() {
+        // The record's stated size is honoured by the walk, so a record
+        // claiming sixteen bytes must not have its group array read out
+        // of the record that follows it.
+        let mut buffer = vec![0u8; 32];
+        for index in 0..2 {
+            let base = index * 16;
+            if let Some(slot) = buffer.get_mut(base + 4..base + 8) {
+                slot.copy_from_slice(&16u32.to_le_bytes());
+            }
+        }
+        assert_eq!(count_core_records(&buffer), 2);
+        assert!(
+            core_kinds(&buffer).is_empty(),
+            "a truncated record names no processors"
+        );
+    }
+
+    #[test]
+    fn a_second_processor_group_is_left_out_of_the_mapping() {
+        // The per-core times only cover the calling thread's group, so
+        // mapping another group's bits into the same index space would
+        // attribute one group's core kinds to another's tiles.
+        let mut record = core_record(1, &[0, 1]);
+        if let Some(slot) = record.get_mut(32 + std::mem::size_of::<usize>()..) {
+            if let Some(number) = slot.get_mut(0..2) {
+                number.copy_from_slice(&1u16.to_le_bytes());
+            }
+        }
+        assert!(core_kinds(&record).is_empty());
     }
 
     #[test]

@@ -609,6 +609,16 @@ fn inspector(app: &mut App, ui: &mut Ui, theme: &Palette) {
             );
             widgets::detail_row(ui, theme, "Architecture", process.architecture.label());
             widgets::detail_row(ui, theme, "Priority", process.priority.label());
+            // Shown on every machine rather than only on Windows 11: on
+            // 10 it reads as a dash, which is the truth about a machine
+            // that has no such state, where hiding the row would leave a
+            // reader wondering whether the app looked.
+            widgets::detail_row(
+                ui,
+                theme,
+                "Efficiency mode",
+                app.efficiency_of(&process).label(),
+            );
             if let Some(title) = process.window_title.as_deref() {
                 widgets::detail_row(ui, theme, "Window", title);
             }

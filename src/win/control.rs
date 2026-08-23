@@ -1,7 +1,8 @@
 // ============================================================================
 // Module:       win::control
-// Description:  The write side — ending, suspending, resuming, re-prioritising
-//               and re-affinitising a process, plus the shell actions.
+// Description:  The write side — ending, suspending, resuming, re-prioritising,
+//               re-affinitising and throttling a process, plus the shell
+//               actions.
 //
 // Dependencies: windows-sys (OpenProcess, TerminateProcess, ntdll suspend);
 //               super::handle, super::strings
@@ -47,11 +48,13 @@ use crate::model::{Priority, ProcessKey};
 use std::fmt;
 use windows_sys::Win32::Foundation::{GetLastError, FILETIME};
 use windows_sys::Win32::System::Threading::{
-    GetPriorityClass, GetProcessTimes, OpenProcess, SetPriorityClass, SetProcessAffinityMask,
-    TerminateProcess, ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS,
-    HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_SUSPEND_RESUME,
-    PROCESS_TERMINATE, REALTIME_PRIORITY_CLASS,
+    GetPriorityClass, GetProcessInformation, GetProcessTimes, OpenProcess, SetPriorityClass,
+    SetProcessAffinityMask, SetProcessInformation, TerminateProcess, ABOVE_NORMAL_PRIORITY_CLASS,
+    BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
+    PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+    PROCESS_POWER_THROTTLING_STATE, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
+    PROCESS_SET_LIMITED_INFORMATION, PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE,
+    REALTIME_PRIORITY_CLASS,
 };
 
 // The suspend and resume calls are undocumented ntdll exports with no
@@ -184,6 +187,120 @@ pub fn priority_of(key: ProcessKey) -> Option<Priority> {
         REALTIME_PRIORITY_CLASS => Some(Priority::Realtime),
         // Zero is the documented failure return.
         _ => None,
+    }
+}
+
+/// Reads whether a process is running under reduced quality of service
+/// — Windows 11's "Efficiency mode".
+///
+/// `None` when the state could not be read, which is a normal answer
+/// rather than a failure, and on most machines the *only* answer:
+///
+/// - **Windows 10 rejects the query.** `GetProcessInformation` with
+///   `ProcessPowerThrottling` returns `ERROR_INVALID_PARAMETER` there —
+///   the *setting* side has existed since 1709, but nothing could read
+///   it back until 11. So on 10 every process reads as unknown, the
+///   process list draws no marks, and the menu item that would toggle
+///   it is not offered.
+/// - **A protected process refuses to be opened** at all, on any build.
+///
+/// See [`set_efficiency`] for what the state actually is.
+///
+/// This is the one read in the module that runs against *many*
+/// processes rather than one the user pointed at, so its cost is the
+/// sampler's problem rather than a click's — see the sweep in
+/// [`crate::engine::sampler`], which is why this is bounded to a slice
+/// of the process list per pass rather than called for every row.
+#[must_use]
+pub fn efficiency_of(key: ProcessKey) -> Option<bool> {
+    let process = verify(key, PROCESS_QUERY_LIMITED_INFORMATION).ok()?;
+    let mut state = throttling_state(0, 0);
+    let ok = read_power_throttling(process.raw(), &mut state);
+    if ok == 0 {
+        return None;
+    }
+    // Both halves have to say so. `ControlMask` is which policies the
+    // process has an opinion about and `StateMask` is what that opinion
+    // is, so a process that has opted *out* of throttling has the
+    // execution-speed bit set in the first and clear in the second —
+    // reading either alone reports it as throttled.
+    Some(
+        state.ControlMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED != 0
+            && state.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED != 0,
+    )
+}
+
+/// Turns efficiency mode on or off for a process.
+///
+/// ## What this actually does, and why it is two calls
+///
+/// Efficiency mode is not one switch. Task Manager's checkbox sets two
+/// things at once, and setting either alone gets a fraction of the
+/// effect:
+///
+/// - **`PROCESS_POWER_THROTTLING_EXECUTION_SPEED`** is the EcoQoS
+///   request. On a hybrid machine it tells the scheduler to keep the
+///   process on the efficiency cores; on any machine it lets the power
+///   manager clock it down. This is the part that saves the battery.
+/// - **`IDLE_PRIORITY_CLASS`** is what stops the process competing with
+///   the foreground for the cores it *is* given. This is the part the
+///   user feels.
+///
+/// Turning it off clears the control bit entirely rather than setting
+/// it and leaving the state clear. The difference matters: a clear
+/// control mask means "the system decides", which is where a process
+/// starts life, and an explicit opt-out would leave the process pinned
+/// at full speed even when Windows would otherwise have throttled it —
+/// a switch whose "off" is not the state before it was ever touched.
+///
+/// The priority goes back to `NORMAL_PRIORITY_CLASS`, which is not
+/// necessarily where it came from — a process that launched itself
+/// below normal is returned to normal by turning this off. Task Manager
+/// does the same, and the alternative is remembering a per-process
+/// value across a restart of this app for a case that does not arise.
+pub fn set_efficiency(key: ProcessKey, on: bool) -> Action {
+    // Both rights up front. Splitting them into two `verify` calls would
+    // open the process twice and, worse, leave the throttling state
+    // changed and the priority not when the second one failed.
+    let process = verify(
+        key,
+        PROCESS_SET_INFORMATION | PROCESS_SET_LIMITED_INFORMATION,
+    )?;
+
+    let mut state = if on {
+        throttling_state(
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        )
+    } else {
+        throttling_state(0, 0)
+    };
+    let ok = write_power_throttling(process.raw(), &mut state);
+    if ok == 0 {
+        return Err(ActionError::Failed(last_error()));
+    }
+
+    let class = if on {
+        IDLE_PRIORITY_CLASS
+    } else {
+        NORMAL_PRIORITY_CLASS
+    };
+    if set_process_priority(process.raw(), class) == 0 {
+        return Err(ActionError::Failed(last_error()));
+    }
+    Ok(())
+}
+
+/// A `PROCESS_POWER_THROTTLING_STATE` with the current version stamped.
+///
+/// The version field is not decoration: the kernel reads the struct
+/// according to it, and a zero there is rejected as an invalid
+/// parameter.
+fn throttling_state(control: u32, state: u32) -> PROCESS_POWER_THROTTLING_STATE {
+    PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: control,
+        StateMask: state,
     }
 }
 
@@ -355,6 +472,49 @@ fn process_priority(handle: windows_sys::Win32::Foundation::HANDLE) -> u32 {
     unsafe { GetPriorityClass(handle) }
 }
 
+/// Reads the power-throttling state of a verified live process handle
+/// into caller-owned storage.
+fn read_power_throttling(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    state: &mut PROCESS_POWER_THROTTLING_STATE,
+) -> i32 {
+    use windows_sys::Win32::System::Threading::ProcessPowerThrottling;
+
+    let size = std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>();
+    // SAFETY: `handle` is live and opened for query; `state` is a live writable
+    // value of exactly the `size` bytes declared for `ProcessPowerThrottling`,
+    // and the API writes it synchronously without retaining the pointer.
+    unsafe {
+        GetProcessInformation(
+            handle,
+            ProcessPowerThrottling,
+            std::ptr::from_mut(state).cast(),
+            u32::try_from(size).unwrap_or(0),
+        )
+    }
+}
+
+/// Applies a power-throttling state to a verified live process handle.
+fn write_power_throttling(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    state: &mut PROCESS_POWER_THROTTLING_STATE,
+) -> i32 {
+    use windows_sys::Win32::System::Threading::ProcessPowerThrottling;
+
+    let size = std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>();
+    // SAFETY: `handle` is live and opened for set; `state` is a live value of
+    // exactly the `size` bytes declared for `ProcessPowerThrottling` with its
+    // version stamped, and the API reads it synchronously and retains nothing.
+    unsafe {
+        SetProcessInformation(
+            handle,
+            ProcessPowerThrottling,
+            std::ptr::from_mut(state).cast(),
+            u32::try_from(size).unwrap_or(0),
+        )
+    }
+}
+
 /// Applies a non-zero affinity mask to a verified live process handle.
 fn set_process_affinity(handle: windows_sys::Win32::Foundation::HANDLE, mask: usize) -> i32 {
     // SAFETY: `handle` is live and `mask` is a validated non-zero by-value bit mask.
@@ -477,6 +637,74 @@ mod tests {
             priority_of(key).is_some(),
             "a process can always query itself"
         );
+    }
+
+    #[test]
+    fn this_process_can_read_its_own_efficiency_state() {
+        // Not asserting *which* state: a machine can legitimately have
+        // put this test process into efficiency mode. What matters is
+        // that the query answers rather than reporting the unknown state
+        // that would blank the column on every row.
+        let Some(key) = own_key() else {
+            return;
+        };
+        // Which answer is right depends on the machine, and that *is*
+        // the assertion. Windows 10 rejects the query outright with
+        // `ERROR_INVALID_PARAMETER` — the setting side has existed since
+        // 1709, the reading side arrived with 11 — so the same call has
+        // to come back `None` there and `Some` here, and a build that
+        // got the struct layout or the version stamp wrong would come
+        // back `None` on both.
+        let windows_11 = crate::win::system::Facts::read().info.is_windows_11();
+        assert_eq!(
+            efficiency_of(key).is_some(),
+            windows_11,
+            "a process can always query itself on Windows 11, and no              process can query anything on Windows 10"
+        );
+    }
+
+    #[test]
+    fn efficiency_mode_round_trips_on_this_process() {
+        // Turning it on and back off on the test process itself, which
+        // is the only process a test may touch. The read is what proves
+        // the two mask fields are being written the way the kernel reads
+        // them — a wrong `Version` is accepted as an invalid parameter
+        // and a wrong mask silently does nothing.
+        let Some(key) = own_key() else {
+            return;
+        };
+        let Some(original) = efficiency_of(key) else {
+            return;
+        };
+
+        let applied = set_efficiency(key, true).is_ok();
+        let observed = efficiency_of(key);
+        // Put it back *before* asserting. An assertion that fires here
+        // would otherwise leave the test runner itself throttled and at
+        // idle priority for the rest of the suite.
+        let _ = set_efficiency(key, original);
+
+        if applied {
+            assert_eq!(observed, Some(true), "the throttling state did not take");
+            assert_eq!(
+                efficiency_of(key),
+                Some(original),
+                "turning it off did not restore the state it started in"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stale_creation_time_refuses_to_throttle_a_reused_pid() {
+        // Same rule as every other action here: efficiency mode is a
+        // write, so it goes through `verify` and refuses a key whose
+        // process has been replaced.
+        let Some(mut key) = own_key() else {
+            return;
+        };
+        key.started_at = key.started_at.wrapping_add(1);
+        assert_eq!(set_efficiency(key, true), Err(ActionError::Gone));
+        assert_eq!(efficiency_of(key), None);
     }
 
     #[test]

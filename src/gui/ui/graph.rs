@@ -274,7 +274,21 @@ pub fn layered(ui: &Ui, theme: &Palette, rect: Rect, series: &[Graph<'_>]) {
 /// machine in one row gives each core four pixels of width. Each core
 /// gets its own colour from the theme's rainbow ramp, so a core in the
 /// grid is the same colour as its line in the combined graph above.
-pub fn core_grid(ui: &mut Ui, theme: &Palette, rect: Rect, cores: &[Series]) {
+///
+/// `kinds` says which tiles are performance cores and which are
+/// efficiency cores, and may be shorter than `cores` or empty — an
+/// unreadable or uniform topology draws the grid exactly as it drew
+/// before there was such a thing as a hybrid CPU. Where the machine
+/// *is* hybrid, the marker is what turns "why are those eight always
+/// busy and those sixteen never" into a fact about the scheduler rather
+/// than a puzzle.
+pub fn core_grid(
+    ui: &mut Ui,
+    theme: &Palette,
+    rect: Rect,
+    cores: &[Series],
+    kinds: &[crate::model::CoreKind],
+) {
     if cores.is_empty() {
         return;
     }
@@ -314,12 +328,22 @@ pub fn core_grid(ui: &mut Ui, theme: &Palette, rect: Rect, cores: &[Series]) {
         // Each tile identifies itself and carries the current value. The
         // graph still owns most of the pixels; these two short labels turn
         // sixteen otherwise-anonymous shapes into actual logical processors.
+        let kind = kinds.get(index).copied().unwrap_or_default();
         if cell_rect.width() >= 46.0 && cell_rect.height() >= 24.0 {
             let font = TextStyle::Small.resolve(ui.style());
+            // The marker goes in the tile's own label rather than in a
+            // second line or a tinted background: a hybrid machine has
+            // two dozen of these on screen at once, and anything that
+            // costs a tile more than one character costs the graph the
+            // room it was drawn for.
+            let label = match kind.marker() {
+                Some(marker) => format!("CPU {index} · {marker}"),
+                None => format!("CPU {index}"),
+            };
             ui.painter().text(
                 cell_rect.left_top() + Vec2::new(SPACE_XS, SPACE_XS),
                 Align2::LEFT_TOP,
-                format!("CPU {index}"),
+                label,
                 font.clone(),
                 theme::rgb(theme.text_faint),
             );
@@ -335,7 +359,8 @@ pub fn core_grid(ui: &mut Ui, theme: &Palette, rect: Rect, cores: &[Series]) {
         // print on every tile at once.
         ui.interact(cell_rect, ui.id().with("core").with(index), Sense::hover())
             .on_hover_text(format!(
-                "Logical processor {index}\nCurrent {}\nRecent average {}\nRecent peak {}\n{} samples",
+                "{} {index}\nCurrent {}\nRecent average {}\nRecent peak {}\n{} samples",
+                kind.label(),
                 crate::format::percent(f64::from(series.latest())),
                 crate::format::percent(f64::from(series.mean())),
                 crate::format::percent(f64::from(series.max())),

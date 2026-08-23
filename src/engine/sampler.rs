@@ -44,8 +44,8 @@
 
 use crate::model::rates::{Counters, Rates};
 use crate::model::{
-    CpuSample, DiskSample, GpuSample, Priority, ProcessKey, ProcessKind, ProcessRow, ProcessStatus,
-    Snapshot, SystemSample, VolumeSample,
+    CpuSample, DiskSample, Efficiency, GpuSample, Priority, ProcessKey, ProcessKind, ProcessRow,
+    ProcessStatus, Snapshot, SystemSample, VolumeSample,
 };
 use crate::win;
 use std::collections::{HashMap, HashSet};
@@ -138,8 +138,120 @@ pub struct Sampler {
     /// rate counters and a fresh query always reads zero. `None` on a
     /// machine that does not publish them.
     gpu: Option<win::gpu::Session>,
+    /// The rolling read of per-process efficiency mode.
+    efficiency: EfficiencySweep,
     /// Monotonic snapshot counter.
     sequence: u64,
+}
+
+/// A rolling, bounded read of every process's efficiency-mode state.
+///
+/// ## Why this is not just another field on the process query
+///
+/// Everything else a row shows arrives in the one
+/// `NtQuerySystemInformation` buffer. Quality of service does not:
+/// `GetProcessInformation` is per-process and needs a handle, so
+/// answering the question for every row every second means an
+/// `OpenProcess`/query/`CloseHandle` for four hundred processes — the
+/// same shape as the `EnumProcesses` route `docs/WINDOWS_APIS.md`
+/// rejects, for the same reason.
+///
+/// So it is swept instead. Each pass reads a fixed slice of the process
+/// list and remembers the answers, and the slice moves on. The cost per
+/// pass is a constant rather than a function of how many processes the
+/// machine is running — which is the property that matters, because the
+/// machines where this app has to stay cheap are exactly the ones with
+/// thousands of processes.
+///
+/// What it costs is *freshness*: a process that another tool throttles
+/// keeps its old state on screen until the sweep comes round again, a
+/// few seconds later. That is an acceptable trade for a flag that
+/// changes when a human clicks something, and the one case where a human
+/// clicked something *here* does not wait for it — see the optimistic
+/// overlay in `gui::app`.
+struct EfficiencySweep {
+    /// What was last read, per process.
+    known: HashMap<ProcessKey, bool>,
+    /// Where the next slice starts, as an index into the row list.
+    cursor: usize,
+}
+
+/// How many processes one pass reads the QoS state of.
+///
+/// Sized so a full sweep of a busy machine completes in a handful of
+/// seconds while the per-pass cost stays in the low hundreds of
+/// microseconds. Three syscalls each — open, query, close — so this is
+/// about two hundred, against the thousands the process enumeration
+/// would cost if it were done the documented way.
+const EFFICIENCY_SLICE: usize = 64;
+
+impl EfficiencySweep {
+    /// A sweep that has read nothing yet.
+    fn new() -> Self {
+        Self {
+            known: HashMap::new(),
+            cursor: 0,
+        }
+    }
+
+    /// Reads the next slice and stamps every row with what is known.
+    ///
+    /// Rows outside the slice are answered from the cache, and rows the
+    /// sweep has never reached are left [`Efficiency::Unknown`] — which
+    /// the UI draws as nothing rather than as "off". See
+    /// [`crate::model::Efficiency`].
+    fn refresh(&mut self, rows: &mut [ProcessRow]) {
+        if rows.is_empty() {
+            self.known.clear();
+            self.cursor = 0;
+            return;
+        }
+        if self.cursor >= rows.len() {
+            self.cursor = 0;
+        }
+
+        // The slice is taken by position in a list whose order can shift
+        // between passes, so a given process is not guaranteed to be
+        // read exactly once per full cycle. It is guaranteed to be read
+        // *often*, which is what this is for; keying the cursor on a
+        // process instead would mean the sweep restarting every time
+        // that one process exited.
+        for offset in 0..EFFICIENCY_SLICE.min(rows.len()) {
+            let index = (self.cursor + offset) % rows.len();
+            let Some(row) = rows.get(index) else {
+                continue;
+            };
+            // The pseudo-processes cannot be opened at all, and asking
+            // every sweep would be a refused syscall each time.
+            if row.is_pseudo() {
+                continue;
+            }
+            let key = row.key();
+            // A process that refuses to be opened keeps whatever was
+            // last known rather than flickering to unknown: the refusal
+            // says something about this app's rights, not about the
+            // process's state.
+            if let Some(reduced) = win::control::efficiency_of(key) {
+                self.known.insert(key, reduced);
+            }
+        }
+        self.cursor = (self.cursor + EFFICIENCY_SLICE) % rows.len();
+
+        for row in rows.iter_mut() {
+            row.efficiency = match self.known.get(&row.key()) {
+                Some(true) => Efficiency::Reduced,
+                Some(false) => Efficiency::Standard,
+                None => Efficiency::Unknown,
+            };
+        }
+    }
+
+    /// Drops processes that have exited, the same way the rate and
+    /// identity caches do — without it this is a slow leak of one entry
+    /// per process the machine has ever run.
+    fn retain_live(&mut self, live: &HashSet<ProcessKey>) {
+        self.known.retain(|key, _| live.contains(key));
+    }
 }
 
 impl Sampler {
@@ -157,6 +269,7 @@ impl Sampler {
             previous_adapters: HashMap::new(),
             identity: win::identity::Cache::new(),
             gpu: win::gpu::Session::open(),
+            efficiency: EfficiencySweep::new(),
             sequence: 0,
         }
     }
@@ -304,6 +417,9 @@ impl Sampler {
                     .and_then(|reading| reading.memory_by_pid.get(&process.pid).copied())
                     .unwrap_or(0),
                 priority: priority_from_base(process.base_priority),
+                // Filled in by the sweep below, which reads a bounded
+                // slice of the list rather than every row.
+                efficiency: Efficiency::Unknown,
             });
         }
 
@@ -312,6 +428,12 @@ impl Sampler {
         // per compiler process ever started.
         self.rates.retain_live(&live);
         self.identity.retain_live(&live);
+        self.efficiency.retain_live(&live);
+
+        // After the rows exist, because the sweep stamps them — and
+        // after the prune, so a slice never spends its budget on
+        // processes that have already gone.
+        self.efficiency.refresh(&mut rows);
 
         rows
     }
@@ -380,6 +502,7 @@ impl Sampler {
             physical_cores: self.facts.physical_cores,
             logical_cores: self.facts.logical_cores,
             megahertz: self.facts.megahertz,
+            core_kinds: self.facts.core_kinds.clone(),
         }
     }
 
@@ -538,6 +661,79 @@ pub fn priority_from_base(base: i32) -> Priority {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A row with nothing but an identity, for the sweep's bookkeeping.
+    fn row(pid: u32) -> ProcessRow {
+        ProcessRow {
+            pid,
+            started_at: u64::from(pid) * 1_000,
+            ..ProcessRow::default()
+        }
+    }
+
+    #[test]
+    fn the_efficiency_sweep_answers_from_its_cache_between_passes() {
+        // The point of the sweep: a row the slice did not reach this
+        // pass still shows what was last read, rather than blanking and
+        // refilling once a second.
+        let mut sweep = EfficiencySweep::new();
+        let mut rows = vec![row(100), row(200)];
+        sweep.known.insert(rows[0].key(), true);
+        sweep.known.insert(rows[1].key(), false);
+
+        sweep.refresh(&mut rows);
+        assert_eq!(rows[0].efficiency, Efficiency::Reduced);
+        assert_eq!(rows[1].efficiency, Efficiency::Standard);
+    }
+
+    #[test]
+    fn a_process_the_sweep_has_never_reached_reads_as_unknown() {
+        // Not as "off". The sampler reads a slice of the list per pass,
+        // so a row that has only just appeared genuinely has no answer,
+        // and drawing the mark's absence as a fact would be a claim.
+        let mut sweep = EfficiencySweep::new();
+        let mut rows = vec![ProcessRow {
+            pid: crate::model::SYSTEM_PID,
+            ..ProcessRow::default()
+        }];
+        sweep.refresh(&mut rows);
+        assert_eq!(
+            rows[0].efficiency,
+            Efficiency::Unknown,
+            "the pseudo-processes are never opened, so they are never known"
+        );
+    }
+
+    #[test]
+    fn the_efficiency_cache_does_not_outlive_the_processes_in_it() {
+        // The same leak every cache in this file has to avoid: one entry
+        // per process the machine has ever run.
+        let mut sweep = EfficiencySweep::new();
+        let alive = row(100);
+        let dead = row(200);
+        sweep.known.insert(alive.key(), true);
+        sweep.known.insert(dead.key(), true);
+
+        let live: HashSet<ProcessKey> = std::iter::once(alive.key()).collect();
+        sweep.retain_live(&live);
+
+        assert_eq!(sweep.known.len(), 1);
+        assert!(sweep.known.contains_key(&alive.key()));
+    }
+
+    #[test]
+    fn an_empty_process_list_resets_the_sweep_rather_than_dividing_by_it() {
+        // A failed enumeration publishes an empty list, and the cursor
+        // arithmetic is modulo the row count.
+        let mut sweep = EfficiencySweep::new();
+        sweep.known.insert(row(100).key(), true);
+        sweep.cursor = 37;
+
+        sweep.refresh(&mut []);
+
+        assert_eq!(sweep.cursor, 0);
+        assert!(sweep.known.is_empty());
+    }
 
     #[test]
     fn equal_type_physical_gpu_engines_are_not_summed_together() {

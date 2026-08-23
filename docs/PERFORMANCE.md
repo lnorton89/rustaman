@@ -167,9 +167,25 @@ runs:
 | `NtQuerySystemInformation` and the record walk | sampler thread | once a sample |
 | Rate computation against the previous sample | sampler thread | once a sample |
 | Identity lookup for processes not in the cache | sampler thread | once per process, ever |
+| Efficiency-mode (QoS) read | sampler thread | a fixed **64 processes** a pass, whatever the list length |
 | Tree building | sampler thread | once a sample |
 | Filter, sort, flatten to rows | UI thread | once per `RowKey` change |
 | Drawing | UI thread | every frame, **but only the visible rows** |
+
+The QoS row is the only one whose cost is deliberately *not* a function
+of the process count, and it is the only one that could not be made one.
+Everything else a row shows arrives in the single
+`NtQuerySystemInformation` buffer; quality of service needs a handle per
+process, so answering it for four hundred rows every second is the
+`EnumProcesses` shape this app rejects everywhere else. So
+`EfficiencySweep` reads a slice and moves on: about two hundred syscalls
+a pass, and a full cycle of a busy machine in a handful of seconds.
+
+What that trades away is freshness — a process another tool throttles
+keeps its old state until the sweep comes round. A change made *here*
+does not wait for it: `App::efficiency_overrides` carries the new value
+until a snapshot confirms it, so the click is immediate and the sweep
+still owns the truth.
 
 That last row is the one worth stating explicitly. Every table in the app
 — processes, details, services, startup — is built with

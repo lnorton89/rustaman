@@ -138,6 +138,16 @@ pub enum Icon {
     Copy,
     /// Open the containing folder.
     Folder,
+    /// A process running under reduced quality of service — Windows 11's
+    /// efficiency mode.
+    ///
+    /// A leaf, because that is the mark Windows itself uses for this and
+    /// a task manager is not the place to invent a private vocabulary for
+    /// a state the platform already named. Stroked in the theme's colour
+    /// like everything else here rather than in Task Manager's green: the
+    /// row it sits on carries meaning through colour already, and a
+    /// second, fixed green on the same row would compete with it.
+    Leaf,
 }
 
 impl Icon {
@@ -316,6 +326,24 @@ impl Icon {
                 (13.5, 6.0),
                 (13.5, 12.5),
             ])],
+            // A leaf on the grid's rising diagonal, with its midrib
+            // drawn along the same line. The rib is what makes it read
+            // as a leaf at eighteen points rather than as a lozenge —
+            // the outline alone is the shape of a pill turned on its
+            // side, which is not a plant.
+            Self::Leaf => vec![
+                Path::closed(&[
+                    (3.0, 13.0),
+                    (3.0, 8.0),
+                    (5.0, 4.5),
+                    (8.5, 3.0),
+                    (13.0, 3.0),
+                    (13.0, 7.5),
+                    (11.0, 11.0),
+                    (7.5, 13.0),
+                ]),
+                Path::open(&[(3.5, 12.5), (7.0, 9.0), (11.5, 5.5)]),
+            ],
         }
     }
 }
@@ -410,7 +438,7 @@ mod tests {
     /// a variant nobody drew. This list is what makes the *tests* cover
     /// it too, and the length assertion below is what catches a variant
     /// added to the enum and not to this list.
-    const ALL: [Icon; 23] = [
+    const ALL: [Icon; 24] = [
         Icon::Processes,
         Icon::Performance,
         Icon::Memory,
@@ -434,6 +462,7 @@ mod tests {
         Icon::Refresh,
         Icon::Copy,
         Icon::Folder,
+        Icon::Leaf,
     ];
 
     #[test]

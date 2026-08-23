@@ -645,9 +645,9 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             ui,
             theme,
             &format!(
-                "{} logical processors · {} cores · {} MHz · {} history",
+                "{} logical processors · {} · {} MHz · {} history",
                 system.cpu.logical_cores,
-                system.cpu.physical_cores,
+                core_summary(&system.cpu),
                 system.cpu.megahertz,
                 history_window(&app.performance.cpu, sample_interval(app)),
             ),
@@ -660,9 +660,36 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             Vec2::new(ui.available_width(), visuals - height),
             Sense::hover(),
         );
-        graph::core_grid(ui, theme, grid, &app.performance.cores);
+        graph::core_grid(
+            ui,
+            theme,
+            grid,
+            &app.performance.cores,
+            &system.cpu.core_kinds,
+        );
     } else {
         record_below(ui, CPU, rect.bottom());
+    }
+}
+
+/// How the heading describes the machine's cores.
+///
+/// A hybrid machine gets its split named — "8 performance + 16
+/// efficiency cores" — because on those parts the plain count is the
+/// least interesting thing about the topology: twenty-four cores of
+/// which sixteen are small is a different machine from twenty-four of
+/// which none are, and the per-core grid below reads as broken until
+/// somebody knows which they are looking at.
+///
+/// Everything else gets the count it always got. See
+/// [`crate::model::CpuSample::hybrid_counts`] on why a uniform machine
+/// is not described as "16 performance + 0 efficiency".
+fn core_summary(cpu: &crate::model::CpuSample) -> String {
+    match cpu.hybrid_counts() {
+        Some((performance, efficient)) => {
+            format!("{performance} performance + {efficient} efficiency cores")
+        }
+        None => format!("{} cores", cpu.physical_cores),
     }
 }
 

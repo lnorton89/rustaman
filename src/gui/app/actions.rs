@@ -54,6 +54,8 @@ pub enum Action {
     Resume(ProcessKey),
     /// Set its priority class.
     SetPriority(ProcessKey, Priority),
+    /// Turn Windows 11's efficiency mode on or off for it.
+    SetEfficiency(ProcessKey, bool),
     /// Open its folder in Explorer with the file selected.
     Reveal(ProcessKey),
     /// Copy its details to the clipboard.
@@ -79,6 +81,7 @@ impl App {
                 self.report(control::resume(key), &format!("Resumed {name}"));
             }
             Action::SetPriority(key, priority) => self.ask_or_set_priority(key, priority),
+            Action::SetEfficiency(key, on) => self.set_efficiency(key, on),
             Action::Reveal(key) => self.reveal(key),
             Action::Copy(key) => self.copy_details(key, ui),
             Action::StartService(name) => {
@@ -116,6 +119,30 @@ impl App {
                 self.services.refreshed = None;
             }
         }
+    }
+
+    /// Turns efficiency mode on or off, without asking.
+    ///
+    /// Reversible by the same control that set it, so it acts at once —
+    /// the same rule Suspend and the ordinary priority classes follow.
+    ///
+    /// The override is recorded **only on success**. Recording it first
+    /// and rolling back on failure would show the mark appearing and
+    /// then vanishing on a process this app has no rights over, which
+    /// reads as a bug rather than as the access denial the toast is
+    /// already saying it is.
+    fn set_efficiency(&mut self, key: ProcessKey, on: bool) {
+        let name = self.name_of(key);
+        let result = control::set_efficiency(key, on);
+        if result.is_ok() {
+            self.efficiency_overrides.insert(key, on);
+        }
+        let message = if on {
+            format!("{name} moved to efficiency mode")
+        } else {
+            format!("{name} returned to normal scheduling")
+        };
+        self.report(result, &message);
     }
 
     /// Ends a process, asking first unless the user has turned that off.

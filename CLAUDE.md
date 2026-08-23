@@ -510,6 +510,25 @@ range (`<previous>..<tag>`) computed from it is then wrong. The changelog
   the way to `pid:4242`.
 - **No per-process network throughput.** No Win32 call provides it; Task
   Manager reads an ETW kernel session. Endpoint counts instead.
+- **Efficiency mode is swept, not sampled.** Reading a process's QoS
+  state needs a handle per process, so `EfficiencySweep` in
+  `engine/sampler.rs` reads a fixed 64 a pass and caches the answers —
+  a constant cost, not a process-count-sized one. The click that
+  *changes* it does not wait for the sweep: `App::efficiency_overrides`
+  carries the new value until a snapshot confirms it.
+- **The QoS read is Windows 11 only, the write is not.**
+  `SetProcessInformation(ProcessPowerThrottling)` has worked since
+  Windows 10 1709; `GetProcessInformation` returns
+  `ERROR_INVALID_PARAMETER` there. Everything about the feature is gated
+  on `SystemInfo::is_windows_11`, which reads the build number from the
+  registry — `GetVersionEx` lies to an app whose manifest does not claim
+  the version, and `ProductName` still says "Windows 10" on upgraded 11
+  installs.
+- **Hybrid P/E cores map to the first processor group only.**
+  `SystemProcessorPerformanceInformation` reports the calling thread's
+  group and no other, so the per-core index space is group-relative;
+  mapping another group's affinity bits into it would put one group's
+  core kinds on another's tiles.
 - **Startup entries are read-only.** Toggling one means writing another
   program's registry state.
 - **IPv4 only in the connection tables.** The IPv6 pair roughly doubles

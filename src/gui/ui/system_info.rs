@@ -77,7 +77,7 @@ fn heading(ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         for label in [
             system.info.os_name.as_str(),
             system.info.os_version.as_str(),
-            build_label(&system.info.os_build).as_str(),
+            build_label(&system.info.build_display()).as_str(),
         ] {
             if !label.is_empty() {
                 widgets::chip(ui, label, theme.raised, theme.text_muted);
@@ -171,12 +171,11 @@ fn identity_cards(ui: &mut Ui, theme: &Palette, system: &SystemSample) {
                     "Version",
                     present(&system.info.os_version, "Unknown"),
                 );
-                widgets::detail_row(
-                    ui,
-                    theme,
-                    "Build",
-                    present(&system.info.os_build, "Unknown"),
-                );
+                // Build *and* revision. Two machines both reading
+                // "26100" can be a year of patches apart, and the
+                // revision is the half that says which is this one.
+                let build = system.info.build_display();
+                widgets::detail_row(ui, theme, "Build", present(&build, "Unknown"));
                 widgets::detail_row(
                     ui,
                     theme,
@@ -206,6 +205,17 @@ fn identity_cards(ui: &mut Ui, theme: &Palette, system: &SystemSample) {
                 widgets::detail_row(ui, theme, "Name", present(&system.cpu.name, "Unknown"));
                 widgets::detail_row(ui, theme, "Cores", &system.cpu.physical_cores.to_string());
                 widgets::detail_row(ui, theme, "Logical", &system.cpu.logical_cores.to_string());
+                // Only on a machine that has a split to report. A
+                // "Topology: uniform" row on a desktop Ryzen is a line
+                // of type spent saying nothing.
+                if let Some((performance, efficient)) = system.cpu.hybrid_counts() {
+                    widgets::detail_row(
+                        ui,
+                        theme,
+                        "Topology",
+                        &format!("{performance}P + {efficient}E"),
+                    );
+                }
                 let clock = if system.cpu.megahertz == 0 {
                     "Unknown".to_string()
                 } else {

@@ -111,6 +111,44 @@ enumerating threads with ToolHelp and calling `SuspendThread` on each,
 which races a process that is creating threads and leaves it in a
 half-suspended state when it loses.
 
+### Efficiency mode — `Get`/`SetProcessInformation(ProcessPowerThrottling)`
+
+`src/win/control.rs`. Windows 11's EcoQoS, and the one genuinely new
+thing 11 added to the process table.
+
+Turning it on is two calls, not one. `SetProcessInformation` with
+`PROCESS_POWER_THROTTLING_EXECUTION_SPEED` in both the control and state
+masks is the QoS request — on a hybrid part it keeps the process on the
+E-cores, on any part it lets the power manager clock it down — and
+`SetPriorityClass(IDLE_PRIORITY_CLASS)` is what stops it competing for
+the cores it does get. Task Manager sets both; either alone gets a
+fraction of the effect.
+
+Turning it **off** clears the control mask rather than setting it with a
+clear state mask. A clear control mask means "the system decides", which
+is where a process starts life; an explicit opt-out would pin the process
+at full speed even where Windows would have throttled it anyway.
+
+The read side is the asymmetric part, and it is worth knowing before
+testing on a Windows 10 machine:
+
+| | Windows 10 | Windows 11 |
+|---|---|---|
+| `SetProcessInformation` | works (1709+) | works |
+| `GetProcessInformation` | `ERROR_INVALID_PARAMETER` | works |
+
+So on 10 every process reads as `Efficiency::Unknown`, no marks are
+drawn, and the menu item is not offered — gated on the build number, not
+on the call failing, because a menu item that reports success and changes
+nothing observable is worse than one that is absent.
+
+**The read costs a handle per process**, which is why it is not a column
+computed every sample. `crate::engine::sampler::EfficiencySweep` reads a
+fixed slice of the process list per pass and caches the answers, so the
+per-sample cost is a constant rather than a multiple of the process
+count — the same objection that rules out `EnumProcesses` above. See
+`docs/PERFORMANCE.md`.
+
 ### Ending a process
 
 `TerminateProcess` on a handle opened with `PROCESS_TERMINATE`. "End
@@ -304,6 +342,19 @@ which is enough to act on an entry deliberately.
 
 ## The window itself
 
+- **Rounded corners** — `DwmSetWindowAttribute` with
+  `DWMWA_WINDOW_CORNER_PREFERENCE` (33), Windows 11 only. Windows 11
+  rounds a window's corners for you, but only a window that has a frame;
+  the app's own title bar means an *undecorated* window, and those stay
+  square unless the preference is set explicitly. Without it this is the
+  one square window on a rounded desktop.
+- **Border colour** — `DWMWA_BORDER_COLOR` (34), Windows 11 only. An
+  undecorated window has no frame, so on a dark desktop it ends where its
+  background stops; the one-pixel line DWM draws is what separates it
+  from what is behind it, and left alone that line is the user's accent
+  colour — the only part of the window the theme cannot otherwise reach.
+  The value is a `COLORREF`, which is `0x00BBGGRR` and not the RGB order
+  every other colour in this codebase is written in.
 - **Dark title bar** — `DwmSetWindowAttribute` with
   `DWMWA_USE_IMMERSIVE_DARK_MODE`. The attribute number changed between
   1809 and 1903 (19 → 20), so `src/win/dwm.rs` tries the newer one and
