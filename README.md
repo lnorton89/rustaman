@@ -14,9 +14,9 @@ Rustaman is a native Rust rewrite of the idea: the same data, read through
 the same interfaces, in a window that stays responsive when the machine
 does not.
 
-![Rustaman process view](assets/screenshot-processes.png)
+![Rustaman Performance view](assets/screenshot-performance.png)
 
-*The Processes view, rendered by the repository's offscreen screenshot harness.*
+*The Performance view, rendered by the repository's offscreen screenshot harness.*
 
 - **Periodic monitoring stays off the UI thread.** A background sampler
   overwrites a latest-value mailbox; the window draws the freshest snapshot.
