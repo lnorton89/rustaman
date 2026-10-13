@@ -195,9 +195,10 @@ fn shortcuts(app: &mut App, ui: &Ui) {
 
     if find {
         // Focus is requested by id, which is how egui addresses a widget
-        // that has not been drawn yet this frame.
+        // that has not been drawn yet this frame — and the id has to be
+        // the one the box is drawn under. See `chrome::search_box_id`.
         ui.ctx().memory_mut(|memory| {
-            memory.request_focus(egui::Id::new("search-box"));
+            memory.request_focus(chrome::search_box_id());
         });
     }
 
@@ -564,6 +565,70 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// One frame with these events, running `shortcuts` and then
+    /// whatever the frame draws.
+    fn frame_with(
+        app: &mut App,
+        events: Vec<egui::Event>,
+        mut draw: impl FnMut(&mut App, &mut Ui),
+    ) {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::Vec2::new(800.0, 400.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                shortcuts(app, ui);
+                draw(app, ui);
+            },
+        );
+        output.textures_delta.clear();
+    }
+
+    fn key(key: Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn ctrl_f_focuses_the_search_box_that_is_drawn() -> anyhow::Result<()> {
+        // The shortcut requested focus on an id no search box carried: a
+        // `TextEdit` given no id takes an automatic one. And egui holds
+        // the phantom id as focused, so after a Ctrl+F every *other*
+        // shortcut was swallowed too, until something else was clicked.
+        let mut app = App::new(crate::config::Config::default());
+        let theme = app.theme.clone();
+        let mut focused = false;
+        frame_with(
+            &mut app,
+            vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::COMMAND),
+                key(Key::F, egui::Modifiers::COMMAND),
+            ],
+            |app, ui| {
+                let _ = chrome::search_box(ui, &theme, &mut app.processes.search, "Search");
+                focused = ui
+                    .ctx()
+                    .memory(|memory| memory.has_focus(chrome::search_box_id()));
+            },
+        );
+        anyhow::ensure!(
+            focused,
+            "Ctrl+F asked for focus on an id the search box is not drawn under"
+        );
         Ok(())
     }
 

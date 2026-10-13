@@ -481,6 +481,22 @@ pub fn interval_label(interval: std::time::Duration) -> String {
     format!("{seconds:.1} s")
 }
 
+/// The id every view's search box is drawn under, which is what Ctrl+F
+/// focuses.
+///
+/// One id for all of them rather than one per view: only one view draws
+/// at a time, so they never collide, and the shortcut does not have to
+/// know which view is up. It has to be *stated*, because a `TextEdit`
+/// given no id takes an automatic one — and `request_focus` on a name no
+/// widget carries does not merely do nothing. egui holds the phantom id
+/// as focused, `egui_wants_keyboard_input` turns true for it, and every
+/// other shortcut is then swallowed until something else is clicked.
+/// That was Ctrl+F for as long as the shortcut existed.
+#[must_use]
+pub fn search_box_id() -> egui::Id {
+    egui::Id::new("search-box")
+}
+
 /// Draws the search box that both the process list and Details share.
 ///
 /// Returns whether the text changed, which the caller uses to reparse the
@@ -495,6 +511,7 @@ pub fn search_box(ui: &mut Ui, theme: &Palette, text: &mut String, hint: &str) -
     let response = ui.add_sized(
         Vec2::new(WIDTH, 0.0),
         egui::TextEdit::singleline(text)
+            .id(search_box_id())
             .hint_text(hint)
             .background_color(theme::rgb(theme.raised))
             .margin(theme::margin_xy(SPACE_SM, SPACE_XS))
