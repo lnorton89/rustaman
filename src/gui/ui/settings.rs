@@ -402,17 +402,75 @@ mod tests {
         // The samples already in a ring were taken at the old spacing; a
         // graph drawn from both would change shape without the data
         // changing, which is the one thing a graph must never do.
+        //
+        // *Every* ring, not the headline ones. The disk read and write
+        // halves and the network receive half were left out of the reset
+        // for as long as they existed, so the Disk and Network panels'
+        // own graphs kept the old spacing under headline graphs that had
+        // started afresh.
         let mut app = App::new(Config::default());
+        // Recorded through the same path a snapshot takes, so a ring
+        // added to `record_history` and not to `reset_history` fails
+        // here rather than on a user's machine.
         let mut snapshot = crate::model::Snapshot::default();
         snapshot.system.cpu.total_percent = 50.0;
-        app.poll();
-        // Record directly, since no sampler has published yet.
-        app.performance.cpu.push(50.0);
-        assert!(!app.performance.cpu.is_empty());
+        snapshot.system.cpu.kernel_percent = 10.0;
+        snapshot.system.cpu.per_core = vec![50.0, 50.0];
+        snapshot.system.memory.total = 100;
+        snapshot.system.memory.available = 50;
+        snapshot.system.disks.push(crate::model::DiskSample {
+            read_rate: 1_000.0,
+            write_rate: 2_000.0,
+            ..crate::model::DiskSample::default()
+        });
+        snapshot.system.adapters.push(crate::model::AdapterSample {
+            luid: 7,
+            hardware: true,
+            receive_rate: 3_000.0,
+            send_rate: 4_000.0,
+            ..crate::model::AdapterSample::default()
+        });
+        snapshot.system.gpus.push(crate::model::GpuSample {
+            utilisation: 25.0,
+            ..crate::model::GpuSample::default()
+        });
+        app.record_history(&snapshot);
+
+        let rings = |app: &App| -> Vec<(&'static str, usize)> {
+            let performance = &app.performance;
+            let mut rings = vec![
+                ("cpu", performance.cpu.len()),
+                ("cpu_kernel", performance.cpu_kernel.len()),
+                ("memory", performance.memory.len()),
+                ("disk", performance.disk.len()),
+                ("disk_read", performance.disk_read.len()),
+                ("disk_write", performance.disk_write.len()),
+                ("network", performance.network.len()),
+                ("network_send", performance.network_send.len()),
+                ("network_receive", performance.network_receive.len()),
+                ("gpu", performance.gpu.len()),
+            ];
+            rings.extend(performance.cores.iter().map(|core| ("core", core.len())));
+            rings.extend(
+                performance
+                    .adapters
+                    .values()
+                    .map(|adapter| ("adapter", adapter.len())),
+            );
+            rings
+        };
+        for (name, length) in rings(&app) {
+            assert_eq!(length, 1, "{name} did not record the snapshot");
+        }
 
         app.engine.set_interval(std::time::Duration::from_secs(2));
         app.reset_history();
-        assert!(app.performance.cpu.is_empty());
+        for (name, length) in rings(&app) {
+            assert_eq!(
+                length, 0,
+                "{name} still holds {length} sample(s) taken at the old interval"
+            );
+        }
     }
 
     #[test]

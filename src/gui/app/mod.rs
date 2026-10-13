@@ -867,7 +867,11 @@ impl App {
     }
 
     /// Appends one snapshot's figures to the graphs.
-    fn record_history(&mut self, snapshot: &Snapshot) {
+    ///
+    /// Crate-visible so the Settings view's test can feed a snapshot
+    /// through the same path a sample takes and then check
+    /// [`App::reset_history`] empties every ring it filled.
+    pub(crate) fn record_history(&mut self, snapshot: &Snapshot) {
         let performance = &mut self.performance;
         performance
             .cpu
@@ -953,13 +957,22 @@ impl App {
     /// silently compress part of its own history without saying so.
     pub fn reset_history(&mut self) {
         let performance = &mut self.performance;
+        // Every ring, by name. The read, write and receive halves were
+        // missing from this list for as long as they existed, so the
+        // Disk and Network panels' own graphs kept the old spacing while
+        // the headline graphs above them started afresh — two charts of
+        // the same quantity, one of them lying about its time axis.
+        // `changing_the_interval_clears_the_graphs` now walks every ring.
         for series in [
             &mut performance.cpu,
             &mut performance.cpu_kernel,
             &mut performance.memory,
             &mut performance.disk,
+            &mut performance.disk_read,
+            &mut performance.disk_write,
             &mut performance.network,
             &mut performance.network_send,
+            &mut performance.network_receive,
             &mut performance.gpu,
         ] {
             series.clear();
