@@ -127,8 +127,11 @@ pub fn percent(value: f64) -> String {
     if !value.is_finite() || value <= 0.0 {
         return "0%".to_string();
     }
-    if value < 10.0 {
-        return format!("{value:.1}%");
+    // Judged on the value as one decimal will print it — see
+    // `significant` — so 9.96% is "10%" and not "10.0%".
+    let tenths = (value * 10.0).round() / 10.0;
+    if tenths < 10.0 {
+        return format!("{tenths:.1}%");
     }
     format!("{}%", value.round() as i64)
 }
@@ -258,7 +261,11 @@ pub const DASH: &str = "—";
 fn scale(value: f64, step: f64, units: &[&'static str]) -> (f64, &'static str) {
     let mut scaled = value;
     let mut index = 0usize;
-    while scaled >= step && index + 1 < units.len() {
+    // Stepped on the value as it will be *printed*, not as it is. In the
+    // top of a unit's range [`significant`] rounds to a whole number, so
+    // 1023.6 KB printed as "1024 KB" — the step's own figure, in the unit
+    // below it — between neighbours reading "1.00 MB".
+    while scaled.round() >= step && index + 1 < units.len() {
         scaled /= step;
         index += 1;
     }
@@ -274,13 +281,19 @@ fn scale(value: f64, step: f64, units: &[&'static str]) -> (f64, &'static str) {
 /// Unpadded: see the module docs on why a fixed character count is the
 /// wrong tool for lining up a column in a proportional font.
 fn significant(value: f64) -> String {
-    if value < 10.0 {
-        format!("{value:.2} ")
-    } else if value < 100.0 {
-        format!("{value:.1} ")
-    } else {
-        format!("{} ", value.round() as i64)
+    // Each precision is judged on the value *rounded to it*, not on the
+    // raw value: 9.996 is under ten and two decimals would print it as
+    // "10.00" — four figures, a character wider than the "10.0" either
+    // side of it, which is the twitch the whole module exists to stop.
+    let hundredths = (value * 100.0).round() / 100.0;
+    if hundredths < 10.0 {
+        return format!("{hundredths:.2} ");
     }
+    let tenths = (value * 10.0).round() / 10.0;
+    if tenths < 100.0 {
+        return format!("{tenths:.1} ");
+    }
+    format!("{} ", value.round() as i64)
 }
 
 #[cfg(test)]
@@ -340,6 +353,47 @@ mod tests {
         assert!(
             widths.iter().all(|width| *width >= 6),
             "and none should collapse to nothing, got {widths:?}"
+        );
+    }
+
+    #[test]
+    fn a_value_that_rounds_to_the_next_unit_is_shown_in_it() {
+        // 1,048,575 bytes is 1023.999 KB, and the whole-number precision
+        // at the top of a unit's range printed that as "1024 KB" — the
+        // step's own figure, in the unit below — in a column whose
+        // neighbours read "1.00 MB".
+        assert_eq!(bytes(1_048_575), "1.00 MB");
+        assert_eq!(rate(1_048_575.0), "1.00 MB/s");
+        assert_eq!(
+            bytes(1_048_064),
+            "1.00 MB",
+            "1023.5 KB rounds to the step and so belongs in the next unit"
+        );
+        assert_eq!(
+            bytes(1_047_552),
+            "1023 KB",
+            "and the last value that does not round up stays where it is"
+        );
+        assert_eq!(
+            link_speed(999_600_000),
+            "1.00 Gbps",
+            "the decimal units step the same way"
+        );
+    }
+
+    #[test]
+    fn a_value_on_a_precision_boundary_is_judged_after_rounding() {
+        // 10,235 bytes is 9.9951 KB: under ten, so two decimals — which
+        // print "10.00 KB", four significant figures and a character
+        // wider than the "10.0 KB" either side of it. The precision has
+        // to be chosen on the rounded value.
+        assert_eq!(bytes(10_235), "10.0 KB");
+        assert_eq!(bytes(102_349), "100 KB", "99.95 KB rounds to 100");
+        assert_eq!(percent(9.96), "10%", "and a percentage the same way");
+        assert_eq!(
+            percent(9.94),
+            "9.9%",
+            "while one that stays under keeps its decimal"
         );
     }
 
