@@ -668,6 +668,13 @@ fn toggle_sort(app: &mut App, key: SortKey) {
 }
 
 /// Draws a category heading. Returns whether its disclosure was clicked.
+///
+/// The disclosure's own response is the answer, and it has to be: the
+/// chevron senses clicks itself, and egui hands a click to the topmost
+/// widget under the pointer, so a click on it never reaches the row's
+/// response. This returned `false` unconditionally and left the row to
+/// notice — which it did everywhere on the heading *except* on the one
+/// control drawn there to be clicked.
 fn group_heading(
     ui: &mut Ui,
     theme: &Palette,
@@ -675,9 +682,10 @@ fn group_heading(
     totals: &Totals,
     collapsed: bool,
 ) -> bool {
+    let mut hit = false;
     ui.horizontal_centered(|ui| {
         ui.add_space(SPACE_XS);
-        widgets::disclosure(ui, theme, !collapsed, kind);
+        hit = widgets::disclosure(ui, theme, !collapsed, kind).clicked();
         ui.add_space(SPACE_XS);
         ui.label(
             egui::RichText::new(kind.label())
@@ -691,7 +699,7 @@ fn group_heading(
                 .text_style(egui::TextStyle::Small),
         );
     });
-    false
+    hit
 }
 
 /// Draws a category heading's aggregate figure for one column.
