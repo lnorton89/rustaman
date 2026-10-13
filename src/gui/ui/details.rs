@@ -466,7 +466,9 @@ fn table_body(
                 header.col(|_| {});
             }
         })
-        .body(|body| {
+        .body(|mut body| {
+            // The body's clip, not the pane's: see `widgets::RowViewport`.
+            let viewport = widgets::RowViewport::new(viewport, &mut body);
             body.rows(ROW_HEIGHT, entries.len(), |mut row| {
                 let position = row.index();
                 let Some(Entry::Process { index, .. }) = entries.get(position) else {

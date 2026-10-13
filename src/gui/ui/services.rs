@@ -310,7 +310,9 @@ fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fil
             // beside it already sorts services onto their shared host.
             header.col(|ui| widgets::plain_header(ui, theme, "Host process"));
         })
-        .body(|body| {
+        .body(|mut body| {
+            // The body's clip, not the pane's: see `widgets::RowViewport`.
+            let viewport = widgets::RowViewport::new(viewport, &mut body);
             body.rows(ROW_HEIGHT, visible.len(), |mut row| {
                 let position = row.index();
                 let Some(service) = visible.get(position) else {
@@ -804,7 +806,9 @@ fn startup_table_body(
             // which is not an order anyone wants a startup list in.
             header.col(|ui| widgets::plain_header(ui, theme, "Command"));
         })
-        .body(|body| {
+        .body(|mut body| {
+            // The body's clip, not the pane's: see `widgets::RowViewport`.
+            let viewport = widgets::RowViewport::new(viewport, &mut body);
             body.rows(ROW_HEIGHT, entries.len(), |mut row| {
                 let position = row.index();
                 let Some(entry) = entries.get(position) else {

@@ -496,7 +496,9 @@ fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fil
                 header.col(|_| {});
             }
         })
-        .body(|body| {
+        .body(|mut body| {
+            // The body's clip, not the pane's: see `widgets::RowViewport`.
+            let viewport = widgets::RowViewport::new(viewport, &mut body);
             body.rows(ROW_HEIGHT, entries.len(), |mut row| {
                 let index = row.index();
                 let Some(entry) = entries.get(index) else {

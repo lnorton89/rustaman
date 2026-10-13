@@ -53,7 +53,7 @@ use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Rect, Response, Sense, Stroke, StrokeKind,
     TextStyle, Ui, Vec2,
 };
-use egui_extras::TableRow;
+use egui_extras::{TableBody, TableRow};
 
 /// How far a hover animation has progressed, 0..=1, eased.
 ///
@@ -848,18 +848,55 @@ fn row_clip(ui: &Ui, viewport: Rect) -> Rect {
     // the status bar, and it only appears once there are enough rows to
     // scroll, which is why no fabricated scene showed it.
     //
-    // So the vertical extent is intersected back with whatever clip the
-    // ui already had, which inside a table body is the scroll
-    // viewport's.
+    // So the vertical extent is intersected back with the table body's
+    // clip — the scroll viewport — which `viewport` carries; see
+    // [`RowViewport`].
+    //
+    // It is *not* taken from `ui.clip_rect()`, which is what this did
+    // first. That is the body's clip only in a column without `.clip(true)`:
+    // in one with it, `egui_extras` shrinks the cell ui's clip to the cell
+    // itself, and intersecting with that trimmed the half-spacing
+    // overhang back off. So every clipped column drew its rows with a
+    // strip of the app's background between them, while the columns
+    // that do not clip — Status, in the Startup and Services lists —
+    // kept their overhang, and their bands ran past the gaps the rest of
+    // the row left and out of line with them. One row, two shapes,
+    // decided by a flag on the column.
     let bleed = 0.5 * ui.spacing().item_spacing.x + 1.0;
-    let existing = ui.clip_rect();
     Rect::from_min_max(
-        egui::pos2(viewport.left() - bleed, gapless.top().max(existing.top())),
+        egui::pos2(viewport.left() - bleed, gapless.top().max(viewport.top())),
         egui::pos2(
             viewport.right() + bleed,
-            gapless.bottom().min(existing.bottom()),
+            gapless.bottom().min(viewport.bottom()),
         ),
     )
+}
+
+/// The rect a table's rows may paint in: the pane's width, and the
+/// visible height of the table's *body*.
+///
+/// Only obtainable from a [`TableBody`], because the vertical half is
+/// that body's clip and nothing else carries it. A cell's own clip does
+/// not — in a `.clip(true)` column it is the cell — and the pane the view
+/// measured includes the header, so a row half scrolled under the
+/// heading would paint its fill over the heading's text. See
+/// [`row_clip`].
+#[derive(Clone, Copy)]
+pub struct RowViewport(Rect);
+
+impl RowViewport {
+    /// The rows' viewport, from the pane the view measured and the body
+    /// the rows are about to be drawn into.
+    ///
+    /// `pane` supplies the horizontal extent — the region a row's fill
+    /// reaches across, which inside a horizontally scrolling table is the
+    /// visible pane rather than the content. See [`row_clip`].
+    pub fn new(pane: Rect, body: &mut TableBody<'_>) -> Self {
+        Self(Rect::from_x_y_ranges(
+            pane.x_range(),
+            body.ui_mut().clip_rect().y_range(),
+        ))
+    }
 }
 
 /// Fills a grouping row — a category heading, not a record.
@@ -1007,7 +1044,7 @@ impl<'a, 'b, 'r> Row<'a, 'b, 'r> {
     pub fn record(
         row: &'r mut TableRow<'a, 'b>,
         theme: &'r Palette,
-        viewport: Rect,
+        viewport: RowViewport,
         id: egui::Id,
         selected: bool,
         striped: bool,
@@ -1021,7 +1058,7 @@ impl<'a, 'b, 'r> Row<'a, 'b, 'r> {
         Self {
             row,
             theme,
-            viewport,
+            viewport: viewport.0,
             fill: RowFill::Record {
                 id,
                 selected,
@@ -1035,7 +1072,7 @@ impl<'a, 'b, 'r> Row<'a, 'b, 'r> {
     pub fn accented(
         row: &'r mut TableRow<'a, 'b>,
         theme: &'r Palette,
-        viewport: Rect,
+        viewport: RowViewport,
         id: egui::Id,
         selected: bool,
         striped: bool,
@@ -1052,12 +1089,12 @@ impl<'a, 'b, 'r> Row<'a, 'b, 'r> {
     }
 
     /// A grouping row — a category heading, not a record.
-    pub fn group(row: &'r mut TableRow<'a, 'b>, theme: &'r Palette, viewport: Rect) -> Self {
+    pub fn group(row: &'r mut TableRow<'a, 'b>, theme: &'r Palette, viewport: RowViewport) -> Self {
         row.set_selected(false);
         Self {
             row,
             theme,
-            viewport,
+            viewport: viewport.0,
             fill: RowFill::Group,
         }
     }
@@ -1589,6 +1626,123 @@ mod tests {
             covered >= wanted - 0.5,
             "the row's fills cover an unbroken {covered} points from its              left edge, but four cells and the gaps between them span              {wanted} — a gap means the column boundaries show through"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_clipped_and_an_unclipped_column_paint_the_same_rows() -> anyhow::Result<()> {
+        // Every table here mixes the two: most columns are `.clip(true)`,
+        // and a column of chips — Status, in the Startup and Services
+        // lists — is not. `egui_extras` shrinks a clipped cell's ui clip
+        // to the cell, and `row_clip` used to take its vertical bound from
+        // that clip, so the clipped columns trimmed the half-spacing
+        // overhang off every row while the Status column kept it. The
+        // result was a strip of background between every row in all but
+        // one column, and in that one, bands running past the strips and
+        // out of line with them.
+        //
+        // A real `TableBuilder` rather than hand-placed cells, because
+        // the clip in question is the one `egui_extras` sets up, and a
+        // test that builds its own cells decides the answer for it.
+        use super::super::theme;
+        use super::{Row, RowViewport};
+        use egui::{Rect, Shape, Vec2};
+        use egui_extras::{Column, TableBuilder};
+
+        /// Both columns' width.
+        const CELL: f32 = 160.0;
+        /// More than a row, its overhang and the slop on both edges —
+        /// anything taller is not a row's fill.
+        const TALLEST_FILL: f32 = theme::ROW_HEIGHT + 2.0 * theme::SPACE_MD;
+
+        let palette = crate::theme::Catalog::load().get(None).clone();
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, &palette);
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 400.0));
+        let mut boundary = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(window),
+                ..Default::default()
+            },
+            |ui| {
+                let pane = ui.available_rect_before_wrap();
+                ui.set_clip_rect(pane);
+                boundary = Some(pane.left() + CELL + 0.5 * ui.spacing().item_spacing.x);
+                let body_height = table_body_height(ui, pane.height());
+                TableBuilder::new(ui)
+                    .vscroll(true)
+                    .min_scrolled_height(0.0)
+                    .max_scroll_height(body_height)
+                    .auto_shrink([true, false])
+                    .column(Column::initial(CELL).clip(true))
+                    .column(Column::initial(CELL).clip(false))
+                    .header(theme::HEADER_HEIGHT, |mut header| {
+                        header.col(|_| {});
+                        header.col(|_| {});
+                    })
+                    .body(|mut body| {
+                        let viewport = RowViewport::new(pane, &mut body);
+                        body.rows(theme::ROW_HEIGHT, 4, |mut row| {
+                            let index = row.index();
+                            let mut row = Row::record(
+                                &mut row,
+                                &palette,
+                                viewport,
+                                egui::Id::new("row").with(index),
+                                false,
+                                index % 2 == 1,
+                            );
+                            row.cell(|_| {});
+                            row.cell(|_| {});
+                        });
+                    });
+            },
+        );
+        output.textures_delta.clear();
+        let boundary = boundary.ok_or_else(|| anyhow::anyhow!("nothing was drawn"))?;
+
+        // Each column's fills, as their vertical spans once clipped.
+        let mut columns: [Vec<(f32, f32)>; 2] = [Vec::new(), Vec::new()];
+        for clipped in &output.shapes {
+            let Shape::Rect(rect) = &clipped.shape else {
+                continue;
+            };
+            let painted = rect.rect.intersect(clipped.clip_rect);
+            if painted.width() > 1.0 && painted.height() > 1.0 && rect.rect.height() < TALLEST_FILL
+            {
+                let column = usize::from(painted.center().x > boundary);
+                if let Some(spans) = columns.get_mut(column) {
+                    spans.push((painted.top(), painted.bottom()));
+                }
+            }
+        }
+        for spans in &mut columns {
+            spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        }
+        let [clipped, unclipped] = columns;
+
+        assert_eq!(
+            clipped.len(),
+            4,
+            "expected one fill per row in the clipped column, found {clipped:?}"
+        );
+        assert_eq!(
+            clipped, unclipped,
+            "a row's fill spans {clipped:?} in a clipped column and {unclipped:?} in an \
+             unclipped one — the bands do not line up across the row"
+        );
+        for pair in clipped.windows(2) {
+            if let [above, below] = pair {
+                assert!(
+                    above.1 >= below.0,
+                    "a row's fill ends at {} and the next begins at {} — the background \
+                     shows between them",
+                    above.1,
+                    below.0
+                );
+            }
+        }
         Ok(())
     }
 }
