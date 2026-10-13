@@ -420,11 +420,37 @@ pub fn truncated(
     ui.painter().layout_job(job)
 }
 
+/// A cell's text, elided to the room the cell has left less `reserved`.
+///
+/// For the leading text of a row that carries something *after* it — a
+/// chip, a mark. A `ui.label` takes the whole cell, elided or not, and
+/// whatever is laid out after it lands past the cell's edge and is cut
+/// mid-word: "All users" read "All user" beside any startup entry with a
+/// long enough name. A truncated *name* still identifies its row, because
+/// the beginning of a name is the part that does; a truncated chip
+/// identifies nothing and reads as a rendering fault.
+///
+/// `reserved` is what the trailing things cost, and that is more than
+/// their own widths: the layout puts `item_spacing.x` between any two
+/// items it allocates, on top of whatever `add_space` the caller puts
+/// there itself. The first reservation counted the `add_space` and not
+/// the spacing, and the chip went over the edge by exactly that much.
+pub fn elided_text(ui: &mut Ui, text: &str, color: Rgb, reserved: f32) -> Response {
+    let width = (ui.available_width() - reserved).max(0.0);
+    let font = TextStyle::Body.resolve(ui.style());
+    let galley = truncated(ui, text, font, color, width);
+    let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::hover());
+    ui.painter()
+        .galley(rect.left_top(), galley, theme::rgb(color));
+    response
+}
+
 /// How wide [`status_chip`] will draw for this text.
 ///
 /// So a caller can reserve the room before laying out whatever precedes
 /// the chip — a label that consumed the whole cell first left the chip
-/// to be clipped in half by the column.
+/// to be clipped in half by the column. See [`elided_text`], and note
+/// the layout's own item spacing is not in this figure.
 #[must_use]
 pub fn status_chip_width(ui: &Ui, text: &str) -> f32 {
     let font = TextStyle::Small.resolve(ui.style());
@@ -1743,6 +1769,101 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn a_long_name_leaves_its_chip_whole() -> anyhow::Result<()> {
+        // The Startup list's Name cell, as it is drawn: a name elided to
+        // the room its chip leaves, then the chip. The chip is the part
+        // that must survive intact — "All user" beside a long name reads
+        // as a rendering fault, where an elided name reads as a long one.
+        //
+        // The reservation has to count the layout's item spacing as well
+        // as the chip and the `add_space` before it: counting only those
+        // two put the chip over the cell's edge by exactly the spacing.
+        // In a real clipped `egui_extras` column, because the clip in
+        // question is the one it sets up.
+        use super::super::theme::{self, SPACE_SM, SPACE_XS};
+        use super::{elided_text, status_chip, status_chip_width};
+        use egui::{Rect, Shape, Vec2};
+        use egui_extras::{Column, TableBuilder};
+
+        /// The Startup list's Name column, as it opens.
+        const CELL: f32 = 240.0;
+        const CHIP: &str = "All users";
+        const NAME: &str = "Microsoft OneDrive Personal Cloud Files Synchronisation Helper";
+
+        let palette = crate::theme::Catalog::load().get(None).clone();
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, &palette);
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 400.0));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(window),
+                ..Default::default()
+            },
+            |ui| {
+                TableBuilder::new(ui)
+                    .vscroll(false)
+                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                    .column(Column::initial(CELL).clip(true))
+                    .column(Column::remainder())
+                    .header(theme::HEADER_HEIGHT, |mut header| {
+                        header.col(|_| {});
+                        header.col(|_| {});
+                    })
+                    .body(|body| {
+                        body.rows(theme::ROW_HEIGHT, 1, |mut row| {
+                            row.col(|ui| {
+                                ui.add_space(SPACE_SM);
+                                let reserved = status_chip_width(ui, CHIP)
+                                    + ui.spacing().item_spacing.x
+                                    + SPACE_XS;
+                                elided_text(ui, NAME, palette.text, reserved);
+                                ui.add_space(SPACE_XS);
+                                status_chip(ui, CHIP, palette.text_muted);
+                            });
+                            row.col(|_| {});
+                        });
+                    });
+            },
+        );
+        output.textures_delta.clear();
+
+        // The chip is the one rounded fill. The name's galley still
+        // reports the whole text it was asked for; what was actually laid
+        // out is in its rows.
+        let mut chip = None;
+        let mut name = None;
+        for clipped in &output.shapes {
+            if let Shape::Rect(rect) = &clipped.shape {
+                if rect.corner_radius != egui::CornerRadius::ZERO {
+                    chip = Some((rect.rect, clipped.clip_rect));
+                }
+            } else if let Shape::Text(text) = &clipped.shape {
+                if text.galley.text() == NAME {
+                    name = Some(
+                        text.galley
+                            .rows
+                            .iter()
+                            .map(|row| row.row.text())
+                            .collect::<String>(),
+                    );
+                }
+            }
+        }
+        let (chip, clip) = chip.ok_or_else(|| anyhow::anyhow!("no chip was drawn"))?;
+        let name = name.ok_or_else(|| anyhow::anyhow!("no name was drawn"))?;
+
+        assert!(
+            clip.contains_rect(chip),
+            "the chip {chip:?} runs past its cell's clip {clip:?}, so it is cut mid-word"
+        );
+        assert!(
+            name.ends_with('…'),
+            "the name was not elided to make room: {name:?}"
+        );
         Ok(())
     }
 }

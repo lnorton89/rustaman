@@ -825,11 +825,27 @@ fn startup_table_body(
                     position % 2 == 1,
                 );
                 row.cell(|ui| {
+                    /// The chip on an entry registered for every account.
+                    const ALL_USERS: &str = "All users";
+
                     ui.add_space(SPACE_SM);
-                    ui.label(egui::RichText::new(&entry.name).color(theme::rgb(theme.text)));
+                    // The name yields to its chip, not the other way round:
+                    // a `ui.label` here took the whole cell, and the chip
+                    // laid out after it was cut at the column's edge to
+                    // "All user" on any entry with a long enough name. See
+                    // `widgets::elided_text`, and `super::processes` for
+                    // the same arrangement with more trailing it.
+                    let reserved = if entry.all_users {
+                        widgets::status_chip_width(ui, ALL_USERS)
+                            + ui.spacing().item_spacing.x
+                            + SPACE_XS
+                    } else {
+                        0.0
+                    };
+                    widgets::elided_text(ui, &entry.name, theme.text, reserved);
                     if entry.all_users {
                         ui.add_space(SPACE_XS);
-                        widgets::status_chip(ui, "All users", theme.text_muted);
+                        widgets::status_chip(ui, ALL_USERS, theme.text_muted);
                     }
                 });
                 row.cell(|ui| {

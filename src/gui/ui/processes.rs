@@ -831,10 +831,7 @@ fn name_cell(
         // The Name column clips, and the chips are laid out after the
         // label — so a name long enough to fill the column pushed them
         // off its edge and they were cut mid-word: "Discord System
-        // Helper" beside a chip reading "Adm". A truncated *name* still
-        // identifies the process, because the beginning of a name is
-        // the part that does; a truncated chip identifies nothing and
-        // reads as a rendering fault.
+        // Helper" beside a chip reading "Adm". See `widgets::elided_text`.
         let chips: &[(&str, crate::color::Rgb)] = match (
             process.status == crate::model::ProcessStatus::Suspended,
             process.elevated,
@@ -855,18 +852,18 @@ fn name_cell(
         /// thing identifying it.
         const MARK: f32 = 14.0;
         let marked = efficiency.is_reduced();
+        // What each trailing thing costs: its width, the `SPACE_XS`
+        // added before it below, *and* the spacing the layout puts
+        // between any two items it allocates. The reservation used to
+        // count the first two, and a long name's "Admin" chip ran off
+        // the cell by exactly the third.
+        let gap = ui.spacing().item_spacing.x + SPACE_XS;
         let reserved: f32 = chips
             .iter()
-            .map(|(text, _)| widgets::status_chip_width(ui, text) + SPACE_XS)
+            .map(|(text, _)| widgets::status_chip_width(ui, text) + gap)
             .sum::<f32>()
-            + if marked { MARK + SPACE_XS } else { 0.0 };
-
-        let name_width = (ui.available_width() - reserved).max(0.0);
-        let font = egui::TextStyle::Body.resolve(ui.style());
-        let galley = widgets::truncated(ui, process.display_name(), font, theme.text, name_width);
-        let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
-        ui.painter()
-            .galley(rect.left_top(), galley, theme::rgb(theme.text));
+            + if marked { MARK + gap } else { 0.0 };
+        widgets::elided_text(ui, process.display_name(), theme.text, reserved);
 
         if marked {
             ui.add_space(SPACE_XS);
