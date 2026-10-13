@@ -173,25 +173,37 @@ impl Tray {
     /// Installs `pixels` as the icon, with `tooltip` on hover.
     ///
     /// `pixels` is `edge`-square RGBA from [`crate::tray::rasterise`].
-    /// Returns whether the shell accepted it; a refusal is not worth
-    /// reporting anywhere, because the failure mode is a missing icon and
-    /// the user can see that.
-    pub fn show(&mut self, pixels: &[u8], edge: u32, tooltip: &str) -> bool {
+    /// A refusal is not reported anywhere, because the failure mode is a
+    /// missing icon and the user can see that — and the caller would do
+    /// nothing different with it, since the next update retries anyway.
+    pub fn show(&mut self, pixels: &[u8], edge: u32, tooltip: &str) {
         let Some(icon) = icon_from_rgba(pixels, edge) else {
-            return false;
+            return;
         };
         let mut data = notify_icon_data(self.window, tooltip);
         data.hIcon = icon.0;
-        let message = if self.added { NIM_MODIFY } else { NIM_ADD };
-        if !notify_icon(message, &mut data) {
-            return false;
+        // Whichever of the two this icon should need, and then the other.
+        // `added` describes the shell that took the icon, not the one
+        // running now: when Explorer restarts, the new one has never heard
+        // of it, so `NIM_MODIFY` fails — and it fails on every update
+        // after, because nothing ever adds it again. The documented cure,
+        // re-adding on the `TaskbarCreated` broadcast, does not reach this
+        // window: a message-only window receives no broadcasts. So a
+        // refused modify is answered with an add, and the icon comes back
+        // on the first update after the restart.
+        let (first, second) = if self.added {
+            (NIM_MODIFY, NIM_ADD)
+        } else {
+            (NIM_ADD, NIM_MODIFY)
+        };
+        if !notify_icon(first, &mut data) && !notify_icon(second, &mut data) {
+            return;
         }
         self.added = true;
         // Replaces the previous icon only once the shell has taken the
         // new one, so the handle it was drawing stays alive until it is
         // no longer drawing it.
         self.icon = Some(icon);
-        true
     }
 }
 

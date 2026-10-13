@@ -1143,9 +1143,14 @@ impl App {
             "Rustaman — CPU {}",
             crate::format::percent(snapshot.system.cpu.total_percent)
         );
-        if tray.show(&pixels, edge, &tooltip) {
-            self.tray_face = Some(face);
-        }
+        // Recorded whether or not the shell took it. Recorded only on
+        // success, a refusal — Explorer not up yet at login, or restarted
+        // underneath us — left the face unrecorded, so every frame after it
+        // built another icon and called the shell again, for as long as
+        // the shell kept refusing. The next attempt is the next time the
+        // meter moves, which is what the gate is for.
+        tray.show(&pixels, edge, &tooltip);
+        self.tray_face = Some(face);
     }
 }
 
