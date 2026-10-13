@@ -29,7 +29,7 @@ use crate::gui::app::actions::Action;
 use crate::gui::app::{service_label, App, ServiceSortKey, StartupSortKey};
 use crate::theme::Palette;
 use crate::win::services::{Service, ServiceState};
-use crate::win::startup::StartupEntry;
+use crate::win::startup::{StartupEntry, StartupKey};
 use egui::{Sense, Ui};
 use egui_extras::{Column, TableBuilder};
 use std::time::{Duration, Instant};
@@ -730,7 +730,7 @@ fn startup_table_body(
 ) {
     let entries = app.startup.visible.clone();
 
-    let mut clicked: Option<String> = None;
+    let mut clicked: Option<StartupKey> = None;
     let mut sort_clicked: Option<StartupSortKey> = None;
     let mut reveal: Option<std::path::PathBuf> = None;
 
@@ -814,13 +814,23 @@ fn startup_table_body(
                 let Some(entry) = entries.get(position) else {
                     return;
                 };
-                let selected = app.startup.selected.as_ref() == Some(&entry.name);
+                let selected = app
+                    .startup
+                    .selected
+                    .as_ref()
+                    .is_some_and(|key| key.is(entry));
 
                 let mut row = widgets::Row::record(
                     &mut row,
                     theme,
                     viewport,
-                    egui::Id::new("startup-row").with(&entry.name),
+                    // Keyed on the entry, which is its name *and* its
+                    // location: keyed on the name alone, a per-user and
+                    // an all-users registration of one program shared a
+                    // hover animation. See `StartupKey`.
+                    egui::Id::new("startup-row")
+                        .with(&entry.name)
+                        .with(entry.location),
                     selected,
                     position % 2 == 1,
                 );
@@ -877,7 +887,7 @@ fn startup_table_body(
 
                 let response = row.response();
                 if response.clicked() {
-                    clicked = Some(entry.name.clone());
+                    clicked = Some(entry.key());
                 }
                 response
                     .clone()
@@ -909,8 +919,8 @@ fn startup_table_body(
             app.startup.descending = key.defaults_descending();
         }
     }
-    if let Some(name) = clicked {
-        app.startup.selected = Some(name);
+    if let Some(key) = clicked {
+        app.startup.selected = Some(key);
     }
     if let Some(path) = reveal {
         let result = crate::win::control::reveal_in_explorer(&path);

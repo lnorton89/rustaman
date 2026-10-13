@@ -74,7 +74,46 @@ pub struct StartupEntry {
     pub enabled: bool,
 }
 
+/// What identifies a startup entry: its name **and** where it is
+/// registered.
+///
+/// The name alone is not unique. A program can be registered under one
+/// name in a per-user location and again in an all-users one — OneDrive
+/// does exactly this on a shared machine — and a selection keyed on the
+/// name alone lit both rows when either was clicked, with the hover
+/// animation of one row following the pointer on the other. The
+/// location labels are distinct per location, so the pair is unique
+/// within one enumeration.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct StartupKey {
+    /// The registered name.
+    pub name: String,
+    /// The location's label, as the Location column shows it.
+    pub location: &'static str,
+}
+
+impl StartupKey {
+    /// Whether this key names `entry`.
+    ///
+    /// A comparison rather than `entry.key() == *self`, because the row
+    /// loop asks it once per row per frame and the key's name would
+    /// otherwise be cloned each time just to be compared.
+    #[must_use]
+    pub fn is(&self, entry: &StartupEntry) -> bool {
+        self.name == entry.name && self.location == entry.location
+    }
+}
+
 impl StartupEntry {
+    /// This entry's identity in the list. See [`StartupKey`].
+    #[must_use]
+    pub fn key(&self) -> StartupKey {
+        StartupKey {
+            name: self.name.clone(),
+            location: self.location,
+        }
+    }
+
     /// The executable path, extracted from the command line.
     ///
     /// A registered command is a command *line*, not a path: it may be
@@ -502,6 +541,29 @@ mod tests {
         let first: Vec<String> = enumerate().into_iter().map(|e| e.name).collect();
         let second: Vec<String> = enumerate().into_iter().map(|e| e.name).collect();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn the_same_name_in_two_locations_is_two_entries() {
+        // A per-user and an all-users registration of one program share
+        // a name. Keyed on the name alone, selecting either row selected
+        // both.
+        let per_user = StartupEntry {
+            name: "OneDrive".to_string(),
+            location: "Registry (current user)",
+            ..StartupEntry::default()
+        };
+        let all_users = StartupEntry {
+            name: "OneDrive".to_string(),
+            location: "Registry (all users)",
+            ..StartupEntry::default()
+        };
+        assert_ne!(per_user.key(), all_users.key());
+        assert!(per_user.key().is(&per_user));
+        assert!(
+            !per_user.key().is(&all_users),
+            "a key must not match the same name in another location"
+        );
     }
 
     #[test]

@@ -529,8 +529,10 @@ pub struct StartupView {
     pub entries: Vec<crate::win::startup::StartupEntry>,
     /// The search box's text.
     pub search: String,
-    /// The selected entry's name.
-    pub selected: Option<String>,
+    /// The selected entry, by name and location — not by name alone,
+    /// which two entries can share. See
+    /// [`crate::win::startup::StartupKey`].
+    pub selected: Option<crate::win::startup::StartupKey>,
     /// The column being sorted on.
     pub sort: StartupSortKey,
     /// Whether that sort is descending.
