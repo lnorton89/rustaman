@@ -27,7 +27,7 @@ is worse than one showing the present.
 
 ## The portable half
 
-`model`, `theme`, `format`, `color`, `treemap`, and `config` have no
+`model`, `theme`, `format`, `color`, `treemap`, `tray`, and `config` have no
 `windows_sys` in them and compile on any platform. This is deliberate and it is
 enforced: CI runs their tests on Linux (`.github/workflows/ci.yml`, the
 `portable` job) and a `use windows_sys::` that leaks into one of them
