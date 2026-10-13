@@ -1134,8 +1134,11 @@ mod windows {
         .collect()
     }
 
-    /// A startup list, including the two shapes that break the column: a
-    /// quoted command line with arguments, and a disabled entry.
+    /// A startup list, including the shapes that break a column: a quoted
+    /// command line with arguments, a disabled entry, and an all-users
+    /// entry whose name is too long for the Name column — so the name has
+    /// to elide and leave its "All users" chip whole, which no entry with
+    /// a short name ever exercises.
     fn startup() -> Vec<rustaman::win::startup::StartupEntry> {
         use rustaman::win::startup::StartupEntry;
 
@@ -1146,6 +1149,7 @@ mod windows {
             ("Discord", "C:\\Users\\lawrence\\AppData\\Local\\Discord\\Update.exe --processStart Discord.exe", "Startup folder", false, true),
             ("Docker Desktop", "\"C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe\" -Autostart", "HKCU Run", false, true),
             ("RtkAudUService", "\"C:\\WINDOWS\\System32\\DriverStore\\FileRepository\\realtekservice.inf_amd64_9c1\\RtkAudUService64.exe\" -background", "HKLM Run", true, true),
+            ("Microsoft Teams Meeting Add-in Background Update Helper", "\"C:\\Program Files (x86)\\Microsoft\\TeamsMeetingAddin\\1.0.24151.2\\x64\\MeetingAddinUpdater.exe\" /silent", "HKLM Run", true, true),
         ]
         .into_iter()
         .map(
