@@ -206,12 +206,26 @@ fn shortcuts(app: &mut App, ui: &Ui) {
         // Clears the filter before clearing the selection: a user with a
         // filter active and a row selected who presses Escape means the
         // filter, which is the thing currently hiding rows.
-        if !app.processes.search.is_empty() {
-            app.processes.search.clear();
-            app.processes.query = crate::model::filter::Query::default();
-        } else {
+        //
+        // The filter *on screen*, which is the view's own. This reached
+        // for the process list's whatever view was up, so on Details —
+        // which has a search box of its own — Escape cleared a filter
+        // nobody could see, found it empty, and dropped the selection
+        // the visible filter was narrowing towards.
+        let cleared = match app.view {
+            View::Processes => {
+                clear_search(&mut app.processes.search, Some(&mut app.processes.query))
+            }
+            View::Details => clear_search(&mut app.details.search, Some(&mut app.details.query)),
+            View::Services => clear_search(&mut app.services.search, None),
+            View::Startup => clear_search(&mut app.startup.search, None),
+            View::Performance | View::Memory | View::System | View::Settings => false,
+        };
+        if !cleared {
             app.processes.selected = None;
             app.details.selected = None;
+            app.services.selected = None;
+            app.startup.selected = None;
         }
     }
 
@@ -222,6 +236,21 @@ fn shortcuts(app: &mut App, ui: &Ui) {
             }
         }
     }
+}
+
+/// Empties a search box's text, and its parsed form where the view keeps
+/// one. Returns whether there was anything to empty — which is what
+/// decides whether Escape has done its job or should go on to the
+/// selection.
+fn clear_search(text: &mut String, query: Option<&mut crate::model::filter::Query>) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    text.clear();
+    if let Some(query) = query {
+        *query = crate::model::filter::Query::default();
+    }
+    true
 }
 
 /// The shortcuts, for the about panel and for the test below.
@@ -630,6 +659,49 @@ mod tests {
             "Ctrl+F asked for focus on an id the search box is not drawn under"
         );
         Ok(())
+    }
+
+    #[test]
+    fn escape_clears_the_filter_on_screen_before_the_selection() {
+        // Details has a search box of its own. Escape there used to
+        // clear the process list's filter — invisible — find it empty,
+        // and drop the selection the visible filter was narrowing
+        // towards.
+        let mut app = App::new(crate::config::Config::default());
+        app.view = View::Details;
+        app.details.search = "chrome".to_string();
+        app.details.query = crate::model::filter::Query::parse("chrome");
+        let selected = crate::model::ProcessKey {
+            pid: 4242,
+            started_at: 1,
+        };
+        app.details.selected = Some(selected);
+
+        frame_with(
+            &mut app,
+            vec![key(Key::Escape, egui::Modifiers::NONE)],
+            |_, _| {},
+        );
+        assert!(
+            app.details.search.is_empty(),
+            "the visible filter clears first"
+        );
+        assert!(app.details.query.is_empty());
+        assert_eq!(
+            app.details.selected,
+            Some(selected),
+            "and the selection survives while there was a filter to clear"
+        );
+
+        frame_with(
+            &mut app,
+            vec![key(Key::Escape, egui::Modifiers::NONE)],
+            |_, _| {},
+        );
+        assert_eq!(
+            app.details.selected, None,
+            "with no filter left, Escape clears the selection"
+        );
     }
 
     #[test]
