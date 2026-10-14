@@ -3,7 +3,7 @@
 // Description:  The notification-area icon: its hidden message window, the
 //               HICON built from the pixels crate::tray rasterises, and the
 //               clicks that come back — plus the same meter set as the app
-//               window's large icon, which its taskbar button shows.
+//               window's own icons, which its taskbar button shows.
 //
 // Dependencies: windows-sys (Shell notification icons, GDI bitmaps, menus,
 //               window messages); win::strings; crate::tray for the picture
@@ -68,7 +68,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_CLOSE, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SendMessageW, ICON_BIG, SM_CXICON, SM_CXSMICON, WM_SETICON,
+    GetSystemMetrics, SendMessageW, ICON_BIG, ICON_SMALL, SM_CXICON, SM_CXSMICON, WM_SETICON,
 };
 
 /// The window class the message-only window registers under.
@@ -221,23 +221,30 @@ impl Drop for Tray {
     }
 }
 
-/// The app window's large icon — the picture on its taskbar button and in
+/// The app window's own icons — the picture on its taskbar button and in
 /// Alt-Tab — kept showing the same meter as the tray.
 ///
-/// eframe sets only the *small* icon, the title bar's, and the taskbar
-/// button asks for the large one. With none set it falls back to the
-/// icon resource in the executable, which is the static mark: a meter in
-/// the notification area beside a logo on the taskbar that never moves.
+/// Both of them, large and small. Which one the taskbar button draws
+/// depends on the Windows version, the button size and the scaling, and
+/// the first version of this set only the large one on the theory that
+/// the button reads it: on a Windows 10 taskbar at 100% the button went
+/// on showing the static mark. eframe had set the small icon to that mark
+/// at startup, and the executable's icon resource is the same mark, so
+/// either was a source the button could be falling back to. Setting both
+/// leaves no static picture for it to find. The small one is also the
+/// native title bar's, which the app draws itself by default — and where
+/// it does not, a meter in the title bar matches the one on the button.
 ///
 /// Separate from [`Tray`] because it needs nothing the tray needs — no
 /// window of its own, no shell — and a tray the shell refused should not
 /// take the taskbar button down with it.
 pub struct WindowIcon {
-    /// The app's real window, whose icon this sets.
+    /// The app's real window, whose icons this sets.
     owner: HWND,
-    /// The icon currently set. `WM_SETICON` does not copy it, so it is
-    /// held until a replacement has been set, and destroyed only then.
-    icon: Option<OwnedIcon>,
+    /// The icons currently set, large then small. `WM_SETICON` does not
+    /// copy an icon, so each is held until its replacement has been set,
+    /// and destroyed only then.
+    icons: Option<(OwnedIcon, OwnedIcon)>,
 }
 
 impl WindowIcon {
@@ -246,31 +253,36 @@ impl WindowIcon {
     pub fn new(owner: isize) -> Self {
         Self {
             owner: owner as HWND,
-            icon: None,
+            icons: None,
         }
     }
 
-    /// Sets `pixels` — `edge`-square RGBA from
-    /// [`crate::tray::rasterise`], at [`large_icon_edge`] — as the large
-    /// icon.
-    pub fn show(&mut self, pixels: &[u8], edge: u32) {
-        let Some(icon) = icon_from_rgba(pixels, edge) else {
+    /// Sets the window's icons from RGBA rasterised by
+    /// [`crate::tray::rasterise`]: `large` at [`large_icon_edge`] and
+    /// `small` at [`icon_edge`], each with its edge.
+    pub fn show(&mut self, large: (&[u8], u32), small: (&[u8], u32)) {
+        let Some(big) = icon_from_rgba(large.0, large.1) else {
             return;
         };
-        set_large_icon(self.owner, icon.0);
-        // Only now is the previous icon out of the window's hands.
-        self.icon = Some(icon);
+        let Some(little) = icon_from_rgba(small.0, small.1) else {
+            return;
+        };
+        set_window_icon(self.owner, ICON_BIG, big.0);
+        set_window_icon(self.owner, ICON_SMALL, little.0);
+        // Only now are the previous icons out of the window's hands.
+        self.icons = Some((big, little));
     }
 }
 
 impl Drop for WindowIcon {
     fn drop(&mut self) {
-        // Handed back to the default before the icon behind it is
+        // Handed back to the default before the icons behind them are
         // destroyed, so a window that outlives this — however briefly —
-        // falls back to the executable's mark rather than to a handle
-        // that no longer exists.
-        if self.icon.is_some() {
-            set_large_icon(self.owner, std::ptr::null_mut());
+        // falls back to the executable's mark rather than to handles that
+        // no longer exist.
+        if self.icons.is_some() {
+            set_window_icon(self.owner, ICON_BIG, std::ptr::null_mut());
+            set_window_icon(self.owner, ICON_SMALL, std::ptr::null_mut());
         }
     }
 }
@@ -801,16 +813,17 @@ fn large_icon_metric() -> i32 {
     unsafe { GetSystemMetrics(SM_CXICON) }
 }
 
-/// Sets a window's large icon, or clears it back to the default with a
-/// null `icon`.
-fn set_large_icon(window: HWND, icon: HICON) {
+/// Sets one of a window's icons — `which` is `ICON_BIG` or `ICON_SMALL`
+/// — or clears it back to the default with a null `icon`.
+fn set_window_icon(window: HWND, which: u32, icon: HICON) {
     // SAFETY: `window` is the app's own window, on this thread, so the send
     // is a direct call into its procedure rather than a cross-thread wait; a
-    // stale handle is refused by the call. `icon` is a live icon the caller
-    // keeps alive while it is set, or null, which is the documented way to
-    // remove one. The return value is the previous icon, which this does not
-    // own and must not destroy.
-    unsafe { SendMessageW(window, WM_SETICON, ICON_BIG as usize, icon as LPARAM) };
+    // stale handle is refused by the call. `which` is one of the two
+    // documented icon kinds. `icon` is a live icon the caller keeps alive
+    // while it is set, or null, which is the documented way to remove one.
+    // The return value is the previous icon, which this does not own and
+    // must not destroy.
+    unsafe { SendMessageW(window, WM_SETICON, which as usize, icon as LPARAM) };
 }
 
 #[cfg(test)]

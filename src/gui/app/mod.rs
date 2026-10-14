@@ -1149,14 +1149,15 @@ impl App {
         if self.tray_face == Some(face) {
             return;
         }
-        // The taskbar button wants the large icon's size, not the
-        // notification area's: the same face rasterised small and scaled up
-        // by the shell would be five blurred bars.
+        // Rasterised at each size the shell asks for, not scaled from one:
+        // the same face drawn small and scaled up by the shell would be
+        // five blurred bars.
         let large = crate::win::tray::large_icon_edge();
-        taskbar_icon.show(&crate::tray::rasterise(face, large as usize), large);
+        let large_pixels = crate::tray::rasterise(face, large as usize);
+        let edge = crate::win::tray::icon_edge();
+        let pixels = crate::tray::rasterise(face, edge as usize);
+        taskbar_icon.show((&large_pixels, large), (&pixels, edge));
         if let Some(tray) = self.tray.as_mut() {
-            let edge = crate::win::tray::icon_edge();
-            let pixels = crate::tray::rasterise(face, edge as usize);
             let tooltip = format!(
                 "Rustaman — CPU {}",
                 crate::format::percent(snapshot.system.cpu.total_percent)
