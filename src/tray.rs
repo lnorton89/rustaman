@@ -318,9 +318,11 @@ mod tests {
     #[test]
     fn every_load_rasterises_without_panicking_at_the_size_the_shell_asks_for() {
         // 16 and 32 are what GetSystemMetrics(SM_CXSMICON) returns at
-        // 100% and 200%; 24 is the 150% this was developed on.
+        // 100% and 200%; 24 is the 150% this was developed on. The taskbar
+        // button draws the same face at SM_CXICON — 32 at 100%, then 40,
+        // 48 and 64 as the scaling rises.
         let theme = palette();
-        for edge in [16, 20, 24, 32] {
+        for edge in [16, 20, 24, 32, 40, 48, 64] {
             for step in 0..=10 {
                 let pixels = rasterise(face(step as f32 / 10.0, &theme), edge);
                 assert_eq!(pixels.len(), edge * edge * 4, "edge {edge}");

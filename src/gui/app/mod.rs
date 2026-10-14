@@ -733,8 +733,14 @@ pub struct App {
     /// its clicks. `None` until then, and for the whole run if the shell
     /// refused it — a missing tray icon costs a convenience, not the app.
     tray: Option<crate::win::tray::Tray>,
-    /// The picture last pushed to the tray, so an unchanged one is not
-    /// pushed again.
+    /// Whether creating [`App::tray`] has been tried, so a refusal is
+    /// tried once rather than on every frame after it.
+    tray_attempted: bool,
+    /// The taskbar button's icon, which shows the same meter as the
+    /// tray. `None` until the native window exists.
+    taskbar_icon: Option<crate::win::tray::WindowIcon>,
+    /// The picture last pushed to the tray and the taskbar button, so an
+    /// unchanged one is not pushed again.
     ///
     /// Same reasoning as [`App::dressed_border`], and the same shape: the
     /// load moves continuously while the icon only has five steps, so
@@ -818,6 +824,8 @@ impl App {
             maximised: false,
             dressed_border: None,
             tray: None,
+            tray_attempted: false,
+            taskbar_icon: None,
             tray_face: None,
             native_window: None,
             elevated,
@@ -1106,28 +1114,32 @@ impl App {
         )
     }
 
-    /// Keeps the notification-area icon in step with the CPU load.
+    /// Keeps the notification-area icon and the taskbar button in step
+    /// with the CPU load.
     ///
-    /// Created on the first frame that has a window to hang it off —
-    /// `native_window` is attached by the launcher after `App::new` has
-    /// already run, so this cannot happen in the constructor.
+    /// Both are created on the first frame that has a window to hang them
+    /// off — `native_window` is attached by the launcher after `App::new`
+    /// has already run, so this cannot happen in the constructor. The tray
+    /// is attempted once: a shell that refused it is not asked again on
+    /// every frame, which is what a `None` re-tried each frame amounted to.
     ///
     /// Then gated, hard. Building an icon means a DIB section, a mask, a
-    /// `CreateIconIndirect` and a `Shell_NotifyIcon`, and the load feeding
-    /// it changes on every sample while the picture it produces has five
-    /// steps and one colour ramp. Comparing the face against the last one
-    /// turns "twice a second forever" into "when the meter actually
-    /// moves".
+    /// `CreateIconIndirect` and a `Shell_NotifyIcon` or `WM_SETICON`, and
+    /// the load feeding it changes on every sample while the picture it
+    /// produces has five steps and one colour ramp. Comparing the face
+    /// against the last one turns "twice a second forever" into "when the
+    /// meter actually moves".
     fn refresh_tray(&mut self) {
-        if self.tray.is_none() {
-            let Some(window) = self.native_window else {
-                return;
-            };
-            self.tray = crate::win::tray::Tray::create(window);
-        }
-        let Some(tray) = self.tray.as_mut() else {
+        let Some(window) = self.native_window else {
             return;
         };
+        if !self.tray_attempted {
+            self.tray_attempted = true;
+            self.tray = crate::win::tray::Tray::create(window);
+        }
+        let taskbar_icon = self
+            .taskbar_icon
+            .get_or_insert_with(|| crate::win::tray::WindowIcon::new(window));
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
         };
@@ -1137,19 +1149,26 @@ impl App {
         if self.tray_face == Some(face) {
             return;
         }
-        let edge = crate::win::tray::icon_edge();
-        let pixels = crate::tray::rasterise(face, edge as usize);
-        let tooltip = format!(
-            "Rustaman — CPU {}",
-            crate::format::percent(snapshot.system.cpu.total_percent)
-        );
-        // Recorded whether or not the shell took it. Recorded only on
-        // success, a refusal — Explorer not up yet at login, or restarted
-        // underneath us — left the face unrecorded, so every frame after it
-        // built another icon and called the shell again, for as long as
-        // the shell kept refusing. The next attempt is the next time the
-        // meter moves, which is what the gate is for.
-        tray.show(&pixels, edge, &tooltip);
+        // The taskbar button wants the large icon's size, not the
+        // notification area's: the same face rasterised small and scaled up
+        // by the shell would be five blurred bars.
+        let large = crate::win::tray::large_icon_edge();
+        taskbar_icon.show(&crate::tray::rasterise(face, large as usize), large);
+        if let Some(tray) = self.tray.as_mut() {
+            let edge = crate::win::tray::icon_edge();
+            let pixels = crate::tray::rasterise(face, edge as usize);
+            let tooltip = format!(
+                "Rustaman — CPU {}",
+                crate::format::percent(snapshot.system.cpu.total_percent)
+            );
+            // Recorded below whether or not the shell took it. Recorded
+            // only on success, a refusal — Explorer not up yet at login, or
+            // restarted underneath us — left the face unrecorded, so every
+            // frame after it built another icon and called the shell again,
+            // for as long as the shell kept refusing. The next attempt is
+            // the next time the meter moves, which is what the gate is for.
+            tray.show(&pixels, edge, &tooltip);
+        }
         self.tray_face = Some(face);
     }
 }

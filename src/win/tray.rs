@@ -2,7 +2,8 @@
 // Module:       win::tray
 // Description:  The notification-area icon: its hidden message window, the
 //               HICON built from the pixels crate::tray rasterises, and the
-//               clicks that come back.
+//               clicks that come back — plus the same meter set as the app
+//               window's large icon, which its taskbar button shows.
 //
 // Dependencies: windows-sys (Shell notification icons, GDI bitmaps, menus,
 //               window messages); win::strings; crate::tray for the picture
@@ -12,7 +13,8 @@
 //!
 //! [`crate::tray`] decides what the icon looks like and hands over RGBA
 //! bytes; everything here is the Win32 apparatus that gets those bytes
-//! into the notification area and the user's clicks back out.
+//! into the notification area and the user's clicks back out — and onto
+//! the taskbar button, through [`WindowIcon`].
 //!
 //! ## Why there is a window nobody can see
 //!
@@ -65,7 +67,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     MF_SEPARATOR, MF_STRING, SW_MINIMIZE, SW_RESTORE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
     WM_CLOSE, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetSystemMetrics, SendMessageW, ICON_BIG, SM_CXICON, SM_CXSMICON, WM_SETICON,
+};
 
 /// The window class the message-only window registers under.
 const CLASS_NAME: &str = "RustamanTrayHost";
@@ -214,6 +218,60 @@ impl Drop for Tray {
             notify_icon(NIM_DELETE, &mut data);
         }
         destroy_window(self.window);
+    }
+}
+
+/// The app window's large icon — the picture on its taskbar button and in
+/// Alt-Tab — kept showing the same meter as the tray.
+///
+/// eframe sets only the *small* icon, the title bar's, and the taskbar
+/// button asks for the large one. With none set it falls back to the
+/// icon resource in the executable, which is the static mark: a meter in
+/// the notification area beside a logo on the taskbar that never moves.
+///
+/// Separate from [`Tray`] because it needs nothing the tray needs — no
+/// window of its own, no shell — and a tray the shell refused should not
+/// take the taskbar button down with it.
+pub struct WindowIcon {
+    /// The app's real window, whose icon this sets.
+    owner: HWND,
+    /// The icon currently set. `WM_SETICON` does not copy it, so it is
+    /// held until a replacement has been set, and destroyed only then.
+    icon: Option<OwnedIcon>,
+}
+
+impl WindowIcon {
+    /// For the window `owner` — the numeric value of the app's `HWND`.
+    #[must_use]
+    pub fn new(owner: isize) -> Self {
+        Self {
+            owner: owner as HWND,
+            icon: None,
+        }
+    }
+
+    /// Sets `pixels` — `edge`-square RGBA from
+    /// [`crate::tray::rasterise`], at [`large_icon_edge`] — as the large
+    /// icon.
+    pub fn show(&mut self, pixels: &[u8], edge: u32) {
+        let Some(icon) = icon_from_rgba(pixels, edge) else {
+            return;
+        };
+        set_large_icon(self.owner, icon.0);
+        // Only now is the previous icon out of the window's hands.
+        self.icon = Some(icon);
+    }
+}
+
+impl Drop for WindowIcon {
+    fn drop(&mut self) {
+        // Handed back to the default before the icon behind it is
+        // destroyed, so a window that outlives this — however briefly —
+        // falls back to the executable's mark rather than to a handle
+        // that no longer exists.
+        if self.icon.is_some() {
+            set_large_icon(self.owner, std::ptr::null_mut());
+        }
     }
 }
 
@@ -722,6 +780,37 @@ fn small_icon_metric() -> i32 {
     // SAFETY: the argument is one of the documented metric indices and the
     // call only reads a system value.
     unsafe { GetSystemMetrics(SM_CXSMICON) }
+}
+
+/// The edge, in pixels, of a window's large icon — the one its taskbar
+/// button shows. 32 at 100% scaling, and scaled with it for the same
+/// reason as [`icon_edge`].
+#[must_use]
+pub fn large_icon_edge() -> u32 {
+    let edge = large_icon_metric();
+    if edge <= 0 {
+        return 32;
+    }
+    edge as u32
+}
+
+/// `GetSystemMetrics(SM_CXICON)`.
+fn large_icon_metric() -> i32 {
+    // SAFETY: the argument is one of the documented metric indices and the
+    // call only reads a system value.
+    unsafe { GetSystemMetrics(SM_CXICON) }
+}
+
+/// Sets a window's large icon, or clears it back to the default with a
+/// null `icon`.
+fn set_large_icon(window: HWND, icon: HICON) {
+    // SAFETY: `window` is the app's own window, on this thread, so the send
+    // is a direct call into its procedure rather than a cross-thread wait; a
+    // stale handle is refused by the call. `icon` is a live icon the caller
+    // keeps alive while it is set, or null, which is the documented way to
+    // remove one. The return value is the previous icon, which this does not
+    // own and must not destroy.
+    unsafe { SendMessageW(window, WM_SETICON, ICON_BIG as usize, icon as LPARAM) };
 }
 
 #[cfg(test)]
