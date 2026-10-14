@@ -46,7 +46,7 @@
 //! second either. The gate is [`crate::tray::Face`]: the caller compares
 //! the face it would draw against the one it last drew, and only calls
 //! [`Tray::show`] when the picture actually differs. On an idle machine
-//! that is approximately never, and a busy one still only changes in five
+//! that is approximately never, and a busy one still only changes in twenty
 //! steps.
 
 use super::strings;
@@ -890,10 +890,7 @@ mod tests {
 
     #[test]
     fn an_icon_is_built_and_released_without_leaking_its_bitmaps() {
-        let pixels = crate::tray::rasterise(
-            crate::tray::face(0.5, crate::theme::Catalog::load().get(None)),
-            16,
-        );
+        let pixels = crate::tray::rasterise(crate::tray::face(0.5), 16);
         let before = crate::win::app_icon::gdi_objects();
         for _ in 0..64 {
             let icon = icon_from_rgba(&pixels, 16);

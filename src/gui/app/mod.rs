@@ -743,7 +743,7 @@ pub struct App {
     /// unchanged one is not pushed again.
     ///
     /// Same reasoning as [`App::dressed_border`], and the same shape: the
-    /// load moves continuously while the icon only has five steps, so
+    /// load moves continuously while the icon only has twenty steps, so
     /// comparing what would be drawn against what was drawn keeps
     /// `Shell_NotifyIcon` — and the `HICON` behind it — off the frames
     /// where the picture is identical. On an idle machine that is every
@@ -1126,7 +1126,7 @@ impl App {
     /// Then gated, hard. Building an icon means a DIB section, a mask, a
     /// `CreateIconIndirect` and a `Shell_NotifyIcon` or `WM_SETICON`, and
     /// the load feeding it changes on every sample while the picture it
-    /// produces has five steps and one colour ramp. Comparing the face
+    /// produces has twenty steps. Comparing the face
     /// against the last one turns "twice a second forever" into "when the
     /// meter actually moves".
     fn refresh_tray(&mut self) {
@@ -1145,7 +1145,7 @@ impl App {
         };
         // The snapshot reports 0..=100 and the meter wants 0..=1.
         let load = (snapshot.system.cpu.total_percent / 100.0) as f32;
-        let face = crate::tray::face(load, &self.theme);
+        let face = crate::tray::face(load);
         if self.tray_face == Some(face) {
             return;
         }
