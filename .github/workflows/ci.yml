@@ -28,7 +28,7 @@ jobs:
       # checkout run the same rustfmt and the same clippy. `@stable` would
       # mean CI silently moving to each new release on its own —
       # tests/toolchain_pin.rs fails the build if it ever goes back to it.
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-08
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-08
         with:
           toolchain: "1.98.0"
           components: rustfmt
@@ -66,7 +66,7 @@ jobs:
           # nothing to do with the changelog.
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-08
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-08
         with:
           toolchain: "1.98.0"
           components: clippy
@@ -122,7 +122,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-08
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-08
         with:
           toolchain: "1.98.0"
           components: clippy
