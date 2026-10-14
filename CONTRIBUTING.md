@@ -40,9 +40,35 @@ pinned in `rust-toolchain.toml`, so `rustup` fetches the right one
 automatically.
 
 ```powershell
-cargo run                 # debug: keeps a console for panics and println!
-cargo run --release       # what a user gets: no console, LTO, panic = abort
+cargo run                        # debug: keeps a console for panics and println!
+cargo run --profile release-fast # optimised, incremental: the one to iterate with
+cargo run --release              # what a user gets: no console, LTO, panic = abort
 ```
+
+`--release` rebuilds slowly by design. Fat LTO over one codegen unit
+re-optimises every dependency after any edit to this crate, which is
+about two minutes after a one-line change. `release-fast` is the same
+optimisation level, `panic = "abort"` and GUI subsystem without the LTO,
+and rebuilds in seconds. It is not the shipped binary, so build
+`--release` before measuring the app's own performance, and before
+anything that depends on how the release binary is linked.
+
+`cargo check` is faster still when you only need to know whether the
+code compiles. On Windows, most of a debug rebuild after a small edit is
+the linker. Two things help there, and both are your call rather than
+the repository's:
+
+- **`rust-lld`**, which ships with the toolchain and needs nothing
+  installed. Set `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=rust-lld.exe`
+  in your environment, or put the same key in your user-level
+  `~/.cargo/config.toml` under `[target.x86_64-pc-windows-msvc]` as
+  `linker = "rust-lld.exe"`. It still needs the MSVC build tools
+  installed, because it links against their libraries. It is not set
+  in the repository because CI and the release build use `link.exe`, and
+  a linker change there would be a change to what ships.
+- **Keep `target/` out of real-time antivirus scanning.** Use a Dev Drive,
+  or a Defender exclusion for the checkout. A build writes thousands of
+  files, and scanning each one as it lands can cost more than compiling it.
 
 ## Before you submit
 

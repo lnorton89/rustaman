@@ -261,7 +261,9 @@ Two things that will mislead you:
 - **A debug build is not the app.** Release is `opt-level = 3`, LTO, one
   codegen unit and `panic = "abort"`. The record walk in particular is
   several times slower without optimisation, which makes the sampler look
-  like the problem when it is not.
+  like the problem when it is not. `--profile release-fast` is close, at
+  the same `opt-level` without LTO, and fine for finding out roughly
+  where time goes. A number you intend to quote comes from `--release`.
 - **A quiet machine is not the machine.** Roughly everything here is
   fast at 300 processes. The failure modes live at 3,000, and at "one
   process is hung and its token will not open". A VM with a few hundred

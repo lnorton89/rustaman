@@ -127,6 +127,13 @@ egui_kittest = { version = "0.36.1", features = ["wgpu", "snapshot"] }
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 
 [profile.release]
+# What ships. Fat LTO over one codegen unit is the smallest, fastest
+# binary, and it is also why this profile has no incremental rebuild: an
+# edit to any file in this crate re-runs whole-program optimisation over
+# every dependency — wgpu, naga, egui, winit — on a single LLVM thread.
+# On Windows that is about two minutes after a one-line change, nearly
+# all of it in the LTO step. That cost belongs to a release; for running
+# the app while working on it, use `release-fast` below.
 opt-level = 3
 lto = true
 codegen-units = 1
@@ -134,6 +141,32 @@ strip = "debuginfo"
 # A task manager that panics should say so and stop, not unwind through
 # a sampler thread holding an open handle to every process on the box.
 panic = "abort"
+
+# The optimised build for day-to-day work: `cargo run --profile
+# release-fast`. Same `opt-level`, `panic = "abort"`, stripping and
+# GUI subsystem as `release`, so it runs and behaves like the app
+# rather than like a debug build — but without LTO, and incremental.
+#
+# Measured on the Windows target, after a one-line edit to a file in
+# `src/gui/`, up to the link: `release` 148 s, this profile 3 s. A clean
+# build of the dependencies costs about the same as `release` does.
+#
+# It is not the binary that ships, and it is not the one to measure the
+# app's own performance with — see docs/PERFORMANCE.md §6.
+[profile.release-fast]
+inherits = "release"
+lto = false
+incremental = true
+# Dependencies at rustc's own release default. They build once, so
+# there is no reason to trade their optimisation for build parallelism.
+codegen-units = 16
+
+# This crate at 256 units, which is rustc's default for an incremental
+# build and what makes the rebuild small: an edit invalidates the few
+# units that hold the changed functions. At 16 the same edit rebuilt in
+# 7.6 s rather than 3.
+[profile.release-fast.package.rustaman]
+codegen-units = 256
 
 [lints.rust]
 warnings = "deny"

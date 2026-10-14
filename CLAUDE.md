@@ -20,7 +20,8 @@ rules CI enforces, and what a pull request needs — see
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
-cargo run --release                             # the app
+cargo run --release                             # the app, as shipped (slow to rebuild: fat LTO)
+cargo run --profile release-fast                # the app, optimised, rebuilds in seconds
 cargo run --example brand_assets                # regenerate assets/brand/
 cargo run --example changelog                   # regenerate CHANGELOG.md
 cargo run --example changelog -- --check        # what CI runs
