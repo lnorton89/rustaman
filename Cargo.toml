@@ -168,6 +168,17 @@ codegen-units = 16
 [profile.release-fast.package.rustaman]
 codegen-units = 256
 
+# Dependencies keep file and line numbers (so backtraces still name the
+# line inside egui or wgpu) but not full type and variable information.
+# This crate keeps full debuginfo. On Windows, most of a small debug
+# rebuild is link.exe writing the PDB, and that work scales with the
+# debuginfo it is given. This cuts what the linker reads for the
+# Windows target from 1.27 GB of rlibs to 0.77 GB, with no change to
+# compile time. The cost is that a debugger stopped inside a dependency
+# shows the line but not the locals.
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
 [lints.rust]
 warnings = "deny"
 dead_code = "deny"
