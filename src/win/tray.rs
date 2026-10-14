@@ -60,10 +60,10 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
-    DestroyMenu, DestroyWindow, GetCursorPos, GetForegroundWindow, IsIconic, PostMessageW,
-    RegisterClassW, SetForegroundWindow, ShowWindow, TrackPopupMenu, HICON, HMENU, HWND_MESSAGE,
-    ICONINFO, MF_SEPARATOR, MF_STRING, SW_MINIMIZE, SW_RESTORE, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    WM_APP, WM_CLOSE, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
+    DestroyMenu, DestroyWindow, GetCursorPos, IsIconic, PostMessageW, RegisterClassW,
+    SetForegroundWindow, ShowWindow, TrackPopupMenu, HICON, HMENU, HWND_MESSAGE, ICONINFO,
+    MF_SEPARATOR, MF_STRING, SW_MINIMIZE, SW_RESTORE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
+    WM_CLOSE, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
 
@@ -254,12 +254,21 @@ fn dispatch(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESU
     0
 }
 
-/// Shows, raises or minimises the app's window.
+/// Minimises the app's window, or restores and raises it if it already
+/// is.
 ///
-/// Minimised or behind something goes to the front; already in front
-/// goes down. That is what a monitor's tray icon is for — it is the
-/// control you reach for *because* the window is not where you can see
-/// it.
+/// Decided on whether the window is minimised, not on whether it is in
+/// front. That was the first version — in front goes down, behind goes
+/// up — and it could never take the first branch: clicking a
+/// notification icon activates the taskbar, or the overflow flyout the
+/// icon sits in, before the click is delivered, so by the time this runs
+/// the foreground window is the shell's and never the app's. Every click
+/// raised the window and none hid it.
+///
+/// What is given up is the window that is open but buried: one click
+/// minimises it, and the next brings it to the front. Telling buried from
+/// in-front would need the foreground history from *before* the shell
+/// took it, which this window has no way to observe.
 fn toggle_owner() {
     let owner = owner_window();
     if owner.is_null() {
@@ -268,10 +277,8 @@ fn toggle_owner() {
     if is_iconic(owner) {
         show_window(owner, SW_RESTORE);
         set_foreground(owner);
-    } else if foreground_window() == owner {
-        show_window(owner, SW_MINIMIZE);
     } else {
-        set_foreground(owner);
+        show_window(owner, SW_MINIMIZE);
     }
 }
 
@@ -669,12 +676,6 @@ fn is_iconic(window: HWND) -> bool {
     // SAFETY: a stale or invalid handle is refused by the call, which then
     // reports false.
     unsafe { IsIconic(window) != 0 }
-}
-
-/// The window currently in the foreground, which may be another app's.
-fn foreground_window() -> HWND {
-    // SAFETY: takes no arguments and returns a handle or null.
-    unsafe { GetForegroundWindow() }
 }
 
 /// Brings a window to the front.
