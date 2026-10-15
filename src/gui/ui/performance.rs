@@ -20,35 +20,34 @@
 //! signal for all of them at once, which is what a glance is for, and
 //! the large graph carries the detail for the one being investigated.
 //!
-//! ## The readouts are beside the graph, not under it
+//! ## Readouts explain the graph
 //!
-//! Numbers under a graph get pushed off the bottom of a short window, and
-//! they are the part that is actually read — a graph shows a shape, and
-//! the shape is only meaningful once you know the scale it is drawn at.
+//! Every resource uses the same timeline, then named groups of live
+//! readings and window statistics. The grid reflows at narrow widths.
+//! GPU engine activity and dedicated memory sit alongside each other
+//! when the pane has room, and stack within the same scrolling body otherwise.
 
 use super::theme::{self, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS};
-use super::{chrome, graph, widgets};
+use super::{chrome, dnd, graph, icon as icons, widgets};
 use crate::gui::app::{App, PerformanceFocus};
+use crate::icon::Icon;
 use crate::model::history::Series;
 use crate::model::{Snapshot, SystemSample};
 use crate::theme::Palette;
 use egui::{Rect, Response, Sense, Ui, Vec2};
 
-/// The width of the resource picker.
-///
-/// Wide enough for "Network" plus a sparkline and a value; anything
-/// narrower makes the sparkline too small to read a shape from.
-const PICKER_WIDTH: f32 = 200.0;
+/// The default resource-picker width. Its divider can widen it for long device names.
+const PICKER_WIDTH: f32 = 248.0;
 
 /// The height of a picker entry.
-const PICKER_ROW: f32 = 52.0;
+const PICKER_ROW: f32 = 112.0;
 
 /// The least height the main graph may shrink to.
 ///
 /// It was the height the graph always got, and on a tall window that
 /// left the bottom third of the pane empty under a panel whose whole
 /// content is one chart. It is a floor now: see [`graph_height`].
-const GRAPH_MINIMUM: f32 = 220.0;
+const GRAPH_MINIMUM: f32 = 180.0;
 
 /// The height one row of the per-core grid wants.
 ///
@@ -172,10 +171,8 @@ fn record_below(ui: &Ui, panel: &'static str, graph_bottom: f32) {
     /// full-height scrollbar with nothing to scroll to.
     const SLACK: f32 = 4.0;
 
-    // `chrome::SECTION_GAP` for the gap `detail` leaves after the last
-    // thing a panel draws, which is as much a part of what the pane owes
-    // the tail as the tail itself.
-    let below = ui.min_rect().bottom() - graph_bottom + chrome::SECTION_GAP + SLACK;
+    // The shared scroll body also owns the final inset below the content.
+    let below = ui.min_rect().bottom() - graph_bottom + theme::PAD + SLACK;
     let settled = measured_below(ui, panel).is_some_and(|old| (old - below).abs() <= TOLERANCE);
     if !settled {
         ui.data_mut(|data| data.insert_temp(egui::Id::new(panel), below));
@@ -201,169 +198,178 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
         return;
     };
 
-    picker_panel().show(ui, |ui| {
-        picker(app, ui, &theme, &snapshot);
-    });
-    gutter_panel().show(ui, |_| {});
-    detail(app, ui, &theme, &snapshot);
+    let (main, secondary) = panes(app, ui, &theme);
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .id_salt("performance-secondary")
+            .max_rect(secondary),
+        |ui| {
+            picker(app, ui, &theme, &snapshot);
+        },
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .id_salt("performance-main")
+            .max_rect(main),
+        |ui| {
+            detail(app, ui, &theme, &snapshot);
+        },
+    );
 }
 
-/// The picker's docked column.
-///
-/// A constructor rather than a chain written out at the call site,
-/// because the tests below have to reproduce this layout exactly to
-/// measure the seam it creates — and a replica is a thing that drifts.
-/// Three copies of this chain had already been written by hand.
-///
-/// No separator line. The gutter beside it *is* the separation, and the
-/// line drew a second boundary a few points from the panel's own edge —
-/// two rules with a sliver between them, which reads as a doubled border
-/// rather than as a gap.
-///
-/// Not resizable, because it cannot be: `exact_size` pins the width, so
-/// egui's default `resizable: true` leaves an edge that takes a drag,
-/// shows a resize cursor, and clamps straight back. See
-/// `no_fixed_panel_offers_a_resize_handle_that_does_nothing`.
-fn picker_panel() -> egui::Panel {
-    egui::Panel::left("performance-picker")
-        .exact_size(PICKER_WIDTH)
-        .resizable(false)
-        .show_separator_line(false)
-        .frame(egui::Frame::new().inner_margin(theme::margin_xy(0.0, 0.0)))
-}
-
-/// The empty column between the picker and the detail pane.
-///
-/// A second docked panel, holding nothing, purely to reserve a
-/// horizontal gutter — not `ui.add_space(SPACE_LG)`, which reads as the
-/// right call and does nothing at all here. `add_space` advances the
-/// cursor along the *current layout's* axis, and the layout `ui` carries
-/// past a docked `Panel::left` is still the page's own top-down one; the
-/// panel changes what area remains, not which direction spacing moves
-/// in. So the two columns had no gap between them beyond how each
-/// rounded off its own edge, however each of those was written — which
-/// is what made it so easy to miss: both sides could be independently
-/// correct and the seam still read as touching.
-fn gutter_panel() -> egui::Panel {
-    egui::Panel::left("performance-picker-gap")
-        .exact_size(SPACE_LG)
-        .resizable(false)
-        .frame(egui::Frame::new())
-        .show_separator_line(false)
+/// The shared splitter keeps graphs usable while the picker is resized.
+fn panes(app: &mut App, ui: &mut Ui, theme: &Palette) -> (Rect, Rect) {
+    dnd::split_pane(
+        ui,
+        theme,
+        "Resize resource picker",
+        &mut app.config.performance_width,
+        dnd::PaneSplit {
+            default_width: PICKER_WIDTH,
+            min_width: 224.0,
+            max_width: 360.0,
+            main_min_width: 280.0,
+            secondary_on_right: false,
+        },
+    )
 }
 
 /// The resource list down the left.
 ///
 /// Returns the rows' own bounding rect — not used by [`draw`], which
 /// discards it, but by the tests, which need the content's real extent
-/// rather than the picker panel's: the panel is a fixed
-/// [`PICKER_WIDTH`] regardless of what is drawn inside it, so measuring
-/// *it* can never reveal whether the content left a margin before its
-/// edge.
+/// rather than its resizable pane, so the tests measure the actual
+/// clearance between a card and the next pane.
 fn picker(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) -> Rect {
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // The picker panel's own frame carries zero margin — see its
-            // construction in `draw` — so a row that fills exactly
-            // `ui.available_width()` reaches the panel's true right edge
-            // with nothing but the gap before the detail column for
-            // separation. That gap is real, but it is the *only* thing
-            // standing between the sparkline and the seam, which is the
-            // same "one gap doing all the work" shape the detail column
-            // had — trimmed by the same step, for the same reason: the
-            // sparkline's own margin should not depend on what is drawn
-            // on the other side of the seam.
-            let width = (ui.available_width() - SPACE_MD).max(0.0);
-            ui.set_max_width(width);
-            let entries = [
-                (
-                    PerformanceFocus::Cpu,
-                    "CPU",
-                    crate::format::percent(snapshot.system.cpu.total_percent),
-                ),
-                (
-                    PerformanceFocus::Memory,
-                    "Memory",
-                    format!(
-                        "{} / {}",
-                        crate::format::bytes(snapshot.system.memory.used()),
-                        crate::format::bytes(snapshot.system.memory.total)
-                    ),
-                ),
-                (
-                    PerformanceFocus::Disk,
-                    "Disk",
-                    crate::format::rate(
-                        snapshot
-                            .system
-                            .disks
-                            .iter()
-                            .map(crate::model::DiskSample::total_rate)
-                            .sum(),
-                    ),
-                ),
-                (
-                    PerformanceFocus::Network,
-                    "Network",
-                    crate::format::rate(snapshot.system.network_rate()),
-                ),
-                (
-                    PerformanceFocus::Gpu,
-                    "GPU",
-                    crate::format::percent(
-                        snapshot
-                            .system
-                            .gpus
-                            .iter()
-                            .map(|gpu| gpu.utilisation)
-                            .fold(0.0, f64::max),
-                    ),
-                ),
-            ];
-
-            for (index, (focus, label, value)) in entries.into_iter().enumerate() {
-                // A machine with no GPU counters gets no GPU entry rather
-                // than one permanently reading 0% — which would look like
-                // a GPU that is never used.
-                if focus == PerformanceFocus::Gpu && snapshot.system.gpus.is_empty() {
-                    continue;
-                }
-                if picker_entry(app, ui, theme, focus, label, &value, index) {
-                    app.performance.focus = focus;
-                }
-                ui.add_space(SPACE_XS);
+    widgets::scroll_body(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = SPACE_SM;
+        for (index, summary) in picker_summaries(&snapshot.system).into_iter().enumerate() {
+            let focus = summary.focus;
+            // A machine with no GPU counters gets no GPU entry rather
+            // than one permanently reading 0% — which would look like
+            // a GPU that is never used.
+            if focus == PerformanceFocus::Gpu && snapshot.system.gpus.is_empty() {
+                continue;
             }
-            ui.min_rect()
-        })
-        .inner
+            if picker_entry(app, ui, theme, &summary, index) {
+                app.performance.focus = focus;
+            }
+        }
+    })
 }
 
-/// One entry of the resource picker. Returns whether it was clicked.
+/// The main reading and two supporting facts shown even when a resource is inactive.
+struct PickerSummary {
+    focus: PerformanceFocus,
+    value: String,
+    context: String,
+    detail: String,
+    hint: &'static str,
+}
+
+/// Only snapshot facts: the summary has the same scope as its headline and history.
+fn picker_summaries(system: &SystemSample) -> [PickerSummary; 5] {
+    use crate::format::{bytes, percent, rate, DASH};
+    let cpu = &system.cpu;
+    let memory = &system.memory;
+    let read = system.disks.iter().map(|disk| disk.read_rate).sum::<f64>();
+    let write = system.disks.iter().map(|disk| disk.write_rate).sum::<f64>();
+    let disk_count = system.disks.len();
+    let active = system
+        .disks
+        .iter()
+        .map(|disk| disk.active_percent)
+        .fold(0.0, f64::max);
+    let has_hardware = system.adapters.iter().any(|adapter| adapter.hardware);
+    let connected = system
+        .adapters
+        .iter()
+        .filter(|adapter| (adapter.hardware || !has_hardware) && adapter.state.is_online())
+        .count();
+    let send = system.network_send_rate();
+    let receive = (system.network_rate() - send).max(0.0);
+    let busiest_gpu = system
+        .gpus
+        .iter()
+        .max_by(|a, b| a.utilisation.total_cmp(&b.utilisation));
+    [
+        PickerSummary {
+            focus: PerformanceFocus::Cpu,
+            value: percent(cpu.total_percent),
+            context: if cpu.name.is_empty() { "Processor details unavailable".to_string() } else { cpu.name.clone() },
+            detail: if cpu.logical_cores == 0 { "Core count unavailable".to_string() }
+                else if cpu.physical_cores == 0 { format!("{} logical processors", cpu.logical_cores) }
+                else { format!("{} cores · {} logical", cpu.physical_cores, cpu.logical_cores) },
+            hint: "Overall utilisation across all logical processors.",
+        },
+        PickerSummary {
+            focus: PerformanceFocus::Memory,
+            value: if memory.total == 0 { DASH.to_string() } else { percent(memory.used_percent()) },
+            context: if memory.total == 0 { "Physical memory unavailable".to_string() } else { format!("{} / {} used", bytes(memory.used()), bytes(memory.total)) },
+            detail: if memory.total == 0 { "Capacity not reported".to_string() } else { format!("{} available", bytes(memory.available)) },
+            hint: "Physical memory in use, installed capacity, and memory available to apps.",
+        },
+        PickerSummary {
+            focus: PerformanceFocus::Disk,
+            value: if disk_count == 0 { DASH.to_string() } else { rate(read + write) },
+            context: if disk_count == 0 { "No physical disks reported".to_string() } else {
+                format!("{disk_count} disk{} · {} active", if disk_count == 1 { "" } else { "s" }, percent(active)) },
+            detail: if disk_count == 0 { "Activity unavailable".to_string() } else { format!("R {} · W {}", rate(read), rate(write)) },
+            hint: "Combined physical disk throughput. R: read, W: write. Active time is the busiest disk.",
+        },
+        PickerSummary {
+            focus: PerformanceFocus::Network,
+            value: if system.adapters.is_empty() { DASH.to_string() } else { rate(system.network_rate()) },
+            context: if system.adapters.is_empty() { "No adapters reported".to_string() }
+                else { format!("{connected} connected adapter{}", if connected == 1 { "" } else { "s" }) },
+            detail: if system.adapters.is_empty() { "Traffic unavailable".to_string() } else { format!("Rx {} · Tx {}", rate(receive), rate(send)) },
+            hint: "Rx: received, Tx: sent. Hardware traffic is shown when hardware adapters exist; otherwise all adapters are included.",
+        },
+        PickerSummary {
+            focus: PerformanceFocus::Gpu,
+            value: busiest_gpu.map_or_else(|| DASH.to_string(), |gpu| percent(gpu.utilisation)),
+            context: busiest_gpu.map_or_else(|| "GPU counters unavailable".to_string(), |gpu| {
+                if system.gpus.len() > 1 { format!("{} adapters · {}", system.gpus.len(), gpu.name) }
+                else if gpu.name.is_empty() { "Graphics adapter".to_string() } else { gpu.name.clone() }
+            }),
+            detail: busiest_gpu.filter(|gpu| gpu.memory_total > 0).map_or_else(|| "Dedicated memory not reported".to_string(),
+                |gpu| format!("VRAM {} / {}", bytes(gpu.memory_used), bytes(gpu.memory_total))),
+            hint: "Utilisation and dedicated video memory of the busiest graphics adapter.",
+        },
+    ]
+}
+
+/// One consistent resource card: identity, current reading, context, and recent history.
 fn picker_entry(
     app: &App,
     ui: &mut Ui,
     theme: &Palette,
-    focus: PerformanceFocus,
-    label: &str,
-    value: &str,
+    summary: &PickerSummary,
     index: usize,
 ) -> bool {
+    let focus = summary.focus;
+    let (label, icon) = match focus {
+        PerformanceFocus::Cpu => ("CPU", Icon::Cpu),
+        PerformanceFocus::Memory => ("Memory", Icon::Memory),
+        PerformanceFocus::Disk => ("Disk", Icon::Disk),
+        PerformanceFocus::Network => ("Network", Icon::Network),
+        PerformanceFocus::Gpu => ("GPU", Icon::Gpu),
+    };
     let active = app.performance.focus == focus;
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), PICKER_ROW), Sense::click());
-
-    // Keyed on the panel this entry selects, not on its place in the
-    // list: an id from the loop index animates the slot.
+    response.widget_info(|| {
+        let mut info = egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            active,
+            format!("{label}: {}", summary.value),
+        );
+        info.hint_text = Some(format!("{}. {}", summary.context, summary.detail));
+        info
+    });
     let id = ui.id().with(("picker", focus));
-    let fill = widgets::selection_fill(
-        ui,
-        theme,
-        response.id,
-        active,
-        response.hovered(),
-        theme.panel,
-    );
+    let fill = widgets::selectable_surface(ui, theme, id, &response, active, theme.panel);
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(theme::RADIUS), fill);
     if active {
@@ -376,54 +382,78 @@ fn picker_entry(
             theme.accent,
         );
     }
-
-    // The sparkline fills the entry's right half, behind the value — so
-    // the number is read against its own recent shape.
-    let series = series_for(app, focus);
-    let spark = Rect::from_min_size(
-        rect.left_top() + Vec2::new(rect.width() * 0.45, SPACE_XS),
-        Vec2::new(
-            rect.width() * 0.55 - SPACE_SM,
-            rect.height() - SPACE_XS * 2.0,
-        ),
-    );
-    if let Some(series) = series {
-        graph::sparkline(
-            ui,
-            spark,
-            series,
-            accent_for(theme, focus, index),
-            floor_for(focus),
-        );
-    }
-
-    ui.painter().text(
-        rect.left_top() + Vec2::new(SPACE_MD, SPACE_SM),
-        egui::Align2::LEFT_TOP,
-        label,
-        egui::TextStyle::Body.resolve(ui.style()),
-        theme::rgb(if active { theme.text } else { theme.text_muted }),
-    );
-    // Truncated at the sparkline's left edge rather than drawn through
-    // it. The Memory entry's value is a pair — "25.6 GB / 64.0 GB" —
-    // which is wider than the 45% of the row the text column actually
-    // has, so it used to run underneath the sparkline and the two
-    // overprinted each other into something that read as neither.
-    let value_width = (spark.left() - SPACE_SM - (rect.left() + SPACE_MD)).max(0.0);
-    let galley = widgets::truncated(
+    let color = accent_for(theme, focus, index);
+    let inner = rect.shrink(SPACE_MD);
+    let title_font = egui::TextStyle::Body.resolve(ui.style());
+    let metric_font = theme::metric_font(ui);
+    let label_width = ui
+        .painter()
+        .layout_no_wrap(
+            label.to_string(),
+            title_font.clone(),
+            theme::rgb(theme.text),
+        )
+        .size()
+        .x;
+    let metric = widgets::truncated(
         ui,
-        value,
-        egui::TextStyle::Small.resolve(ui.style()),
-        theme.text_faint,
-        value_width,
+        &summary.value,
+        metric_font,
+        theme.text,
+        (inner.width() - label_width - icons::INLINE - SPACE_SM * 2.0).max(0.0),
+    );
+    let title_width = (inner.width() - metric.size().x - icons::INLINE - SPACE_SM * 2.0).max(0.0);
+    icons::paint(
+        ui.painter(),
+        Rect::from_min_size(inner.min + Vec2::new(0.0, 2.0), Vec2::splat(icons::INLINE)),
+        icon,
+        theme::rgb(color),
     );
     ui.painter().galley(
-        rect.left_bottom() + Vec2::new(SPACE_MD, -SPACE_SM - galley.size().y),
-        galley,
-        theme::rgb(theme.text_faint),
+        inner.min + Vec2::new(icons::INLINE + SPACE_SM, 0.0),
+        widgets::truncated(ui, label, title_font, theme.text, title_width),
+        theme::rgb(theme.text),
     );
-
-    response.clicked()
+    ui.painter().galley(
+        egui::pos2(inner.right() - metric.size().x, inner.top()),
+        metric,
+        theme::rgb(theme.text),
+    );
+    for (text, top) in [
+        (&summary.context, SPACE_LG + SPACE_XS),
+        (&summary.detail, SPACE_LG * 2.0),
+    ] {
+        let galley = widgets::truncated(
+            ui,
+            text,
+            egui::TextStyle::Small.resolve(ui.style()),
+            theme.text_muted,
+            inner.width(),
+        );
+        ui.painter().galley(
+            inner.min + Vec2::new(0.0, top),
+            galley,
+            theme::rgb(theme.text_muted),
+        );
+    }
+    let spark = Rect::from_min_max(
+        egui::pos2(inner.left(), inner.bottom() - SPACE_LG - SPACE_XS),
+        inner.max,
+    );
+    if let Some(series) = series_for(app, focus) {
+        graph::sparkline(ui, spark, series, color, floor_for(focus));
+    }
+    widgets::focus_ring(ui, theme, &response);
+    let history = series_for(app, focus)
+        .map(|series| history_window(series, sample_interval(app)))
+        .unwrap_or_default();
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(format!(
+            "{label}: {}\n{}\n{}\n{}\n{history} history",
+            summary.value, summary.context, summary.detail, summary.hint
+        ))
+        .clicked()
 }
 
 /// The history ring behind a resource.
@@ -465,11 +495,10 @@ fn history_window(series: &Series, interval: std::time::Duration) -> String {
     crate::format::duration(seconds)
 }
 
-/// The sampler interval that produced the history currently on screen.
+/// The stable nominal interval for the chart's approximate time axis.
+/// Individual rate values still use each snapshot's actual elapsed interval.
 fn sample_interval(app: &App) -> std::time::Duration {
-    app.snapshot
-        .as_ref()
-        .map_or_else(|| app.engine.interval(), |snapshot| snapshot.interval)
+    app.engine.interval()
 }
 
 /// The selected resource, drawn large.
@@ -480,33 +509,22 @@ fn sample_interval(app: &App) -> std::time::Duration {
 /// than against the outer `Ui`'s own bounds, which would also include
 /// the picker panel drawn into the same `Ui` earlier.
 fn detail(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) -> Rect {
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // The graphs and the core grid below them fill exactly
-            // `ui.available_width()` — no dense multi-column table has
-            // to be squeezed into this view the way `PAD` is sized
-            // around, so this trims a further step off the right edge
-            // rather than letting a bordered chart end flush with it.
-            let width = (ui.available_width() - SPACE_MD).max(0.0);
-            ui.set_max_width(width);
-            match app.performance.focus {
-                PerformanceFocus::Cpu => cpu(app, ui, theme, &snapshot.system),
-                PerformanceFocus::Memory => memory(app, ui, theme, &snapshot.system),
-                PerformanceFocus::Disk => disk(app, ui, theme, &snapshot.system),
-                PerformanceFocus::Network => network(app, ui, theme, &snapshot.system),
-                PerformanceFocus::Gpu => gpu(app, ui, theme, &snapshot.system),
-            }
-            // Every panel's own last element (the core grid, the last
-            // device card, the kernel-memory row) would otherwise end
-            // flush with the scroll area's own lower edge — the same
-            // gap a section leaves above itself, left below the last one
-            // too, so the content never reads as clipped by the pane
-            // rather than simply ending.
-            ui.add_space(chrome::SECTION_GAP);
-            ui.min_rect()
-        })
-        .inner
+    detail_scroll(app, ui, theme, snapshot).inner
+}
+
+fn detail_scroll(
+    app: &mut App,
+    ui: &mut Ui,
+    theme: &Palette,
+    snapshot: &Snapshot,
+) -> egui::scroll_area::ScrollAreaOutput<Rect> {
+    widgets::scroll_body_output(ui, |ui| match app.performance.focus {
+        PerformanceFocus::Cpu => cpu(app, ui, theme, &snapshot.system),
+        PerformanceFocus::Memory => memory(app, ui, theme, &snapshot.system),
+        PerformanceFocus::Disk => disk(app, ui, theme, &snapshot.system),
+        PerformanceFocus::Network => network(app, ui, theme, &snapshot.system),
+        PerformanceFocus::Gpu => gpu(app, ui, theme, &snapshot.system),
+    })
 }
 
 /// The CPU panel.
@@ -531,137 +549,91 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     };
     let height = visuals * GRAPH_MINIMUM / (GRAPH_MINIMUM + grid_floor);
 
-    let (rect, graph_response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-    graph::banded(
+    let rect = graph::timeline(
         ui,
         theme,
-        rect,
-        &graph::Graph {
-            series: &app.performance.cpu,
-            color: theme.series(0, 5),
-            floor: 100.0,
-            unit: graph::Unit::Percent,
-        },
-        &graph::Graph {
-            series: &app.performance.cpu_kernel,
-            // The kernel band takes the danger colour rather than another
-            // ramp hue: a machine spending most of its CPU in the kernel
-            // is a machine with a driver or a filter problem, and that is
-            // a status rather than a series.
-            color: theme.danger,
-            floor: 100.0,
-            unit: graph::Unit::Percent,
+        height,
+        &graph::Timeline {
+            label: "CPU utilisation history",
+            interval: sample_interval(app),
+            composition: graph::Composition::PartOfTotal,
+            lines: &[
+                graph::TimelineLine {
+                    label: "Total",
+                    graph: graph::Graph {
+                        series: &app.performance.cpu,
+                        color: theme.series(0, 5),
+                        floor: 100.0,
+                        unit: graph::Unit::Percent,
+                    },
+                },
+                graph::TimelineLine {
+                    label: "Kernel",
+                    graph: graph::Graph {
+                        series: &app.performance.cpu_kernel,
+                        color: theme.danger,
+                        floor: 100.0,
+                        unit: graph::Unit::Percent,
+                    },
+                },
+            ],
         },
     );
-    graph_response.on_hover_text_at_pointer(format!(
-        "CPU history\nCurrent {}\nRecent average {}\nRecent peak {}\nKernel now {}",
-        crate::format::percent(system.cpu.total_percent),
-        crate::format::percent(f64::from(app.performance.cpu.mean())),
-        crate::format::percent(f64::from(app.performance.cpu.max())),
-        crate::format::percent(system.cpu.kernel_percent),
-    ));
-    ui.add_space(SPACE_SM);
 
-    ui.horizontal(|ui| {
-        graph::legend(
-            ui,
-            theme,
-            theme.series(0, 5),
-            "Total",
-            &crate::format::percent(system.cpu.total_percent),
-        );
-        ui.add_space(SPACE_LG);
-        graph::legend(
-            ui,
-            theme,
-            theme.danger,
-            "Kernel",
-            &crate::format::percent(system.cpu.kernel_percent),
-        );
-    });
-    ui.add_space(chrome::SECTION_GAP);
-
-    ui.horizontal_top(|ui| {
-        let width = stat_column_width(ui.available_width(), 4);
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Current",
-            &crate::format::percent(system.cpu.total_percent),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "User mode",
-            &crate::format::percent(
-                (system.cpu.total_percent - system.cpu.kernel_percent).max(0.0),
+    stats_group(
+        ui,
+        theme,
+        "Utilisation",
+        &[
+            ("Current", crate::format::percent(system.cpu.total_percent)),
+            (
+                "User mode",
+                crate::format::percent(
+                    (system.cpu.total_percent - system.cpu.kernel_percent).max(0.0),
+                ),
             ),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Average",
-            &crate::format::percent(f64::from(app.performance.cpu.mean())),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Peak",
-            &crate::format::percent(f64::from(app.performance.cpu.max())),
-        );
-    });
-    ui.add_space(SPACE_MD);
-
-    ui.horizontal_top(|ui| {
-        let width = stat_column_width(ui.available_width(), 4);
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Processes",
-            &crate::format::count(system.process_count as u64),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Threads",
-            &crate::format::count(system.thread_count),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Handles",
-            &crate::format::count(system.handle_count),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Up time",
-            &crate::format::duration(system.uptime_seconds),
-        );
-    });
-    ui.add_space(chrome::SECTION_GAP);
+            (
+                "Window average",
+                crate::format::percent(app.performance.cpu.mean().into()),
+            ),
+            (
+                "Window peak",
+                crate::format::percent(app.performance.cpu.max().into()),
+            ),
+        ],
+    );
+    stats_group(
+        ui,
+        theme,
+        "System activity",
+        &[
+            (
+                "Processes",
+                crate::format::count(system.process_count as u64),
+            ),
+            ("Threads", crate::format::count(system.thread_count)),
+            ("Handles", crate::format::count(system.handle_count)),
+            ("Up time", crate::format::duration(system.uptime_seconds)),
+        ],
+    );
 
     if !app.performance.cores.is_empty() {
-        widgets::section(
-            ui,
-            theme,
-            &format!(
-                "{} logical processors · {} · {} MHz · {} history",
-                system.cpu.logical_cores,
-                core_summary(&system.cpu),
-                system.cpu.megahertz,
-                history_window(&app.performance.cpu, sample_interval(app)),
-            ),
+        theme::gap(ui, chrome::SECTION_GAP);
+        widgets::section(ui, theme, "Logical processors");
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!(
+                    "{} logical processors · {} · nominal {} MHz · 0–100% per tile",
+                    system.cpu.logical_cores,
+                    core_summary(&system.cpu),
+                    system.cpu.megahertz,
+                ))
+                .small()
+                .color(theme::rgb(theme.text_muted)),
+            )
+            .wrap(),
         );
+        theme::gap(ui, SPACE_SM);
         // Measured here rather than at the end of the panel: the grid
         // below takes its own share of the remainder, so it is not one
         // of the things the remainder has to be spent on.
@@ -676,6 +648,7 @@ fn cpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
             grid,
             &app.performance.cores,
             &system.cpu.core_kinds,
+            sample_interval(app),
         );
     } else {
         record_below(ui, CPU, rect.bottom());
@@ -730,129 +703,81 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         ),
     );
 
-    let (rect, graph_response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), graph_height(ui, MEMORY)),
-        Sense::hover(),
-    );
-    graph::area(
+    let height = graph_height(ui, MEMORY);
+    let rect = graph::timeline(
         ui,
         theme,
-        rect,
-        &graph::Graph {
-            series: &app.performance.memory,
-            color: theme.series(1, 5),
-            floor: 100.0,
-            unit: graph::Unit::Percent,
+        height,
+        &graph::Timeline {
+            label: "Physical memory load history",
+            interval: sample_interval(app),
+            composition: graph::Composition::Independent,
+            lines: &[graph::TimelineLine {
+                label: "In use",
+                graph: graph::Graph {
+                    series: &app.performance.memory,
+                    color: theme.series(1, 5),
+                    floor: 100.0,
+                    unit: graph::Unit::Percent,
+                },
+            }],
         },
     );
-    graph_response.on_hover_text_at_pointer(format!(
-        "Memory load history\nCurrent {}\nRecent average {}\nRecent peak {}",
-        crate::format::percent(system.memory.used_percent()),
-        crate::format::percent(f64::from(app.performance.memory.mean())),
-        crate::format::percent(f64::from(app.performance.memory.max())),
-    ));
-    ui.add_space(SPACE_MD);
 
-    widgets::meter(
+    stats_group(
         ui,
         theme,
-        (system.memory.used_percent() / 100.0) as f32,
-        theme.series(1, 5),
+        "Physical memory",
+        &[
+            ("In use", crate::format::bytes(system.memory.used())),
+            ("Available", crate::format::bytes(system.memory.available)),
+            ("Cached", crate::format::bytes(system.memory.cached)),
+            ("Installed", crate::format::bytes(system.memory.total)),
+        ],
     );
-    ui.add_space(SPACE_MD);
-
-    ui.horizontal_top(|ui| {
-        let width = stat_column_width(ui.available_width(), 4);
-        stat_column(
-            ui,
-            theme,
-            width,
-            "In use",
-            &crate::format::bytes(system.memory.used()),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Available",
-            &crate::format::bytes(system.memory.available),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Committed",
-            &format!(
-                "{} / {}",
-                crate::format::bytes(system.memory.committed),
-                crate::format::bytes(system.memory.commit_limit)
+    stats_group(
+        ui,
+        theme,
+        "Load and history",
+        &[
+            (
+                "Physical load",
+                crate::format::percent(system.memory.used_percent()),
             ),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Cached",
-            &crate::format::bytes(system.memory.cached),
-        );
-    });
-    ui.add_space(SPACE_MD);
-    ui.horizontal_top(|ui| {
-        let width = stat_column_width(ui.available_width(), 4);
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Physical load",
-            &crate::format::percent(system.memory.used_percent()),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Commit load",
-            &crate::format::percent(crate::model::percent_of(
-                system.memory.committed,
-                system.memory.commit_limit,
-            )),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Average",
-            &crate::format::percent(f64::from(app.performance.memory.mean())),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Peak",
-            &crate::format::percent(f64::from(app.performance.memory.max())),
-        );
-    });
-    ui.add_space(chrome::SECTION_GAP);
-
-    widgets::section(ui, theme, "Kernel memory");
-    ui.horizontal_top(|ui| {
-        let width = stat_column_width(ui.available_width(), 4);
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Paged pool",
-            &crate::format::bytes(system.memory.paged_pool),
-        );
-        // The one number that diagnoses a driver leak — the leak that
-        // takes the whole machine down rather than a process.
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Non-paged pool",
-            &crate::format::bytes(system.memory.nonpaged_pool),
-        );
-    });
+            (
+                "Commit load",
+                crate::format::percent(crate::model::percent_of(
+                    system.memory.committed,
+                    system.memory.commit_limit,
+                )),
+            ),
+            (
+                "Window average",
+                crate::format::percent(app.performance.memory.mean().into()),
+            ),
+            (
+                "Window peak",
+                crate::format::percent(app.performance.memory.max().into()),
+            ),
+        ],
+    );
+    stats_group(
+        ui,
+        theme,
+        "Virtual and kernel memory",
+        &[
+            ("Committed", crate::format::bytes(system.memory.committed)),
+            (
+                "Commit limit",
+                crate::format::bytes(system.memory.commit_limit),
+            ),
+            ("Paged pool", crate::format::bytes(system.memory.paged_pool)),
+            (
+                "Non-paged pool",
+                crate::format::bytes(system.memory.nonpaged_pool),
+            ),
+        ],
+    );
     record_below(ui, MEMORY, rect.bottom());
 }
 
@@ -860,107 +785,65 @@ fn memory(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
 fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     widgets::section(ui, theme, "Disk");
 
-    let (rect, graph_response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), graph_height(ui, DISK)),
-        Sense::hover(),
-    );
-    // Read and write drawn separately, on one axis. The combined line
-    // this replaces answered "is the disk busy" and hid the only thing
-    // worth knowing about a busy one, which is which way the traffic is
-    // going: a machine paging is reading and a machine writing a backup
-    // is writing, and summed they are the same picture.
-    //
-    // Two ramp hues rather than a hue and a status colour, because
-    // neither direction is a state and neither is a share of the other —
-    // see `graph::layered`. Read keeps the panel's own hue so the
-    // picker's sparkline and the line it summarises are one colour.
-    graph::layered(
+    let height = graph_height(ui, DISK);
+    let rect = graph::timeline(
         ui,
         theme,
-        rect,
-        &[
-            graph::Graph {
-                series: &app.performance.disk_read,
-                color: theme.series(2, 5),
-                floor: 0.0,
-                unit: graph::Unit::Rate,
-            },
-            graph::Graph {
-                series: &app.performance.disk_write,
-                color: theme.series(4, 5),
-                floor: 0.0,
-                unit: graph::Unit::Rate,
-            },
-        ],
+        height,
+        &graph::Timeline {
+            label: "Physical disk throughput history",
+            interval: sample_interval(app),
+            composition: graph::Composition::Independent,
+            lines: &[
+                graph::TimelineLine {
+                    label: "Read",
+                    graph: graph::Graph {
+                        series: &app.performance.disk_read,
+                        color: theme.series(2, 5),
+                        floor: 0.0,
+                        unit: graph::Unit::Rate,
+                    },
+                },
+                graph::TimelineLine {
+                    label: "Write",
+                    graph: graph::Graph {
+                        series: &app.performance.disk_write,
+                        color: theme.series(4, 5),
+                        floor: 0.0,
+                        unit: graph::Unit::Rate,
+                    },
+                },
+            ],
+        },
     );
-    graph_response.on_hover_text_at_pointer(format!(
-        "Disk throughput history\nCurrent {}\nRecent average {}\nRecent peak {}",
-        crate::format::rate(app.performance.disk.latest().into()),
-        crate::format::rate(app.performance.disk.mean().into()),
-        crate::format::rate(app.performance.disk.max().into()),
-    ));
-    // The same gap the CPU panel leaves between a graph and its legend.
-    ui.add_space(SPACE_SM);
-
     let (read, write) = system.disks.iter().fold((0.0, 0.0), |(read, write), disk| {
         (read + disk.read_rate, write + disk.write_rate)
     });
-    ui.horizontal(|ui| {
-        graph::legend(
-            ui,
-            theme,
-            theme.series(2, 5),
-            "Read",
-            &crate::format::rate(read),
-        );
-        ui.add_space(SPACE_LG);
-        graph::legend(
-            ui,
-            theme,
-            theme.series(4, 5),
-            "Write",
-            &crate::format::rate(write),
-        );
-    });
-    ui.add_space(chrome::SECTION_GAP);
 
     let busiest = system
         .disks
         .iter()
         .map(|disk| disk.active_percent)
         .fold(0.0f64, f64::max);
-    ui.horizontal_top(|ui| {
-        let width = stat_column_width(ui.available_width(), 4);
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Current",
-            &crate::format::rate(read + write),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Average",
-            &crate::format::rate(app.performance.disk.mean().into()),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Peak",
-            &crate::format::rate(app.performance.disk.max().into()),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Busiest disk",
-            &crate::format::percent(busiest),
-        );
-    });
-    ui.add_space(chrome::SECTION_GAP);
+    stats_group(
+        ui,
+        theme,
+        "Combined disk activity",
+        &[
+            ("Current total", crate::format::rate(read + write)),
+            (
+                "Window average",
+                crate::format::rate(app.performance.disk.mean().into()),
+            ),
+            (
+                "Window peak",
+                crate::format::rate(app.performance.disk.max().into()),
+            ),
+            ("Busiest disk", crate::format::percent(busiest)),
+        ],
+    );
+    theme::gap(ui, chrome::SECTION_GAP);
+    widgets::section(ui, theme, "Physical disks");
 
     // `if`/`else` rather than an early return: the panel has to measure
     // itself on the way out of *either* branch, and a `return` above the
@@ -1010,14 +893,14 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
                     );
                 });
             });
-            ui.add_space(SPACE_XS);
+            theme::gap(ui, SPACE_XS);
             widgets::meter(
                 ui,
                 theme,
                 (disk.active_percent / 100.0) as f32,
                 theme.heat((disk.active_percent / 100.0) as f32),
             );
-            ui.add_space(SPACE_SM);
+            theme::gap(ui, SPACE_SM);
             ui.horizontal_top(|ui| {
                 let width = stat_column_width(ui.available_width(), 2);
                 stat_column(
@@ -1038,7 +921,7 @@ fn disk(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         });
     });
     if !system.volumes.is_empty() {
-        ui.add_space(SPACE_MD);
+        theme::gap(ui, SPACE_MD);
         ui.horizontal_wrapped(|ui| {
             for volume in &system.volumes {
                 let used = volume.capacity.saturating_sub(volume.free);
@@ -1103,7 +986,7 @@ fn network(app: &mut App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     let focused = selected.and_then(|luid| adapters.iter().find(|a| a.luid == luid));
 
     let graph = network_graph(app, ui, theme, system, focused);
-    ui.add_space(chrome::SECTION_GAP);
+    theme::gap(ui, chrome::SECTION_GAP);
 
     if adapters.is_empty() {
         widgets::empty_state(ui, theme, "This machine reports no network adapters");
@@ -1141,87 +1024,77 @@ fn network_graph(
     let send_color = theme.series(1, 5);
 
     let heading = focused.map_or_else(
-        || "Network · all adapters".to_string(),
+        || {
+            if system.adapters.iter().any(|adapter| adapter.hardware) {
+                "Network · hardware adapters".to_string()
+            } else {
+                "Network · all adapters".to_string()
+            }
+        },
         |adapter| format!("Network · {}", adapter.name),
     );
     widgets::section(ui, theme, &heading);
 
-    let (rect, graph_response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), graph_height(ui, NETWORK)),
-        Sense::hover(),
-    );
     let scoped = focused.and_then(|adapter| app.performance.adapters.get(&adapter.luid));
-    let series = scoped.unwrap_or(&app.performance.network);
-    match scoped {
-        // A per-adapter ring holds that adapter's combined throughput
-        // and nothing else, so there is no send band to draw under it.
-        Some(series) => graph::area(
-            ui,
-            theme,
-            rect,
-            &graph::Graph {
+    let empty = Series::new(app.performance.network.capacity());
+    let series = if focused.is_some() {
+        scoped.unwrap_or(&empty)
+    } else {
+        &app.performance.network
+    };
+    let lines = if focused.is_some() {
+        vec![graph::TimelineLine {
+            label: "Total",
+            graph: graph::Graph {
                 series,
                 color: receive_color,
                 floor: 0.0,
                 unit: graph::Unit::Rate,
             },
-        ),
-        None => graph::layered(
-            ui,
-            theme,
-            rect,
-            &[
-                graph::Graph {
+        }]
+    } else {
+        vec![
+            graph::TimelineLine {
+                label: "Receive",
+                graph: graph::Graph {
                     series: &app.performance.network_receive,
                     color: receive_color,
                     floor: 0.0,
                     unit: graph::Unit::Rate,
                 },
-                graph::Graph {
+            },
+            graph::TimelineLine {
+                label: "Send",
+                graph: graph::Graph {
                     series: &app.performance.network_send,
                     color: send_color,
                     floor: 0.0,
                     unit: graph::Unit::Rate,
                 },
-            ],
-        ),
-    }
-    graph_response.on_hover_text_at_pointer(format!(
-        "Network throughput history\nCurrent {}\nRecent average {}\nRecent peak {}",
-        crate::format::rate(series.latest().into()),
-        crate::format::rate(series.mean().into()),
-        crate::format::rate(series.max().into()),
-    ));
-    // The same gap the CPU panel leaves between its graph and its
-    // legend, because this is the same pairing.
-    ui.add_space(SPACE_SM);
-
+            },
+        ]
+    };
+    let height = graph_height(ui, NETWORK);
+    let rect = graph::timeline(
+        ui,
+        theme,
+        height,
+        &graph::Timeline {
+            label: "Network throughput history",
+            interval: sample_interval(app),
+            composition: graph::Composition::Independent,
+            lines: &lines,
+        },
+    );
     let (receive, send) = focused.map_or_else(
         || {
             (
-                system.network_rate() - system.network_send_rate(),
+                (system.network_rate() - system.network_send_rate()).max(0.0),
                 system.network_send_rate(),
             )
         },
         |adapter| (adapter.receive_rate, adapter.send_rate),
     );
-    ui.horizontal(|ui| {
-        // A per-adapter ring holds that adapter's combined throughput
-        // and nothing else, so a scoped graph is one line and its legend
-        // says what that line is rather than naming a direction the
-        // graph is not separating.
-        let (label, value) = if scoped.is_some() {
-            ("Total", receive + send)
-        } else {
-            ("Receive", receive)
-        };
-        graph::legend(ui, theme, receive_color, label, &crate::format::rate(value));
-        if scoped.is_none() {
-            ui.add_space(SPACE_LG);
-            graph::legend(ui, theme, send_color, "Send", &crate::format::rate(send));
-        }
-    });
-    ui.add_space(chrome::SECTION_GAP);
 
     // Cumulative counters, summed over whatever the graph is scoped to.
     // Not "since boot": Windows resets these when an adapter comes up,
@@ -1244,72 +1117,37 @@ fn network_graph(
         |adapter| (adapter.received_total, adapter.sent_total),
     );
 
-    ui.horizontal_top(|ui| {
-        let width = stat_column_width(ui.available_width(), 4);
-        stat_column(ui, theme, width, "Receive", &crate::format::rate(receive));
-        stat_column(ui, theme, width, "Send", &crate::format::rate(send));
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Average",
-            &crate::format::rate(f64::from(series.mean())),
-        );
-        // The peak over the window the graph draws, which is the context
-        // that makes the current number mean something: 1.3 MB/s is
-        // either busy or idle depending on what this link has been doing
-        // for the last minute, and the graph shows the shape of that
-        // without ever stating the figure.
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Peak",
-            &crate::format::rate(f64::from(series.max())),
-        );
-    });
-    ui.add_space(SPACE_MD);
-    ui.horizontal_top(|ui| {
-        let width = stat_column_width(ui.available_width(), 4);
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Total received",
-            &crate::format::bytes(in_total),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Total sent",
-            &crate::format::bytes(out_total),
-        );
-        if let Some(adapter) = focused {
-            stat_column(
-                ui,
-                theme,
-                width,
-                "Link speed",
-                &crate::format::link_speed(adapter.link_speed),
-            );
-            stat_column(ui, theme, width, "State", adapter.state.label());
-        } else {
-            let connected = system
+    stats_group(
+        ui,
+        theme,
+        "Traffic",
+        &[
+            ("Receiving", crate::format::rate(receive)),
+            ("Sending", crate::format::rate(send)),
+            ("Window average", crate::format::rate(series.mean().into())),
+            ("Window peak", crate::format::rate(series.max().into())),
+        ],
+    );
+    let mut counters = vec![
+        ("Total received", crate::format::bytes(in_total)),
+        ("Total sent", crate::format::bytes(out_total)),
+    ];
+    if let Some(adapter) = focused {
+        counters.push(("Link speed", crate::format::link_speed(adapter.link_speed)));
+        counters.push(("State", adapter.state.label().to_string()));
+    } else {
+        counters.push((
+            "Connected adapters",
+            system
                 .adapters
                 .iter()
                 .filter(|adapter| adapter.state.is_online())
-                .count();
-            stat_column(ui, theme, width, "Connected", &connected.to_string());
-            stat_column(
-                ui,
-                theme,
-                width,
-                "Adapters",
-                &system.adapters.len().to_string(),
-            );
-        }
-    });
+                .count()
+                .to_string(),
+        ));
+        counters.push(("All adapters", system.adapters.len().to_string()));
+    }
+    stats_group(ui, theme, "Adapter counters", &counters);
     // Handed back so `network` can measure the list it draws below it
     // against the graph's own extent.
     rect
@@ -1370,13 +1208,15 @@ fn adapter_list(
     }
 
     if !virtualised.is_empty() {
-        ui.add_space(SPACE_MD);
+        theme::gap(ui, SPACE_MD);
         let expanded = app.performance.network_virtual_expanded;
         let mut toggled = false;
         chrome::panel_card(ui, theme, |ui| {
             let header = ui.horizontal(|ui| {
-                widgets::disclosure(ui, theme, expanded, "network-virtual");
-                ui.add_space(SPACE_XS);
+                if widgets::disclosure(ui, theme, expanded, "network-virtual").clicked() {
+                    toggled = true;
+                }
+                theme::gap(ui, SPACE_XS);
                 ui.label(
                     egui::RichText::new(format!(
                         "{} virtual adapter{}",
@@ -1394,7 +1234,7 @@ fn adapter_list(
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         egui::RichText::new(crate::format::rate_or_dash(traffic))
-                            .color(theme::rgb(theme.text_faint))
+                            .color(theme::rgb(theme.text_muted))
                             .text_style(egui::TextStyle::Small),
                     );
                 });
@@ -1410,7 +1250,16 @@ fn adapter_list(
                     Sense::click(),
                 )
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
-            toggled = row.clicked();
+            row.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::CollapsingHeader,
+                    ui.is_enabled(),
+                    expanded,
+                    "Virtual adapters",
+                )
+            });
+            widgets::focus_ring(ui, theme, &row);
+            toggled |= row.clicked();
 
             if expanded {
                 for adapter in &virtualised {
@@ -1478,6 +1327,14 @@ fn adapter_row(
 ) -> bool {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), ADAPTER_ROW), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            selected,
+            &adapter.name,
+        )
+    });
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
     // Keyed on the adapter, not on the row's position in the list. An id
@@ -1485,7 +1342,7 @@ fn adapter_row(
     // appearing above another one hands its hover state to whatever now
     // sits where it did.
     let id = ui.id().with(("adapter", adapter.luid));
-    let fill = widgets::selection_fill(ui, theme, id, selected, response.hovered(), theme.raised);
+    let fill = widgets::selectable_surface(ui, theme, id, &response, selected, theme.raised);
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(theme::RADIUS), fill);
     if selected {
@@ -1565,10 +1422,10 @@ fn adapter_row(
             ui,
             &subtitle,
             egui::TextStyle::Small.resolve(ui.style()),
-            theme.text_faint,
+            theme.text_muted,
             name_width,
         ),
-        theme::rgb(theme.text_faint),
+        theme::rgb(theme.text_muted),
     );
 
     // The rate when there is one to show, and the reason there is not
@@ -1600,7 +1457,7 @@ fn adapter_row(
             egui::Align2::RIGHT_BOTTOM,
             crate::format::link_speed(adapter.link_speed),
             egui::TextStyle::Small.resolve(ui.style()),
-            theme::rgb(theme.text_faint),
+            theme::rgb(theme.text_muted),
         );
     }
 
@@ -1620,6 +1477,7 @@ fn adapter_row(
         crate::format::bytes(adapter.received_total),
         crate::format::bytes(adapter.sent_total),
     ));
+    widgets::focus_ring(ui, theme, &response);
     response.clicked()
 }
 
@@ -1637,7 +1495,7 @@ fn state_color(theme: &Palette, state: crate::model::AdapterState) -> crate::col
         | crate::model::AdapterState::Disconnected
         | crate::model::AdapterState::LowerLayerDown => theme.warning,
         crate::model::AdapterState::Disabled | crate::model::AdapterState::NotPresent => {
-            theme.text_faint
+            theme.text_muted
         }
     }
 }
@@ -1689,32 +1547,30 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     names.dedup();
     let heading_names_the_adapter = names.len() == 1;
     match names.as_slice() {
-        [only] => widgets::section(ui, theme, only),
+        [only] if !only.trim().is_empty() => widgets::section(ui, theme, only),
         _ => widgets::section(ui, theme, "GPU"),
     }
 
-    let (rect, graph_response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), graph_height(ui, GPU)),
-        Sense::hover(),
-    );
-    graph::area(
+    let height = graph_height(ui, GPU);
+    let rect = graph::timeline(
         ui,
         theme,
-        rect,
-        &graph::Graph {
-            series: &app.performance.gpu,
-            color: theme.series(4, 5),
-            floor: 100.0,
-            unit: graph::Unit::Percent,
+        height,
+        &graph::Timeline {
+            label: "GPU utilisation history",
+            interval: sample_interval(app),
+            composition: graph::Composition::Independent,
+            lines: &[graph::TimelineLine {
+                label: "Busiest engine",
+                graph: graph::Graph {
+                    series: &app.performance.gpu,
+                    color: theme.series(4, 5),
+                    floor: 100.0,
+                    unit: graph::Unit::Percent,
+                },
+            }],
         },
     );
-    graph_response.on_hover_text_at_pointer(format!(
-        "GPU utilisation history\nCurrent {}\nRecent average {}\nRecent peak {}",
-        crate::format::percent(f64::from(app.performance.gpu.latest())),
-        crate::format::percent(f64::from(app.performance.gpu.mean())),
-        crate::format::percent(f64::from(app.performance.gpu.max())),
-    ));
-    ui.add_space(SPACE_MD);
 
     if system.gpus.is_empty() {
         widgets::empty_state(
@@ -1725,129 +1581,304 @@ fn gpu(app: &App, ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         record_below(ui, GPU, rect.bottom());
         return;
     }
-    let dedicated: u64 = system.gpus.iter().map(|gpu| gpu.memory_used).sum();
-    ui.horizontal_top(|ui| {
-        let width = stat_column_width(ui.available_width(), 4);
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Current",
-            &crate::format::percent(f64::from(app.performance.gpu.latest())),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Average",
-            &crate::format::percent(f64::from(app.performance.gpu.mean())),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Peak",
-            &crate::format::percent(f64::from(app.performance.gpu.max())),
-        );
-        stat_column(
-            ui,
-            theme,
-            width,
-            "Dedicated",
-            &crate::format::bytes(dedicated),
-        );
-    });
-    ui.add_space(chrome::SECTION_GAP);
-    // Busiest first, same reasoning as the disk grid above: on a hybrid-
-    // graphics laptop the integrated adapter usually sits idle and the
-    // discrete one is doing the work, and the panel should lead with
-    // whichever one that is rather than the enumeration order.
-    let mut gpus = system.gpus.clone();
-    sort_busiest_first(&mut gpus, |gpu| gpu.utilisation, |gpu| gpu.name.as_str());
-    widgets::card_grid(ui, DEVICE_CARD_WIDTH, gpus.len(), |ui, card| {
-        let Some(adapter) = gpus.get(card) else {
-            return;
-        };
-        chrome::panel_card(ui, theme, |ui| {
-            // The card names itself only when the heading cannot. With a
-            // single adapter the panel heading already carries the name,
-            // and repeating it two lines below is the kind of duplication
-            // that reads as a layout mistake rather than as emphasis.
-            if !heading_names_the_adapter {
-                ui.label(
-                    egui::RichText::new(&adapter.name)
-                        .color(theme::rgb(theme.text))
-                        .strong(),
-                );
-                ui.add_space(SPACE_XS);
+    let busiest = system
+        .gpus
+        .iter()
+        .flat_map(|gpu| &gpu.engines)
+        .max_by(|a, b| a.1.total_cmp(&b.1));
+    let busy_type = busiest.filter(|(_, value)| *value > 0.0).map_or_else(
+        || "Idle".to_string(),
+        |(name, _)| engine_family(name).to_string(),
+    );
+    stats_group(
+        ui,
+        theme,
+        "GPU activity",
+        &[
+            (
+                "Current",
+                crate::format::percent(app.performance.gpu.latest().into()),
+            ),
+            (
+                "Window average",
+                crate::format::percent(app.performance.gpu.mean().into()),
+            ),
+            (
+                "Window peak",
+                crate::format::percent(app.performance.gpu.max().into()),
+            ),
+            ("Busiest engine", busy_type),
+        ],
+    );
+    let mut groups: std::collections::BTreeMap<&str, Vec<&crate::model::GpuSample>> =
+        std::collections::BTreeMap::new();
+    for adapter in &system.gpus {
+        groups.entry(&adapter.name).or_default().push(adapter);
+    }
+    for (name, mut adapters) in groups {
+        adapters.sort_by(|a, b| a.luid.cmp(&b.luid));
+        theme::gap(ui, chrome::SECTION_GAP);
+        ui.push_id(("gpu-model", name), |ui| {
+            if !heading_names_the_adapter { widgets::section(ui, theme, name); }
+            if adapters.len() > 1 {
+                ui.add(egui::Label::new(egui::RichText::new(format!("{} reported adapters share this name. Activity shows the busiest engine; memory stays separate.", adapters.len())).small().color(theme::rgb(theme.text_muted))).wrap());
+                theme::gap(ui, SPACE_MD);
             }
-            // Per engine, because the busiest engine is the headline and
-            // *which* engine is busy is the diagnosis: a machine at 100%
-            // video-decode is playing a video, and one at 100% 3D is
-            // rendering.
-            for (index, (engine, value)) in adapter.engines.iter().enumerate() {
-                graph::legend(
-                    ui,
-                    theme,
-                    theme.series(index, adapter.engines.len().max(1)),
-                    engine,
-                    &crate::format::percent(*value),
-                );
-            }
-            if adapter.memory_used > 0 {
-                ui.add_space(SPACE_XS);
-                // Against the adapter's capacity when the registry gave
-                // one. "2.10 GB" answers less than "2.10 GB / 8.00 GB"
-                // does: the first is a quantity, the second is a
-                // fraction, and a fraction is the thing anybody looking
-                // at a memory readout is actually after.
-                let dedicated = if adapter.memory_total > 0 {
-                    format!(
-                        "{} / {}",
-                        crate::format::bytes(adapter.memory_used),
-                        crate::format::bytes(adapter.memory_total)
-                    )
-                } else {
-                    crate::format::bytes(adapter.memory_used)
-                };
-                stat_column(
-                    ui,
-                    theme,
-                    stat_column_width(ui.available_width(), 1),
-                    "Dedicated",
-                    &dedicated,
-                );
+            if ui.available_width() >= 600.0 {
+                let width = (ui.available_width() - theme::PANE_GUTTER) / 2.0;
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::PANE_GUTTER;
+                    ui.allocate_ui_with_layout(Vec2::new(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.set_width(width);
+                        gpu_engines(ui, theme, &adapters);
+                    });
+                    ui.allocate_ui_with_layout(Vec2::new(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.set_width(width);
+                        gpu_memory(ui, theme, &adapters);
+                    });
+                });
+            } else {
+                gpu_engines(ui, theme, &adapters);
+                theme::gap(ui, chrome::SECTION_GAP);
+                gpu_memory(ui, theme, &adapters);
             }
         });
-    });
+    }
     record_below(ui, GPU, rect.bottom());
 }
 
-/// The width [`stat_column`] gives each of a row's columns.
-///
-/// `columns` is how many the *row* divides into, which is not always how
-/// many it draws. The five Performance panels' own full-width rows all
-/// pass four whatever they hold, because that is what lines a
-/// three-column row up with the four-column one above it — the panel is
-/// one grid and a row that filled its own width would put its second
-/// caption where the row above put its third.
-///
-/// A **card's** internal row is a different grid. It has no neighbour
-/// above to line up with and about a quarter of the width, so dividing
-/// its three columns by four gave each of them 120 points for a pair
-/// like `"97.1 GB / 932 GB"` that needs 150 — and the pair wrapped onto
-/// a second line, which is the one thing the card's width was chosen to
-/// prevent.
-///
-/// Callers must measure `available` **once**, before the row's first
-/// [`stat_column`] call, and pass the same value to every column in that
-/// row. Reading `ui.available_width()` freshly inside `stat_column`
-/// itself was the bug this exists to prevent: `ui.horizontal`'s own
-/// available width shrinks as each sibling is allocated, so a column
-/// computed after its neighbours already claimed space is a share of
-/// what was left rather than a share of the row — four calls in a row
-/// then produce four different widths, shrinking geometrically instead
-/// of matching.
+fn gpu_engines(ui: &mut Ui, theme: &Palette, adapters: &[&crate::model::GpuSample]) {
+    widgets::section(ui, theme, "Engine activity");
+    let groups = engine_groups(adapters);
+    if groups.is_empty() {
+        widgets::empty_note(ui, theme, "No per-engine counters reported");
+    }
+    for (family, value, count) in groups {
+        engine_activity(ui, theme, family, value, count);
+    }
+    theme::gap(ui, SPACE_MD);
+    let count: usize = adapters.iter().map(|adapter| adapter.engines.len()).sum();
+    egui::CollapsingHeader::new(format!("Raw engine counters ({count})"))
+        .id_salt("raw-engine-counters")
+        .show(ui, |ui| {
+            for (index, adapter) in adapters.iter().enumerate() {
+                if adapters.len() > 1 {
+                    ui.label(format!("Adapter {} · {}", index + 1, adapter.luid));
+                }
+                for (label, value) in &adapter.engines {
+                    raw_engine(ui, theme, label, *value);
+                }
+            }
+        });
+}
+
+fn gpu_memory(ui: &mut Ui, theme: &Palette, adapters: &[&crate::model::GpuSample]) {
+    widgets::section(ui, theme, "Dedicated video memory");
+    for (index, adapter) in adapters.iter().enumerate() {
+        if index > 0 {
+            theme::gap(ui, SPACE_MD);
+        }
+        if adapters.len() > 1 {
+            ui.label(
+                egui::RichText::new(format!("Reported adapter {}", index + 1))
+                    .small()
+                    .color(theme::rgb(theme.text_muted)),
+            )
+            .on_hover_text(&adapter.luid);
+        }
+        let memory = if adapter.memory_total > 0 {
+            vec![
+                ("In use", crate::format::bytes(adapter.memory_used)),
+                ("Capacity", crate::format::bytes(adapter.memory_total)),
+                (
+                    "Available",
+                    crate::format::bytes(adapter.memory_total.saturating_sub(adapter.memory_used)),
+                ),
+            ]
+        } else {
+            vec![
+                ("In use", crate::format::bytes(adapter.memory_used)),
+                ("Capacity", "Not reported".to_string()),
+            ]
+        };
+        stats_grid(ui, theme, &memory);
+        if adapter.memory_total > 0 {
+            theme::gap(ui, SPACE_SM);
+            widgets::meter(
+                ui,
+                theme,
+                (adapter.memory_used as f32 / adapter.memory_total as f32).clamp(0.0, 1.0),
+                theme.series(4, 5),
+            );
+        }
+    }
+}
+
+/// Readouts grouped by the question they answer, with the same adaptive grid everywhere.
+fn stats_group(ui: &mut Ui, theme: &Palette, title: &str, stats: &[(&str, String)]) {
+    theme::gap(ui, chrome::SECTION_GAP);
+    widgets::section(ui, theme, title);
+    stats_grid(ui, theme, stats);
+}
+
+fn stats_grid(ui: &mut Ui, theme: &Palette, stats: &[(&str, String)]) {
+    const MIN_WIDTH: f32 = 132.0;
+    let columns =
+        (((ui.available_width() + SPACE_SM) / (MIN_WIDTH + SPACE_SM)).floor() as usize).clamp(1, 4);
+    let width = stat_column_width(ui.available_width(), columns);
+    for (index, row) in stats.chunks(columns).enumerate() {
+        if index > 0 {
+            theme::gap(ui, SPACE_MD);
+        }
+        ui.horizontal_top(|ui| {
+            // Nested section layouts may use a wider pane gutter. Readout
+            // widths are calculated with the shared control spacing below.
+            ui.spacing_mut().item_spacing.x = SPACE_SM;
+            for (label, value) in row {
+                stat_column(ui, theme, width, label, value);
+            }
+        });
+    }
+}
+
+/// Driver engine numbers identify counters, not useful top-level tasks.
+fn engine_family(name: &str) -> &'static str {
+    let name = name
+        .split('·')
+        .next()
+        .unwrap_or(name)
+        .trim()
+        .to_ascii_lowercase();
+    if name.contains("decode") {
+        "Video decode"
+    } else if name.contains("encode") {
+        "Video encode"
+    } else if name.contains("3d") {
+        "3D"
+    } else if name.contains("compute") {
+        "Compute"
+    } else if name.contains("copy") {
+        "Copy"
+    } else if name.contains("video") {
+        "Video processing"
+    } else {
+        "Other"
+    }
+}
+
+fn engine_groups(adapters: &[&crate::model::GpuSample]) -> Vec<(&'static str, f64, usize)> {
+    let mut groups: std::collections::BTreeMap<&str, (f64, usize)> =
+        std::collections::BTreeMap::new();
+    for adapter in adapters {
+        for (name, value) in &adapter.engines {
+            let group = groups.entry(engine_family(name)).or_default();
+            if value.is_finite() {
+                group.0 = group.0.max(*value).clamp(0.0, 100.0);
+            }
+            group.1 += 1;
+        }
+    }
+    [
+        "3D",
+        "Compute",
+        "Copy",
+        "Video decode",
+        "Video encode",
+        "Video processing",
+        "Other",
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        groups
+            .get(name)
+            .map(|(value, count)| (name, *value, *count))
+    })
+    .collect()
+}
+
+fn engine_activity(ui: &mut Ui, theme: &Palette, family: &str, value: f64, counters: usize) {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), theme::CONTROL_HEIGHT),
+        Sense::hover(),
+    );
+    let label_width = 104.0f32.min(rect.width() / 2.0);
+    let value_width = 64.0;
+    ui.painter().text(
+        rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        family,
+        egui::TextStyle::Body.resolve(ui.style()),
+        theme::rgb(theme.text),
+    );
+    ui.painter().text(
+        rect.right_center(),
+        egui::Align2::RIGHT_CENTER,
+        crate::format::percent(value),
+        egui::TextStyle::Monospace.resolve(ui.style()),
+        theme::rgb(theme.text),
+    );
+    let bar = Rect::from_center_size(
+        egui::pos2(
+            (rect.left() + label_width + rect.right() - value_width) / 2.0,
+            rect.center().y,
+        ),
+        Vec2::new(
+            (rect.width() - label_width - value_width).max(0.0),
+            SPACE_SM,
+        ),
+    );
+    ui.painter()
+        .rect_filled(bar, egui::CornerRadius::same(2), theme::rgb(theme.raised));
+    if value > 0.0 {
+        let fill = Rect::from_min_size(
+            bar.min,
+            Vec2::new(bar.width() * (value as f32 / 100.0), bar.height()),
+        );
+        ui.painter().rect_filled(
+            fill,
+            egui::CornerRadius::same(2),
+            theme::rgb(theme.series(4, 5)),
+        );
+    }
+    response.on_hover_text(format!("{family}: {}. Busiest of {counters} reported engine counters; parallel counters are not added.", crate::format::percent(value)));
+}
+
+fn raw_engine(ui: &mut Ui, theme: &Palette, label: &str, value: f64) {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), theme::ROW_HEIGHT),
+        Sense::hover(),
+    );
+    let value = ui.painter().layout_no_wrap(
+        crate::format::percent(value),
+        egui::TextStyle::Monospace.resolve(ui.style()),
+        theme::rgb(theme.text),
+    );
+    let label_galley = widgets::truncated(
+        ui,
+        label,
+        egui::TextStyle::Small.resolve(ui.style()),
+        theme.text_muted,
+        rect.width() - value.size().x - SPACE_SM,
+    );
+    ui.painter().galley(
+        egui::pos2(rect.left(), rect.center().y - label_galley.size().y / 2.0),
+        label_galley,
+        theme::rgb(theme.text_muted),
+    );
+    ui.painter().galley(
+        egui::pos2(
+            rect.right() - value.size().x,
+            rect.center().y - value.size().y / 2.0,
+        ),
+        value,
+        theme::rgb(theme.text),
+    );
+    response.on_hover_text(label);
+}
+
+/// Equal column widths for one readout row, after its shared gaps.
+/// Main statistics choose their column count from the pane width;
+/// device-card rows pass their own count without shrinking later siblings.
 #[must_use]
 fn stat_column_width(available: f32, columns: usize) -> f32 {
     // `n` columns is `n - 1` gaps between them, and `theme::apply` sets
@@ -1891,7 +1922,7 @@ fn stat_column(ui: &mut Ui, theme: &Palette, width: f32, caption: &str, value: &
             ui.label(
                 egui::RichText::new(value)
                     .color(theme::rgb(theme.text))
-                    .text_style(egui::TextStyle::Monospace),
+                    .font(theme::metric_font(ui)),
             );
         },
     )
@@ -1900,6 +1931,239 @@ fn stat_column(ui: &mut Ui, theme: &Palette, width: f32, caption: &str, value: &
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nested_memory_readouts_do_not_inherit_the_pane_gutter() -> anyhow::Result<()> {
+        let ctx = egui::Context::default();
+        let app = App::new(crate::config::Config::default());
+        theme::apply(&ctx, &app.theme);
+        let mut drawn = None;
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            let pane = Rect::from_min_size(ui.cursor().min, Vec2::new(522.0, 400.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
+                ui.spacing_mut().item_spacing.x = theme::PANE_GUTTER;
+                let adapter = crate::model::GpuSample {
+                    memory_used: 1_460_000_000,
+                    memory_total: 8 * 1024 * 1024 * 1024,
+                    ..Default::default()
+                };
+                gpu_memory(ui, &app.theme, &[&adapter, &adapter]);
+                drawn = Some(ui.min_rect());
+            });
+        });
+        output.textures_delta.clear();
+        let drawn = drawn.ok_or_else(|| anyhow::anyhow!("memory readouts drew nothing"))?;
+        assert!(
+            drawn.width() <= 522.5,
+            "memory readouts expanded to {}",
+            drawn.width()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn short_network_inventory_only_scrolls_when_its_content_exceeds_the_pane() -> anyhow::Result<()>
+    {
+        use crate::model::{AdapterKind, AdapterSample, AdapterState};
+        for size in [
+            Vec2::new(1180.0, 800.0),
+            Vec2::new(1480.0, 800.0),
+            Vec2::new(1440.0, 900.0),
+        ] {
+            let ctx = egui::Context::default();
+            crate::gui::font::install(&ctx, crate::gui::DEFAULT_FAMILY);
+            let mut app = App::new(crate::config::Config::default());
+            app.performance.focus = PerformanceFocus::Network;
+            for _ in 0..240 {
+                app.performance.network.push(4096.0);
+                app.performance.network_receive.push(3584.0);
+                app.performance.network_send.push(512.0);
+            }
+            let mut adapters = vec![
+                AdapterSample {
+                    name: "Ethernet".into(),
+                    hardware: true,
+                    kind: AdapterKind::Ethernet,
+                    state: AdapterState::Disconnected,
+                    ..Default::default()
+                },
+                AdapterSample {
+                    name: "Wi-Fi".into(),
+                    hardware: true,
+                    kind: AdapterKind::WiFi,
+                    state: AdapterState::Up,
+                    receive_rate: 3584.0,
+                    send_rate: 512.0,
+                    ..Default::default()
+                },
+            ];
+            adapters.extend((0..17).map(|index| AdapterSample {
+                name: format!("Virtual {index}"),
+                luid: index + 2,
+                kind: AdapterKind::Virtual,
+                ..Default::default()
+            }));
+            let snapshot = Snapshot {
+                system: SystemSample {
+                    adapters,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let theme = app.theme.clone();
+            theme::apply(&ctx, &theme);
+            let mut metrics = None;
+            for _ in 0..4 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let pane = Rect::from_min_max(
+                            egui::pos2(344.0, 40.0),
+                            egui::pos2(size.x - 12.0, size.y - 46.0),
+                        );
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
+                            let output = detail_scroll(&mut app, ui, &theme, &snapshot);
+                            metrics = Some((output.content_size.y, output.inner_rect.height()));
+                        });
+                    },
+                );
+                output.textures_delta.clear();
+            }
+            let (content, viewport) =
+                metrics.ok_or_else(|| anyhow::anyhow!("no scroll metrics"))?;
+            assert!(content <= viewport + 0.5, "at {size:?}, content {content} exceeds viewport {viewport} by {} despite a short inventory", content - viewport);
+
+            app.performance.network_virtual_expanded = true;
+            let mut expanded_content = 0.0;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| {
+                    let pane = Rect::from_min_max(
+                        egui::pos2(344.0, 40.0),
+                        egui::pos2(size.x - 12.0, size.y - 46.0),
+                    );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
+                        expanded_content = detail_scroll(&mut app, ui, &theme, &snapshot)
+                            .content_size
+                            .y;
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            assert!(
+                expanded_content > viewport,
+                "expanded adapter details must remain scrollable"
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn gpu_engine_groups_collapse_driver_numbers_without_summing_parallel_engines() {
+        let first = crate::model::GpuSample {
+            engines: vec![
+                ("3D · 0:0".into(), 35.0),
+                ("3D · 0:1".into(), 40.0),
+                ("Compute 0 · 0:6".into(), 70.0),
+                ("VideoDecode · 0:11".into(), 12.0),
+            ],
+            ..Default::default()
+        };
+        let second = crate::model::GpuSample {
+            engines: vec![
+                ("High Priority 3D · 0:2".into(), 20.0),
+                ("Compute 1 · 0:7".into(), 10.0),
+                ("True Audio · 0:3".into(), 0.0),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            engine_groups(&[&first, &second]),
+            vec![
+                ("3D", 40.0, 3),
+                ("Compute", 70.0, 2),
+                ("Video decode", 12.0, 1),
+                ("Other", 0.0, 1),
+            ]
+        );
+    }
+    #[test]
+    fn resource_summaries_distinguish_unavailable_data_from_zero_usage() {
+        let summaries = picker_summaries(&SystemSample::default());
+        for summary in summaries.iter().skip(1) {
+            assert_eq!(
+                summary.value,
+                crate::format::DASH,
+                "missing {:?} data must not look like zero activity",
+                summary.focus
+            );
+            assert!(!summary.context.is_empty() && !summary.detail.is_empty());
+        }
+        let system = SystemSample {
+            memory: crate::model::MemorySample {
+                total: 8 * 1024 * 1024 * 1024,
+                available: 8 * 1024 * 1024 * 1024,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            picker_summaries(&system)[1].value,
+            "0%",
+            "a valid idle reading remains zero"
+        );
+    }
+
+    #[test]
+    fn network_card_details_use_the_same_adapters_as_the_headline() {
+        use crate::model::{AdapterSample, AdapterState};
+        let system = SystemSample {
+            adapters: vec![
+                AdapterSample {
+                    hardware: true,
+                    state: AdapterState::Up,
+                    receive_rate: 2048.0,
+                    send_rate: 1024.0,
+                    ..Default::default()
+                },
+                AdapterSample {
+                    hardware: false,
+                    state: AdapterState::Up,
+                    receive_rate: 100_000_000.0,
+                    send_rate: 50_000_000.0,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let summaries = picker_summaries(&system);
+        let network = &summaries[3];
+        assert_eq!(network.value, crate::format::rate(3072.0));
+        assert_eq!(network.context, "1 connected adapter");
+        assert_eq!(
+            network.detail,
+            format!(
+                "Rx {} · Tx {}",
+                crate::format::rate(2048.0),
+                crate::format::rate(1024.0)
+            ),
+            "virtual traffic must not be counted again in the supporting readings"
+        );
+        let guest = SystemSample {
+            adapters: vec![system.adapters[1].clone()],
+            ..Default::default()
+        };
+        assert_eq!(
+            picker_summaries(&guest)[3].value,
+            crate::format::rate(150_000_000.0),
+            "virtual-only guests keep their real traffic"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -2054,19 +2318,8 @@ mod tests {
 
     #[test]
     fn the_picker_leaves_a_real_margin_before_the_detail_column() -> anyhow::Result<()> {
-        // The picker panel's own frame carries zero margin by design —
-        // its rows are meant to fill it edge to edge on three sides —
-        // but the fourth side, the seam with the detail column, needs
-        // its own margin rather than leaning entirely on the gap
-        // `draw()` adds after the panel.
-        //
-        // Calls the real `picker()` directly on a `Ui` sized to the real
-        // `PICKER_WIDTH`, using its own return value for the content's
-        // extent: a `Panel::left` built with `.exact_size(PICKER_WIDTH)`
-        // is exactly that size regardless of what is drawn inside it, so
-        // `min_rect()` read from *outside* the panel reports the panel's
-        // fixed shape rather than its content's, and would pass even
-        // with the bug this guards against.
+        // Measure actual card content, not the enclosing pane's width:
+        // the shared scroll body must retain clearance on its trailing edge.
         let window =
             Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(PICKER_WIDTH, PICKER_ROW * 6.0));
         let mut app = App::new(crate::config::Config::default());
@@ -2096,22 +2349,8 @@ mod tests {
 
     #[test]
     fn the_gap_between_the_picker_and_the_detail_column_is_a_real_gap() -> anyhow::Result<()> {
-        // The picker's own content and the detail column's own content
-        // can each have correct internal margins and the seam between
-        // them still read as touching, because that seam is a *third*,
-        // separate gap — `draw()`'s own `add_space` between the two —
-        // and nothing checks it just because the two columns either
-        // side of it are individually fine.
-        //
-        // Replicates `draw()`'s own structure (the picker panel, the
-        // gap, `detail()`) rather than calling `draw()` itself: `draw()`
-        // returns nothing, and the picker panel and `detail()` both
-        // draw into the same outer `Ui`, so a plain `ui.min_rect()`
-        // after both have run would report their *union* — extending
-        // back to the picker panel's own left edge — not the gap
-        // between them specifically. Both functions returning their own
-        // content rect (see their docs) is what makes that gap
-        // measurable at all.
+        // Measure both panes through their real shared splitter. Independent
+        // scope IDs keep scroll state separate while the gutter stays usable.
         let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1024.0, 768.0));
         let mut app = App::new(crate::config::Config::default());
         let theme = app.theme.clone();
@@ -2128,11 +2367,23 @@ mod tests {
             egui::CentralPanel::default()
                 .frame(theme::content(&theme))
                 .show(ui, |ui| {
-                    picker_panel().show(ui, |ui| {
-                        picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
-                    });
-                    gutter_panel().show(ui, |_| {});
-                    detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
+                    let (main, secondary) = panes(&mut app, ui, &theme);
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt("performance-secondary")
+                            .max_rect(secondary),
+                        |ui| {
+                            picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
+                        },
+                    );
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt("performance-main")
+                            .max_rect(main),
+                        |ui| {
+                            detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
+                        },
+                    );
                 });
         });
         output.textures_delta.clear();
@@ -2149,22 +2400,9 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_detail_seam_draws_no_separator_line_at_all() -> anyhow::Result<()> {
-        // Both panels that meet at this seam are `Panel::left`, and a
-        // `Panel::left` draws a separator line by default. Two of them a
-        // few points apart read as one doubled border hugging whichever
-        // column is on the near side — not as a gap — so the spacer's
-        // was turned off first.
-        //
-        // The remaining one was still wrong, and was reported as such:
-        // a line the pointer could grab, on a panel pinned by
-        // `exact_size` that could never move. The gutter between the two
-        // columns *is* the separation; a rule drawn inside it is a
-        // second boundary a few points from the first.
-        //
-        // A rect check cannot see any of this — neither panel's content
-        // rect moves — so it is verified against what actually gets
-        // painted at the seam.
+    fn the_picker_detail_seam_has_no_full_height_rule_at_rest() -> anyhow::Result<()> {
+        // A short grip advertises the real divider at rest; the full-height
+        // line appears only during hover, drag, or keyboard focus.
         let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1024.0, 768.0));
         let mut app = App::new(crate::config::Config::default());
         let theme = app.theme.clone();
@@ -2181,11 +2419,23 @@ mod tests {
             egui::CentralPanel::default()
                 .frame(theme::content(&theme))
                 .show(ui, |ui| {
-                    picker_panel().show(ui, |ui| {
-                        picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
-                    });
-                    gutter_panel().show(ui, |_| {});
-                    detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
+                    let (main, secondary) = panes(&mut app, ui, &theme);
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt("performance-secondary")
+                            .max_rect(secondary),
+                        |ui| {
+                            picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
+                        },
+                    );
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt("performance-main")
+                            .max_rect(main),
+                        |ui| {
+                            detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
+                        },
+                    );
                 });
         });
         output.textures_delta.clear();
@@ -2219,7 +2469,7 @@ mod tests {
 
         assert_eq!(
             seam_lines, 0,
-            "the picker/detail seam is a gutter, not a border: expected no              separator line drawn in it, found {seam_lines}"
+            "expected no full-height divider at rest, found {seam_lines}"
         );
         Ok(())
     }
@@ -2328,8 +2578,8 @@ mod tests {
         // Every other layout test in this file uses a comfortable
         // 1024x768 window. The app can be dragged down to
         // `gui::MIN_SIZE` — 780x480 — and nothing here has ever been
-        // measured at that size: the picker's fixed 200 points, the
-        // gap's fixed 20, and the nav rail's fixed 168 are all width the
+        // measured at that size: the picker's default width, the
+        // shared pane gutter, and the expanded navigation rail are all width the
         // detail column does not get to negotiate away, and a window
         // this narrow is exactly where a margin that looks fine at
         // 1024 quietly turns negative.
@@ -2380,11 +2630,23 @@ mod tests {
             egui::CentralPanel::default()
                 .frame(theme::content(&theme))
                 .show(ui, |ui| {
-                    picker_panel().show(ui, |ui| {
-                        picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
-                    });
-                    gutter_panel().show(ui, |_| {});
-                    detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
+                    let (main, secondary) = panes(&mut app, ui, &theme);
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt("performance-secondary")
+                            .max_rect(secondary),
+                        |ui| {
+                            picker_rect = Some(picker(&mut app, ui, &theme, &snapshot));
+                        },
+                    );
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt("performance-main")
+                            .max_rect(main),
+                        |ui| {
+                            detail_rect = Some(detail(&mut app, ui, &theme, &snapshot));
+                        },
+                    );
                 });
         });
         output.textures_delta.clear();
@@ -2618,9 +2880,9 @@ mod tests {
 
     #[test]
     fn the_picker_is_wide_enough_for_a_readable_sparkline() {
-        // The sparkline gets the right 55% less a gap; under about 80
-        // points there is no shape to read.
-        let spark = PICKER_WIDTH * 0.55 - SPACE_SM;
+        // The chart fills its own line inside the row's two insets and
+        // the picker's trailing margin; under 80 points it loses its shape.
+        let spark = PICKER_WIDTH - SPACE_MD * 3.0;
         assert!(
             spark >= 80.0,
             "a {spark}-point sparkline is too small to read a shape from"

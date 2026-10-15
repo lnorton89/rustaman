@@ -23,7 +23,7 @@
 //! the one thing a graph must never do. See
 //! [`crate::gui::app::App::reset_history`].
 
-use super::theme::{self, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS};
+use super::theme::{self, SPACE_LG, SPACE_MD, SPACE_SM};
 use super::{chrome, widgets};
 use crate::gui::app::App;
 use crate::theme::Palette;
@@ -35,23 +35,15 @@ const SWATCH: f32 = 14.0;
 /// Draws the Settings view.
 pub fn draw(app: &mut App, ui: &mut Ui) {
     let theme = app.theme.clone();
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // Clearance before the scrollbar, as in the Performance,
-            // Memory and System panes. The theme cards run the full
-            // width here, so without it every one of them ends flush
-            // against the scrollbar's lane.
-            let width = (ui.available_width() - SPACE_MD).max(0.0);
-            ui.set_max_width(width);
-            appearance(app, ui, &theme);
-            ui.add_space(chrome::SECTION_GAP);
-            sampling(app, ui, &theme);
-            ui.add_space(chrome::SECTION_GAP);
-            behaviour(app, ui, &theme);
-            ui.add_space(chrome::SECTION_GAP);
-            about(app, ui, &theme);
-        });
+    widgets::scroll_body(ui, |ui| {
+        appearance(app, ui, &theme);
+        theme::gap(ui, chrome::SECTION_GAP);
+        sampling(app, ui, &theme);
+        theme::gap(ui, chrome::SECTION_GAP);
+        behaviour(app, ui, &theme);
+        theme::gap(ui, chrome::SECTION_GAP);
+        about(app, ui, &theme);
+    });
 }
 
 /// The theme picker and the chrome switch.
@@ -84,13 +76,13 @@ fn appearance(app: &mut App, ui: &mut Ui, theme: &Palette) {
     // The theme directory, under the themes it is about rather than
     // under the title-bar switch below them.
     if let Some(dir) = crate::theme::user_theme_dir() {
-        ui.add_space(SPACE_SM);
+        theme::gap(ui, SPACE_SM);
         ui.label(
             egui::RichText::new(format!(
                 "Drop a .toml theme into {} to add your own.",
                 dir.display()
             ))
-            .color(theme::rgb(theme.text_faint))
+            .color(theme::rgb(theme.text_muted))
             .text_style(egui::TextStyle::Small),
         );
     }
@@ -106,7 +98,7 @@ fn appearance(app: &mut App, ui: &mut Ui, theme: &Palette) {
         );
     }
 
-    ui.add_space(chrome::SECTION_GAP);
+    theme::gap(ui, chrome::SECTION_GAP);
     let mut custom = app.custom_chrome;
     if ui
         .checkbox(&mut custom, "Draw the window's own title bar")
@@ -138,17 +130,21 @@ fn theme_card(ui: &mut Ui, active: &Palette, candidate: &Palette, selected: bool
 
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), HEIGHT), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            selected,
+            &candidate.name,
+        )
+    });
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
     // Keyed on the theme rather than on its position in the gallery, so
     // adding a theme does not hand its hover state to whichever card now
     // sits where another one did.
     let id = ui.id().with(("theme", &candidate.id));
-    let fill = if selected {
-        theme::rgb(active.selection)
-    } else {
-        widgets::hover_fill(ui, id, response.hovered(), active.panel, active.hover)
-    };
+    let fill = widgets::selectable_surface(ui, active, id, &response, selected, active.panel);
     ui.painter()
         .rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
     ui.painter().rect_stroke(
@@ -165,11 +161,16 @@ fn theme_card(ui: &mut Ui, active: &Palette, candidate: &Palette, selected: bool
         egui::StrokeKind::Inside,
     );
 
-    ui.painter().text(
-        rect.left_top() + Vec2::new(SPACE_MD, SPACE_SM),
-        egui::Align2::LEFT_TOP,
+    let name = widgets::truncated(
+        ui,
         &candidate.name,
         egui::TextStyle::Body.resolve(ui.style()),
+        active.text,
+        rect.width() - SPACE_MD * 2.0,
+    );
+    ui.painter().galley(
+        rect.left_top() + Vec2::new(SPACE_MD, SPACE_SM),
+        name,
         theme::rgb(active.text),
     );
 
@@ -198,21 +199,20 @@ fn theme_card(ui: &mut Ui, active: &Palette, candidate: &Palette, selected: bool
         x += SWATCH;
     }
 
-    response.clicked()
+    widgets::focus_ring(ui, active, &response);
+    response.on_hover_text(&candidate.name).clicked()
 }
 
 /// The sampling-interval picker.
 fn sampling(app: &mut App, ui: &mut Ui, theme: &Palette) {
     widgets::section(ui, theme, "Sampling");
-    ui.label(
-        egui::RichText::new(
-            "How often Rustaman reads the machine. A faster interval is more \
-             responsive and costs a little more CPU.",
-        )
-        .color(theme::rgb(theme.text_muted))
-        .text_style(egui::TextStyle::Small),
+    widgets::prose(
+        ui,
+        "How often Rustaman reads the machine. A faster interval is more \
+         responsive and costs a little more CPU.",
+        theme.text_muted,
     );
-    ui.add_space(SPACE_SM);
+    theme::gap(ui, SPACE_SM);
 
     let current = app.engine.interval();
     let mut chosen: Option<std::time::Duration> = None;
@@ -220,21 +220,11 @@ fn sampling(app: &mut App, ui: &mut Ui, theme: &Palette) {
         for millis in crate::config::INTERVAL_CHOICES {
             let interval = std::time::Duration::from_millis(millis);
             let active = interval == current;
-            let response = widgets::chip(
-                ui,
-                &chrome::interval_label(interval),
-                if active {
-                    theme.accent_soft
-                } else {
-                    theme.raised
-                },
-                if active { theme.text } else { theme.text_muted },
-            )
-            .interact(Sense::click());
+            let response =
+                widgets::choice_button(ui, theme, &chrome::interval_label(interval), active);
             if response.clicked() {
                 chosen = Some(interval);
             }
-            ui.add_space(SPACE_XS);
         }
     });
 
@@ -266,7 +256,7 @@ fn behaviour(app: &mut App, ui: &mut Ui, theme: &Palette) {
         app.config.confirm_end_task = Some(confirm);
     }
 
-    ui.add_space(SPACE_XS);
+    theme::gap(ui, SPACE_SM);
     let mut on_top = app.config.always_on_top.unwrap_or(false);
     if ui
         .checkbox(&mut on_top, "Keep the window above others")
@@ -281,7 +271,7 @@ fn behaviour(app: &mut App, ui: &mut Ui, theme: &Palette) {
             }));
     }
 
-    ui.add_space(SPACE_MD);
+    theme::gap(ui, SPACE_MD);
     // The access notice. Not a warning — running unelevated is a
     // perfectly reasonable way to use this — but the missing columns need
     // an explanation, or they look like a bug in the app.
@@ -299,11 +289,7 @@ fn behaviour(app: &mut App, ui: &mut Ui, theme: &Palette) {
             theme.text_muted,
         )
     };
-    ui.label(
-        egui::RichText::new(message)
-            .color(theme::rgb(color))
-            .text_style(egui::TextStyle::Small),
-    );
+    widgets::prose(ui, message, color);
 }
 
 /// The about panel.
@@ -325,7 +311,7 @@ fn about(app: &App, ui: &mut Ui, theme: &Palette) {
             );
             ui.label(
                 egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
-                    .color(theme::rgb(theme.text_faint))
+                    .color(theme::rgb(theme.text_muted))
                     .text_style(egui::TextStyle::Small),
             );
         });
@@ -358,13 +344,11 @@ fn about(app: &App, ui: &mut Ui, theme: &Palette) {
     }
 
     ui.add_space(SPACE_LG);
-    ui.label(
-        egui::RichText::new(
-            "Rustaman reads the machine through the same interfaces Task \
+    widgets::prose(
+        ui,
+        "Rustaman reads the machine through the same interfaces Task \
              Manager does. It never sends anything anywhere.",
-        )
-        .color(theme::rgb(theme.text_faint))
-        .text_style(egui::TextStyle::Small),
+        theme.text_muted,
     );
 }
 

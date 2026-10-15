@@ -12,7 +12,7 @@
 //! it?". Static identity is read once by the sampler and carried in the
 //! snapshot, while the four headline values remain live.
 
-use super::theme::{self, SPACE_MD, SPACE_SM, SPACE_XS};
+use super::theme::{self, SPACE_MD, SPACE_SM};
 use super::{chrome, widgets};
 use crate::gui::app::App;
 use crate::model::{AdapterSample, SystemSample, VolumeSample};
@@ -31,45 +31,34 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     };
     let system = &snapshot.system;
 
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // A step of clearance before the scrollbar, the same one
-            // the Performance and Memory panes take. Without it the
-            // cards end flush against the scrollbar's lane and the view
-            // reads as though it were cut off there rather than as
-            // having a margin — and this view is nothing but cards, so
-            // every one of them ends on that edge.
-            let width = (ui.available_width() - SPACE_MD).max(0.0);
-            ui.set_max_width(width);
-            heading(ui, &theme, system);
-            ui.add_space(chrome::SECTION_GAP);
-            overview(ui, &theme, system);
-            ui.add_space(chrome::SECTION_GAP);
+    widgets::scroll_body(ui, |ui| {
+        heading(ui, &theme, system);
+        theme::gap(ui, chrome::SECTION_GAP);
+        overview(ui, &theme, system);
+        theme::gap(ui, chrome::SECTION_GAP);
 
-            widgets::section(ui, &theme, "System identity");
-            identity_cards(ui, &theme, system);
+        widgets::section(ui, &theme, "System identity");
+        identity_cards(ui, &theme, system);
 
-            ui.add_space(chrome::SECTION_GAP);
-            widgets::section(ui, &theme, "Storage");
-            volumes(ui, &theme, &system.volumes);
+        theme::gap(ui, chrome::SECTION_GAP);
+        widgets::section(ui, &theme, "Storage");
+        volumes(ui, &theme, &system.volumes);
 
-            ui.add_space(chrome::SECTION_GAP);
-            widgets::section(ui, &theme, "Graphics");
-            graphics(ui, &theme, system);
+        theme::gap(ui, chrome::SECTION_GAP);
+        widgets::section(ui, &theme, "Graphics");
+        graphics(ui, &theme, system);
 
-            ui.add_space(chrome::SECTION_GAP);
-            widgets::section(ui, &theme, "Network hardware");
-            network(ui, &theme, system);
-        });
+        theme::gap(ui, chrome::SECTION_GAP);
+        widgets::section(ui, &theme, "Network hardware");
+        network(ui, &theme, system);
+    });
 }
 
 fn heading(ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     let name = present(&system.info.computer_name, "This PC");
     ui.label(
         egui::RichText::new(name)
-            .size(25.0)
-            .strong()
+            .font(theme::display_font(ui))
             .color(theme::rgb(theme.text)),
     );
     let machine = join_nonempty(&system.info.manufacturer, &system.info.model);
@@ -80,7 +69,7 @@ fn heading(ui: &mut Ui, theme: &Palette, system: &SystemSample) {
                 .text_style(egui::TextStyle::Body),
         );
     }
-    ui.add_space(SPACE_SM);
+    theme::gap(ui, SPACE_SM);
     ui.horizontal_wrapped(|ui| {
         for label in [
             system.info.os_name.as_str(),
@@ -89,7 +78,6 @@ fn heading(ui: &mut Ui, theme: &Palette, system: &SystemSample) {
         ] {
             if !label.is_empty() {
                 widgets::chip(ui, label, theme.raised, theme.text_muted);
-                ui.add_space(SPACE_XS);
             }
         }
     });
@@ -97,67 +85,69 @@ fn heading(ui: &mut Ui, theme: &Palette, system: &SystemSample) {
 
 fn overview(ui: &mut Ui, theme: &Palette, system: &SystemSample) {
     widgets::card_grid(ui, 185.0, 4, |ui, index| {
-        panel(ui, theme, |ui| match index {
-            0 => {
-                widgets::stat(
-                    ui,
-                    theme,
+        panel(ui, theme, |ui| {
+            let (caption, value, accent) = match index {
+                0 => (
                     "CPU now",
-                    &crate::format::percent(system.cpu.total_percent),
+                    crate::format::percent(system.cpu.total_percent),
                     theme.accent,
-                );
-                widgets::meter(
-                    ui,
-                    theme,
-                    (system.cpu.total_percent / 100.0) as f32,
-                    theme.accent,
-                );
-            }
-            1 => {
-                widgets::stat(
-                    ui,
-                    theme,
+                ),
+                1 => (
                     "Memory in use",
-                    &crate::format::bytes(system.memory.used()),
+                    crate::format::bytes(system.memory.used()),
                     theme.warning,
-                );
-                widgets::meter(
-                    ui,
-                    theme,
-                    (system.memory.used_percent() / 100.0) as f32,
-                    theme.warning,
-                );
-            }
-            2 => {
-                widgets::stat(
-                    ui,
-                    theme,
+                ),
+                2 => (
                     "Processes",
-                    &crate::format::count(system.process_count as u64),
+                    crate::format::count(system.process_count as u64),
                     theme.success,
-                );
-                widgets::detail_row(
-                    ui,
-                    theme,
-                    "Threads",
-                    &crate::format::count(system.thread_count),
-                );
-            }
-            _ => {
-                widgets::stat(
-                    ui,
-                    theme,
+                ),
+                _ => (
                     "Uptime",
-                    &crate::format::duration(system.uptime_seconds),
+                    crate::format::duration(system.uptime_seconds),
                     theme.info,
-                );
-                widgets::detail_row(
-                    ui,
-                    theme,
-                    "Handles",
-                    &crate::format::count(system.handle_count),
-                );
-            }
+                ),
+            };
+            widgets::stat(ui, theme, caption, &value, accent);
+            // Equivalent summary cards reserve one shared secondary row,
+            // whether it holds a thin meter or a label and value.
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), theme::ROW_HEIGHT),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_height(theme::ROW_HEIGHT);
+                    match index {
+                        0 => {
+                            widgets::meter(
+                                ui,
+                                theme,
+                                (system.cpu.total_percent / 100.0) as f32,
+                                accent,
+                            );
+                        }
+                        1 => {
+                            widgets::meter(
+                                ui,
+                                theme,
+                                (system.memory.used_percent() / 100.0) as f32,
+                                accent,
+                            );
+                        }
+                        2 => widgets::detail_row(
+                            ui,
+                            theme,
+                            "Threads",
+                            &crate::format::count(system.thread_count),
+                        ),
+                        _ => widgets::detail_row(
+                            ui,
+                            theme,
+                            "Handles",
+                            &crate::format::count(system.handle_count),
+                        ),
+                    }
+                },
+            );
         });
     });
 }
@@ -364,7 +354,7 @@ fn card_title(ui: &mut Ui, theme: &Palette, title: &str) {
             .strong()
             .color(theme::rgb(theme.text)),
     );
-    ui.add_space(SPACE_SM);
+    theme::gap(ui, SPACE_SM);
 }
 
 fn present<'a>(value: &'a str, fallback: &'a str) -> &'a str {

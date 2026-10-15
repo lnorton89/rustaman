@@ -128,6 +128,18 @@ impl Series {
             .unwrap_or(0.0)
     }
 
+    /// A recorded sample by age in ticks: zero is the latest.
+    /// Returns `None` for unrecorded history, distinct from a recorded zero.
+    #[must_use]
+    pub fn from_latest(&self, age: usize) -> Option<f32> {
+        if age >= self.filled {
+            return None;
+        }
+        self.samples
+            .get((self.head + self.samples.len() - 1 - age) % self.samples.len())
+            .copied()
+    }
+
     /// The largest sample currently held.
     #[must_use]
     pub fn max(&self) -> f32 {
@@ -247,6 +259,23 @@ fn nice_ceiling(value: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn historical_lookup_distinguishes_recorded_zero_from_missing_and_survives_wrap() {
+        let mut series = super::Series::new(3);
+        assert_eq!(series.from_latest(0), None);
+        for value in [0.0, 20.0] {
+            series.push(value);
+        }
+        assert_eq!(series.from_latest(0), Some(20.0));
+        assert_eq!(series.from_latest(1), Some(0.0));
+        assert_eq!(series.from_latest(2), None);
+        for value in [40.0, 60.0] {
+            series.push(value);
+        }
+        assert_eq!(series.from_latest(0), Some(60.0));
+        assert_eq!(series.from_latest(2), Some(20.0));
+        assert_eq!(series.from_latest(usize::MAX), None);
+    }
     use super::*;
 
     #[test]

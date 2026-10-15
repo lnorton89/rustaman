@@ -69,6 +69,24 @@ pub const SPACE_LG: f32 = 20.0;
 /// twelve-column table needs.
 pub const PAD: f32 = SPACE_MD;
 
+/// Clear separation between two independently scrolling panes.
+pub const PANE_GUTTER: f32 = SPACE_LG;
+
+/// Leaves an exact gap after the preceding widget along the layout axis.
+///
+/// Egui already advances by `item_spacing` after allocating a widget.
+/// Count that once, rather than adding another whole spacing step to it.
+/// A smaller gap may move the cursor back into that automatic spacing,
+/// but never into the preceding widget.
+pub fn gap(ui: &mut egui::Ui, space: f32) {
+    let automatic = if ui.layout().is_horizontal() {
+        ui.spacing().item_spacing.x
+    } else {
+        ui.spacing().item_spacing.y
+    };
+    ui.add_space(space - automatic);
+}
+
 /// The corner radius on cards, chips, and buttons.
 pub const RADIUS: u8 = 6;
 
@@ -80,15 +98,63 @@ pub const RADIUS_LG: u8 = 10;
 /// Tall enough for a 16px shell icon with breathing room, short enough
 /// that a 1080p window shows around thirty rows — which is the number
 /// that makes scrolling feel like navigating rather than hunting.
-pub const ROW_HEIGHT: f32 = 26.0;
+pub const ROW_HEIGHT: f32 = 28.0;
 
 /// The height of a table's header row.
-pub const HEADER_HEIGHT: f32 = 28.0;
+pub const HEADER_HEIGHT: f32 = 32.0;
+
+/// Shared height for toolbar fields and action buttons.
+pub const CONTROL_HEIGHT: f32 = 32.0;
+
+/// Section titles, including dialog titles, below the page-heading role.
+fn section_style() -> TextStyle {
+    TextStyle::Name("section".into())
+}
+
+/// Large readouts and the machine's identity headline.
+fn display_style() -> TextStyle {
+    TextStyle::Name("display".into())
+}
+
+const SECTION_TYPE_SIZE: f32 = 16.0;
+const DISPLAY_TYPE_SIZE: f32 = 24.0;
+
+/// Resolves the section role, including when a widget is drawn in isolation.
+#[must_use]
+pub fn section_font(ui: &egui::Ui) -> egui::FontId {
+    ui.style()
+        .text_styles
+        .get(&section_style())
+        .cloned()
+        .unwrap_or_else(|| egui::FontId::proportional(SECTION_TYPE_SIZE))
+}
+
+/// Prominent, stable-width readings in summaries and performance statistics.
+#[must_use]
+pub fn metric_font(ui: &egui::Ui) -> egui::FontId {
+    let mut font = section_font(ui);
+    font.family = egui::FontFamily::Monospace;
+    font
+}
+
+/// Resolves the display role used by large values and the machine name.
+#[must_use]
+pub fn display_font(ui: &egui::Ui) -> egui::FontId {
+    ui.style()
+        .text_styles
+        .get(&display_style())
+        .cloned()
+        .unwrap_or_else(|| egui::FontId::proportional(DISPLAY_TYPE_SIZE))
+}
 
 // The row geometry has to hold together, and these are relations between
 // constants — so they are checked when the crate is compiled rather than
 // when its tests are run.
 const _: () = {
+    assert!(
+        PANE_GUTTER >= PAD,
+        "a pane gutter must include its scroll inset"
+    );
     assert!(
         ROW_HEIGHT >= 24.0,
         "a row must leave a 16px shell icon room to breathe"
@@ -113,8 +179,11 @@ const _: () = {
 /// The height of the custom title bar.
 pub const TITLE_BAR_HEIGHT: f32 = 40.0;
 
-/// The width of the collapsed navigation rail.
+/// The width of the expanded navigation rail.
 pub const NAV_WIDTH: f32 = 168.0;
+
+/// Icon-only navigation: one control target and the normal panel insets.
+pub const NAV_MINI_WIDTH: f32 = CONTROL_HEIGHT + PAD * 2.0;
 
 /// The width of the accent bar down a selected row's leading edge.
 ///
@@ -193,19 +262,27 @@ pub fn apply(ctx: &egui::Context, theme: &Palette) {
         // mostly is.
         style.text_styles.insert(
             TextStyle::Body,
-            egui::FontId::new(13.5, egui::FontFamily::Proportional),
+            egui::FontId::new(14.0, egui::FontFamily::Proportional),
         );
         style.text_styles.insert(
             TextStyle::Button,
-            egui::FontId::new(13.5, egui::FontFamily::Proportional),
+            egui::FontId::new(14.0, egui::FontFamily::Proportional),
         );
         style.text_styles.insert(
             TextStyle::Small,
-            egui::FontId::new(11.5, egui::FontFamily::Proportional),
+            egui::FontId::new(12.0, egui::FontFamily::Proportional),
         );
         style.text_styles.insert(
             TextStyle::Heading,
-            egui::FontId::new(19.0, egui::FontFamily::Proportional),
+            egui::FontId::new(20.0, egui::FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            section_style(),
+            egui::FontId::new(SECTION_TYPE_SIZE, egui::FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            display_style(),
+            egui::FontId::new(DISPLAY_TYPE_SIZE, egui::FontFamily::Proportional),
         );
         // Numeric columns are drawn in this. A proportional font gives
         // every digit a different width, so a column of live-updating
@@ -384,6 +461,10 @@ fn visuals(theme: &Palette) -> egui::Visuals {
     }
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, rgb(theme.text_muted));
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, rgb(theme.text));
+    // Built-in controls and menus use the same clear focus/active edge
+    // as the custom controls painted in widgets.
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, rgb(theme.border_strong));
+    visuals.widgets.active.bg_stroke = Stroke::new(2.0, rgb(theme.accent));
 
     visuals
 }
@@ -391,6 +472,48 @@ fn visuals(theme: &Palette) -> egui::Visuals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_gaps_count_automatic_spacing_once_in_every_direction() -> anyhow::Result<()> {
+        for layout in [
+            egui::Layout::left_to_right(egui::Align::Min),
+            egui::Layout::right_to_left(egui::Align::Min),
+            egui::Layout::top_down(egui::Align::Min),
+            egui::Layout::bottom_up(egui::Align::Min),
+        ] {
+            for space in [SPACE_XS, SPACE_SM, SPACE_MD, SPACE_LG] {
+                let ctx = egui::Context::default();
+                let mut bounds = None;
+                let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    ui.with_layout(layout, |ui| {
+                        // Deliberately different from the theme's own spacing.
+                        ui.spacing_mut().item_spacing = Vec2::new(13.0, 9.0);
+                        let first = ui
+                            .allocate_exact_size(Vec2::splat(20.0), egui::Sense::hover())
+                            .0;
+                        gap(ui, space);
+                        let second = ui
+                            .allocate_exact_size(Vec2::splat(20.0), egui::Sense::hover())
+                            .0;
+                        bounds = Some((first, second));
+                    });
+                });
+                output.textures_delta.clear();
+                let (first, second) =
+                    bounds.ok_or_else(|| anyhow::anyhow!("widgets did not draw"))?;
+                let actual = if layout.is_horizontal() {
+                    (second.center().x - first.center().x).abs() - first.width()
+                } else {
+                    (second.center().y - first.center().y).abs() - first.height()
+                };
+                assert!(
+                    (actual - space).abs() < 0.1,
+                    "{layout:?}: expected {space}, got {actual}"
+                );
+            }
+        }
+        Ok(())
+    }
     use crate::theme::Catalog;
 
     fn every_theme() -> Vec<Palette> {

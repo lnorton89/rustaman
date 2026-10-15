@@ -61,6 +61,7 @@ fn main() -> anyhow::Result<()> {
 #[cfg(windows)]
 mod windows {
     use anyhow::{Context, Result};
+    use egui_kittest::kittest::{NodeT, Queryable};
     use rustaman::gui::app::{App, PerformanceFocus, View};
     use rustaman::model::history::Series;
     use rustaman::model::{
@@ -128,6 +129,26 @@ mod windows {
         /// causes it is how a cell's rect rounds to the pixel grid.
         #[arg(long, value_name = "FACTOR")]
         scale: Option<f32>,
+
+        /// Give keyboard focus to a control with this accessible label.
+        #[arg(long, value_name = "LABEL")]
+        focus_control: Option<String>,
+
+        /// Hover a control by label instead of relying on fixed coordinates.
+        #[arg(long, value_name = "LABEL")]
+        hover_control: Option<String>,
+
+        /// Render the icon-only primary navigation.
+        #[arg(long)]
+        mini_nav: bool,
+
+        /// Preferred width of the Performance picker or Details inspector.
+        #[arg(long, value_name = "POINTS")]
+        secondary_width: Option<f32>,
+
+        /// Populate the current table's search, including no-results states.
+        #[arg(long, value_name = "QUERY")]
+        search: Option<String>,
     }
 
     /// One thing worth looking at: a view, a panel within it, and the
@@ -161,7 +182,7 @@ mod windows {
     }
 
     /// Every scene, in the order `--list` prints them.
-    const SCENES: [Scene; 30] = [
+    const SCENES: [Scene; 32] = [
         Scene {
             name: "live-system",
             about: "System Information on THIS machine, really sampled",
@@ -259,6 +280,18 @@ mod windows {
             hover: None,
         },
         Scene {
+            name: "network-short",
+            about: "Two hardware adapters and a collapsed virtual inventory that fits the pane",
+            view: View::Performance,
+            focus: PerformanceFocus::Network,
+            expanded: false,
+            size: Some((1480.0, 900.0)),
+            live: false,
+            select: false,
+            modal: false,
+            hover: None,
+        },
+        Scene {
             name: "network-open",
             about: "The same, with the virtual-adapter group expanded",
             view: View::Performance,
@@ -321,6 +354,18 @@ mod windows {
         Scene {
             name: "gpu",
             about: "Performance › GPU",
+            view: View::Performance,
+            focus: PerformanceFocus::Gpu,
+            expanded: false,
+            size: None,
+            live: false,
+            select: false,
+            modal: false,
+            hover: None,
+        },
+        Scene {
+            name: "gpu-many-engines",
+            about: "GPU with repeated driver engines and partial history",
             view: View::Performance,
             focus: PerformanceFocus::Gpu,
             expanded: false,
@@ -602,7 +647,7 @@ mod windows {
                 (Some(path), true) => path.clone(),
                 _ => PathBuf::from(DEFAULT_DIRECTORY).join(format!("{}.png", scene.name)),
             };
-            render(scene, size, cli.theme.as_deref(), scale, &path)?;
+            render(scene, size, cli.theme.as_deref(), scale, &path, &cli)?;
             println!("wrote {}", path.display());
         }
         Ok(())
@@ -630,6 +675,58 @@ mod windows {
         ))
     }
 
+    /// The repeated-engine shape reported by real display drivers.
+    fn many_engine_gpus() -> Vec<GpuSample> {
+        let names = [
+            "3D",
+            "Compute 0",
+            "Compute 1",
+            "Compute 3",
+            "Copy",
+            "Copy",
+            "High Priority 3D",
+            "High Priority Compute",
+            "Security",
+            "Timer",
+            "True Audio",
+            "VideoDecode",
+            "VideoEncode",
+            "VideoEncode",
+            "VideoEncode",
+            "VideoEncode",
+            "VideoEncode",
+        ];
+        vec![
+            GpuSample {
+                name: "Radeon RX 580 Series".into(),
+                luid: "sample-primary".into(),
+                utilisation: 7.3,
+                engines: names
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, name)| {
+                        (
+                            format!("{name} · 0:{index}"),
+                            if index == 0 { 7.3 } else { 0.0 },
+                        )
+                    })
+                    .collect(),
+                memory_used: 1_460_000_000,
+                memory_total: 8 * 1024 * 1024 * 1024,
+            },
+            GpuSample {
+                name: "Radeon RX 580 Series".into(),
+                luid: "sample-secondary".into(),
+                utilisation: 0.0,
+                engines: (0..13)
+                    .map(|index| (format!("3D · 0:{index}"), 0.0))
+                    .collect(),
+                memory_used: 0,
+                memory_total: 8 * 1024 * 1024 * 1024,
+            },
+        ]
+    }
+
     /// Draws one scene and writes it out.
     fn render(
         scene: &Scene,
@@ -637,17 +734,29 @@ mod windows {
         theme: Option<&str>,
         scale: f32,
         path: &PathBuf,
+        cli: &Cli,
     ) -> Result<()> {
         let (width, height) = size.or(scene.size).unwrap_or(DEFAULT_SIZE);
 
-        let mut config = rustaman::config::Config::default();
-        if let Some(theme) = theme {
-            config.theme = Some(theme.to_string());
-        }
+        let config = rustaman::config::Config {
+            nav_collapsed: Some(cli.mini_nav),
+            performance_width: cli.secondary_width,
+            inspector_width: cli.secondary_width,
+            theme: theme.map(str::to_string),
+            ..Default::default()
+        };
         let mut app = App::new(config);
         app.view = scene.view;
         app.performance.focus = scene.focus;
         app.performance.network_virtual_expanded = scene.expanded;
+        if let Some(search) = &cli.search {
+            app.processes.search.clone_from(search);
+            app.processes.query = rustaman::model::filter::Query::parse(search);
+            app.details.search.clone_from(search);
+            app.details.query = rustaman::model::filter::Query::parse(search);
+            app.services.search.clone_from(search);
+            app.startup.search.clone_from(search);
+        }
         // The window's own title bar, so a screenshot is the whole app
         // rather than the app minus its chrome.
         app.custom_chrome = true;
@@ -657,8 +766,25 @@ mod windows {
             app.services.services = rustaman::win::services::enumerate();
             app.startup.entries = rustaman::win::startup::enumerate();
         } else {
-            let snapshot = fabricate();
+            let mut snapshot = fabricate();
+            if scene.name == "gpu-many-engines" {
+                snapshot.system.gpus = many_engine_gpus();
+            }
+            if scene.name == "network-short" {
+                snapshot
+                    .system
+                    .adapters
+                    .retain(|adapter| !adapter.hardware || matches!(adapter.luid, 2 | 3));
+            }
             fill_history(&mut app, &snapshot);
+            if scene.name == "gpu-many-engines" {
+                app.performance.gpu.clear();
+                for step in 0..55 {
+                    app.performance
+                        .gpu
+                        .push((7.3 * if step == 54 { 1.0 } else { wobble(step, 11) }) as f32);
+                }
+            }
             app.snapshot = Some(snapshot.into());
             app.services.services = services();
             app.startup.entries = startup();
@@ -752,6 +878,15 @@ mod windows {
         harness.run();
         harness.run();
 
+        if let Some(label) = cli.focus_control.as_deref() {
+            control(&harness, label)?.focus();
+            harness.run();
+        }
+        if let Some(label) = cli.hover_control.as_deref() {
+            control(&harness, label)?.hover();
+            harness.run();
+        }
+
         let image = harness
             .render()
             .map_err(|error| anyhow::anyhow!("could not render the scene: {error}"))?;
@@ -764,6 +899,24 @@ mod windows {
             .save(path)
             .with_context(|| format!("could not write {}", path.display()))?;
         Ok(())
+    }
+
+    /// Finds a unique control while excluding page headings with the same name.
+    fn control<'a>(
+        harness: &'a egui_kittest::Harness<'_>,
+        label: &'a str,
+    ) -> Result<egui_kittest::Node<'a>> {
+        let mut matches = harness
+            .query_all_by_label(label)
+            .filter(|node| node.accesskit_node().role() != egui::accesskit::Role::Label);
+        let found = matches
+            .next()
+            .with_context(|| format!("no control labeled {label:?}"))?;
+        anyhow::ensure!(
+            matches.next().is_none(),
+            "more than one control labeled {label:?}"
+        );
+        Ok(found)
     }
 
     /// Drives the real sampler until there is something to draw.
@@ -1357,8 +1510,15 @@ mod windows {
         performance.cores = vec![Series::new(samples); snapshot.system.cpu.per_core.len()];
         performance.adapters.clear();
 
+        let history_wave = |step, seed| {
+            if step + 1 == samples {
+                1.0
+            } else {
+                wobble(step, seed)
+            }
+        };
         for step in 0..samples {
-            let wave = wobble(step, 0);
+            let wave = history_wave(step, 0);
             performance
                 .cpu
                 .push((snapshot.system.cpu.total_percent * wave) as f32);
@@ -1373,11 +1533,11 @@ mod windows {
                     .get(index)
                     .copied()
                     .unwrap_or_default();
-                series.push((base * wobble(step, index + 1)) as f32);
+                series.push((base * history_wave(step, index + 1)) as f32);
             }
             performance
                 .memory
-                .push((snapshot.system.memory.used_percent() * wobble(step, 7)) as f32);
+                .push((snapshot.system.memory.used_percent() * history_wave(step, 7)) as f32);
             // Read and write wobble on their own seeds. Scaling one
             // figure by one multiplier would give the Disk panel two
             // lines of identical shape at different heights, which
@@ -1391,8 +1551,8 @@ mod windows {
                 .fold((0.0, 0.0), |(read, write), disk| {
                     (read + disk.read_rate, write + disk.write_rate)
                 });
-            let read = read * wobble(step, 3);
-            let write = write * wobble(step, 17);
+            let read = read * history_wave(step, 3);
+            let write = write * history_wave(step, 17);
             performance.disk.push((read + write) as f32);
             performance.disk_read.push(read as f32);
             performance.disk_write.push(write as f32);
@@ -1402,21 +1562,27 @@ mod windows {
             // an independently varying receive would exceed the total
             // it is part of on some samples, and the panel would show
             // a machine receiving more than it moved.
-            let network = snapshot.system.network_rate() * wobble(step, 5);
-            let sent = snapshot.system.network_send_rate() * wobble(step, 9);
+            let network = snapshot.system.network_rate() * history_wave(step, 5);
+            let sent = snapshot.system.network_send_rate() * history_wave(step, 9);
             performance.network.push(network as f32);
             performance.network_send.push(sent as f32);
             performance
                 .network_receive
                 .push((network - sent).max(0.0) as f32);
-            performance.gpu.push((34.0 * wobble(step, 11)) as f32);
+            let gpu = snapshot
+                .system
+                .gpus
+                .iter()
+                .map(|gpu| gpu.utilisation)
+                .fold(0.0, f64::max);
+            performance.gpu.push((gpu * history_wave(step, 11)) as f32);
 
             for (index, adapter) in snapshot.system.adapters.iter().enumerate() {
                 performance
                     .adapters
                     .entry(adapter.luid)
                     .or_insert_with(|| Series::new(samples))
-                    .push((adapter.total_rate() * wobble(step, index + 13)) as f32);
+                    .push((adapter.total_rate() * history_wave(step, index + 13)) as f32);
             }
         }
     }

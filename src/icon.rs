@@ -132,6 +132,8 @@ pub enum Icon {
     Check,
     /// Something needs attention.
     Warning,
+    /// A passive information or access notice.
+    Info,
     /// Refresh, re-read.
     Refresh,
     /// Copy to the clipboard.
@@ -384,6 +386,11 @@ impl Icon {
                 Path::open(&[(8.0, 6.5), (8.0, 9.5)]),
                 Path::dot(8.0, 11.3),
             ],
+            Self::Info => vec![
+                Path::arc(8.0, 8.0, 6.0, 0.0, core::f32::consts::TAU),
+                Path::dot(8.0, 5.0),
+                Path::open(&[(7.0, 7.5), (8.0, 7.5), (8.0, 11.5), (9.0, 11.5)]),
+            ],
             // An arc with an arrowhead, rather than a full circle: a
             // closed ring has no direction, and direction is the whole
             // meaning of this one.
@@ -541,7 +548,7 @@ mod tests {
     /// Kept in the enum's own declaration order, which is not
     /// decoration: the check below reads each entry's discriminant, and
     /// the order is what makes a missing entry show up as a gap.
-    const ALL: [Icon; 31] = [
+    const ALL: [Icon; 32] = [
         Icon::Processes,
         Icon::Performance,
         Icon::Memory,
@@ -563,6 +570,7 @@ mod tests {
         Icon::Pin,
         Icon::Check,
         Icon::Warning,
+        Icon::Info,
         Icon::Refresh,
         Icon::Copy,
         Icon::Folder,

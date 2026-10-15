@@ -1,17 +1,21 @@
 // ============================================================================
 // Module:       gui::ui::dnd
-// Description:  Dragging an item to a new place in a list — the state, the drop
-//               indicator, the ghost that follows the pointer.
+// Description:  Shared dragging interactions — list reordering, pane dividers,
+//               drop indicators, and the ghost that follows the pointer.
 //
 // Dependencies: egui; super::{icon, motion, theme}
 // ============================================================================
 
-//! Drag and drop, once.
+//! Drag interactions, once.
 //!
 //! One [`Lane`] handles every reorderable list in the app: the table
 //! headers, and anything added later. Not because the code is long, but
 //! because drag and drop is almost entirely *feedback*, and feedback done
 //! twice is done differently twice.
+//!
+//! [`PaneSplit`] also owns pane-divider dragging and its feedback. It
+//! reserves space for the main content, preserves a preferred width
+//! across narrow windows, and exposes keyboard adjustment and reset.
 //!
 //! ## What a reorder has to tell the user, and when
 //!
@@ -64,7 +68,127 @@
 
 use super::theme::{self, RADIUS, SPACE_SM, SPACE_XS};
 use crate::theme::Palette;
-use egui::{Align2, Id, Rect, Response, Sense, TextStyle, Ui, Vec2};
+use egui::{Align2, CornerRadius, Id, Rect, Response, Sense, Stroke, TextStyle, Ui, Vec2};
+
+/// Bounds for a secondary pane; the main content always keeps a usable width.
+#[derive(Clone, Copy)]
+pub struct PaneSplit {
+    /// Initial width and double-click reset target.
+    pub default_width: f32,
+    /// Smallest usable secondary width when the container can afford it.
+    pub min_width: f32,
+    /// Largest user-selected secondary width.
+    pub max_width: f32,
+    /// Space retained for the main table or graph.
+    pub main_min_width: f32,
+    /// Places the secondary pane after the main content rather than before it.
+    pub secondary_on_right: bool,
+}
+
+impl PaneSplit {
+    fn width(self, preferred: Option<f32>, available: f32) -> f32 {
+        let maximum = self
+            .max_width
+            .min((available - theme::PANE_GUTTER - self.main_min_width).max(0.0));
+        let minimum = self.min_width.min(maximum);
+        preferred
+            .filter(|width| width.is_finite())
+            .unwrap_or(self.default_width)
+            .clamp(minimum, maximum)
+    }
+
+    fn rects(self, pane: Rect, width: f32) -> (Rect, Rect, Rect) {
+        if self.secondary_on_right {
+            let edge = pane.right() - width;
+            (
+                Rect::from_min_max(
+                    pane.min,
+                    egui::pos2((edge - theme::PANE_GUTTER).max(pane.left()), pane.bottom()),
+                ),
+                Rect::from_min_max(egui::pos2(edge, pane.top()), pane.max),
+                Rect::from_min_max(
+                    egui::pos2((edge - theme::PANE_GUTTER).max(pane.left()), pane.top()),
+                    egui::pos2(edge, pane.bottom()),
+                ),
+            )
+        } else {
+            let edge = pane.left() + width;
+            (
+                Rect::from_min_max(
+                    egui::pos2((edge + theme::PANE_GUTTER).min(pane.right()), pane.top()),
+                    pane.max,
+                ),
+                Rect::from_min_max(pane.min, egui::pos2(edge, pane.bottom())),
+                Rect::from_min_max(
+                    egui::pos2(edge, pane.top()),
+                    egui::pos2((edge + theme::PANE_GUTTER).min(pane.right()), pane.bottom()),
+                ),
+            )
+        }
+    }
+}
+
+/// Returns (main, secondary) regions with a mouse and keyboard operable divider.
+/// Narrow windows clamp the displayed width without discarding the saved preference.
+pub fn split_pane(
+    ui: &mut Ui,
+    theme: &Palette,
+    label: &str,
+    preferred: &mut Option<f32>,
+    split: PaneSplit,
+) -> (Rect, Rect) {
+    let pane = ui.available_rect_before_wrap();
+    let mut width = split.width(*preferred, pane.width());
+    let (_, _, gutter) = split.rects(pane, width);
+    let response = ui.interact(
+        gutter,
+        ui.make_persistent_id(label),
+        Sense::click_and_drag(),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::DragValue, ui.is_enabled(), label)
+    });
+    let direction = if split.secondary_on_right { -1.0 } else { 1.0 };
+    let keyboard = if response.has_focus() {
+        ui.input(|input| {
+            (i32::from(input.key_pressed(egui::Key::ArrowRight))
+                - i32::from(input.key_pressed(egui::Key::ArrowLeft))) as f32
+                * SPACE_SM
+        })
+    } else {
+        0.0
+    };
+    if response.double_clicked() {
+        *preferred = Some(split.default_width);
+    } else if response.dragged() || keyboard != 0.0 {
+        *preferred = Some(split.width(
+            Some(width + (response.drag_delta().x + keyboard) * direction),
+            pane.width(),
+        ));
+    }
+    width = split.width(*preferred, pane.width());
+    let (main, secondary, gutter) = split.rects(pane, width);
+    let active = response.hovered() || response.dragged() || response.has_focus();
+    let color = if active {
+        theme.accent
+    } else {
+        theme.border_strong
+    };
+    let grip = Rect::from_center_size(gutter.center(), Vec2::new(2.0, theme::CONTROL_HEIGHT));
+    ui.painter()
+        .rect_filled(grip, CornerRadius::same(1), theme::rgb(color));
+    if active {
+        ui.painter().vline(
+            gutter.center().x,
+            gutter.y_range(),
+            Stroke::new(1.0, theme::rgb(color)),
+        );
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+        .on_hover_text("Drag to resize. Use Left/Right when focused. Double-click to reset.");
+    (main, secondary)
+}
 
 /// Which way a lane runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,6 +466,83 @@ impl Lane {
 mod tests {
     use super::*;
     use anyhow::Result;
+    use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn pane_dividers_resize_with_mouse_and_keyboard() {
+        for right in [false, true] {
+            let mut harness = egui_kittest::Harness::new_ui_state(
+                move |ui, width: &mut Option<f32>| {
+                    let palette = crate::theme::Catalog::load().get(None).clone();
+                    split_pane(
+                        ui,
+                        &palette,
+                        "Resize pane",
+                        width,
+                        PaneSplit {
+                            default_width: 240.0,
+                            min_width: 180.0,
+                            max_width: 360.0,
+                            main_min_width: 240.0,
+                            secondary_on_right: right,
+                        },
+                    );
+                },
+                Some(240.0),
+            );
+            harness.run();
+            harness.get_by_label("Resize pane").focus();
+            harness.run();
+            harness.key_press(egui::Key::ArrowRight);
+            harness.run();
+            let expected = if right { 232.0 } else { 248.0 };
+            assert_eq!(*harness.state(), Some(expected));
+            let start = harness.get_by_label("Resize pane").rect().center();
+            harness.hover_at(start);
+            harness.run();
+            harness.drag_at(start);
+            harness.run();
+            let end = start + Vec2::new(40.0, 0.0);
+            harness.hover_at(end);
+            harness.run();
+            harness.drop_at(end);
+            harness.run();
+            let expected = expected + if right { -40.0 } else { 40.0 };
+            assert_eq!(*harness.state(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn a_pane_preference_cannot_starve_main_content_or_escape_the_container() {
+        for right in [false, true] {
+            let split = PaneSplit {
+                default_width: 240.0,
+                min_width: 180.0,
+                max_width: 360.0,
+                main_min_width: 240.0,
+                secondary_on_right: right,
+            };
+            for available in [0.0, 120.0, 480.0, 800.0] {
+                let pane = Rect::from_min_size(egui::pos2(20.0, 20.0), Vec2::new(available, 300.0));
+                for preference in [None, Some(-10.0), Some(100_000.0), Some(f32::NAN)] {
+                    let width = split.width(preference, available);
+                    let (main, secondary, gutter) = split.rects(pane, width);
+                    assert!(
+                        pane.contains_rect(main)
+                            && pane.contains_rect(secondary)
+                            && pane.contains_rect(gutter)
+                    );
+                    assert!(
+                        main.width()
+                            >= split
+                                .main_min_width
+                                .min((available - theme::PANE_GUTTER).max(0.0))
+                    );
+                    assert!(!main.intersects(secondary) || secondary.width() == 0.0);
+                }
+            }
+        }
+    }
 
     /// A lane of five items, each 100 wide, starting at x = 0.
     fn lane() -> Lane {

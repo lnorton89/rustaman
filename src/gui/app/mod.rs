@@ -254,9 +254,9 @@ pub struct PerformanceView {
     pub memory: Series,
     /// Combined disk throughput, in bytes per second.
     ///
-    /// Kept alongside the two halves below because the disk *tile* in
-    /// the picker is forty points tall and has room for one line, and
-    /// the question it answers there is only "is this disk busy".
+    /// Kept alongside the two halves below for the resource picker's
+    /// total-throughput headline and trend; read/write values remain
+    /// separate in its supporting detail and in the main panel.
     pub disk: Series,
     /// Bytes read per second, across every disk.
     pub disk_read: Series,

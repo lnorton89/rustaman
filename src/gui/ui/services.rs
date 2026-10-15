@@ -46,17 +46,7 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     let theme = app.theme.clone();
     refresh(app);
 
-    if app.services.refreshed.is_none() {
-        // The first read is in flight; showing the empty state here
-        // instead would claim there are no services on the machine,
-        // which is a different thing and one worth telling apart from
-        // "still finding out" — see the module docs on why an empty
-        // result is ambiguous enough to need its own wording already.
-        widgets::empty_state(ui, &theme, "Reading services…");
-        return;
-    }
-
-    ui.horizontal(|ui| {
+    chrome::toolbar(ui, |ui| {
         let _ = chrome::search_box(ui, &theme, &mut app.services.search, "Search services");
         chrome::toolbar_dot(ui, &theme);
 
@@ -102,7 +92,12 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
             }
         });
     });
-    ui.add_space(chrome::TOOLBAR_GAP);
+    theme::gap(ui, chrome::TOOLBAR_GAP);
+
+    if app.services.refreshed.is_none() {
+        widgets::empty_state(ui, &theme, "Reading services…");
+        return;
+    }
 
     if app.services.services.is_empty() {
         widgets::empty_state(
@@ -184,7 +179,9 @@ fn refresh_visible_services(app: &mut App) {
 fn table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     refresh_visible_services(app);
     if app.services.visible.is_empty() {
-        widgets::empty_state(ui, theme, "No services match that search");
+        if widgets::no_matches(ui, theme, "services") {
+            app.services.search.clear();
+        }
         return;
     }
 
@@ -298,6 +295,7 @@ fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fil
                             claims_width: index == 0,
                             right_aligned: index == 3,
                             lifted: false,
+                            leading_inset: index == 0,
                         },
                     )
                     .clicked()
@@ -333,9 +331,7 @@ fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fil
                     // The display name leads: it is what a person
                     // recognises. The short name is the next column,
                     // because it is what `sc` and `net` take.
-                    ui.label(
-                        egui::RichText::new(service_label(service)).color(theme::rgb(theme.text)),
-                    );
+                    widgets::text_cell(ui, theme, service_label(service), false);
                 });
                 row.cell(|ui| {
                     ui.label(
@@ -368,7 +364,6 @@ fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fil
                         .pid
                         .and_then(|pid| hosts.get(&pid).cloned())
                         .unwrap_or_else(|| crate::format::DASH.to_string());
-                    ui.add_space(SPACE_SM);
                     ui.label(
                         egui::RichText::new(host)
                             .color(theme::rgb(theme.text_muted))
@@ -511,12 +506,7 @@ pub fn draw_startup(app: &mut App, ui: &mut Ui) {
     let theme = app.theme.clone();
     refresh_startup(app);
 
-    if app.startup.refreshed.is_none() {
-        widgets::empty_state(ui, &theme, "Reading startup entries…");
-        return;
-    }
-
-    ui.horizontal(|ui| {
+    chrome::toolbar(ui, |ui| {
         let _ = chrome::search_box(
             ui,
             &theme,
@@ -551,7 +541,7 @@ pub fn draw_startup(app: &mut App, ui: &mut Ui) {
         // right for one font and wrong for the next.
         let note = "Rustaman reports what is registered to run at logon.                     Changing it is done in the location each entry names.";
         let font = egui::TextStyle::Small.resolve(ui.style());
-        let colour = theme::rgb(theme.text_faint);
+        let colour = theme::rgb(theme.text_muted);
         let needed = ui
             .painter()
             .layout_no_wrap(note.to_owned(), font, colour)
@@ -568,7 +558,12 @@ pub fn draw_startup(app: &mut App, ui: &mut Ui) {
             );
         }
     });
-    ui.add_space(chrome::TOOLBAR_GAP);
+    theme::gap(ui, chrome::TOOLBAR_GAP);
+
+    if app.startup.refreshed.is_none() {
+        widgets::empty_state(ui, &theme, "Reading startup entries…");
+        return;
+    }
 
     if app.startup.entries.is_empty() {
         widgets::empty_state(ui, &theme, "Nothing is registered to run at logon");
@@ -686,7 +681,9 @@ fn flexible(scrolling: bool, least: f32) -> Column {
 fn startup_table(app: &mut App, ui: &mut Ui, theme: &Palette) {
     refresh_visible_startup(app);
     if app.startup.visible.is_empty() {
-        widgets::empty_state(ui, theme, "No startup entries match that search");
+        if widgets::no_matches(ui, theme, "startup entries") {
+            app.startup.search.clear();
+        }
         return;
     }
 
@@ -793,6 +790,7 @@ fn startup_table_body(
                             claims_width: index == 0,
                             right_aligned: false,
                             lifted: false,
+                            leading_inset: index == 0,
                         },
                     )
                     .clicked()
@@ -880,7 +878,7 @@ fn startup_table_body(
                     // prefix is most of what a person is scanning for.
                     ui.label(
                         egui::RichText::new(&entry.command)
-                            .color(theme::rgb(theme.text_faint))
+                            .color(theme::rgb(theme.text_muted))
                             .text_style(egui::TextStyle::Monospace),
                     );
                 });

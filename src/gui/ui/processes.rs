@@ -145,7 +145,7 @@ const _: () = {
 pub fn draw(app: &mut App, ui: &mut Ui) {
     let theme = app.theme.clone();
     toolbar(app, ui, &theme);
-    ui.add_space(chrome::TOOLBAR_GAP);
+    theme::gap(ui, chrome::TOOLBAR_GAP);
     refresh_rows(app, ui.ctx());
 
     if app.snapshot.is_none() {
@@ -153,12 +153,14 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
         return;
     }
     if app.processes.rows.entries().is_empty() {
-        let message = if app.is_filtering() {
-            "No processes match that search"
+        if app.is_filtering() {
+            if widgets::no_matches(ui, &theme, "processes") {
+                app.processes.search.clear();
+                app.processes.query = crate::model::filter::Query::parse("");
+            }
         } else {
-            "No processes"
-        };
-        widgets::empty_state(ui, &theme, message);
+            widgets::empty_state(ui, &theme, "No processes");
+        }
         return;
     }
     table(app, ui, &theme);
@@ -166,12 +168,12 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
 
 /// The row above the table: search, grouping, and the actions.
 fn toolbar(app: &mut App, ui: &mut Ui, theme: &Palette) {
-    ui.horizontal(|ui| {
+    chrome::toolbar(ui, |ui| {
         if chrome::search_box(
             ui,
             theme,
             &mut app.processes.search,
-            "Search — try chrome, pid:4242, user:system",
+            "Search name, pid: or user:",
         ) {
             // Reparsed only when the text changes; doing it every frame
             // would parse the query sixty times a second.
@@ -181,19 +183,9 @@ fn toolbar(app: &mut App, ui: &mut Ui, theme: &Palette) {
         chrome::toolbar_dot(ui, theme);
 
         let grouped = app.processes.grouped;
-        if widgets::chip(
-            ui,
-            if grouped { "Tree" } else { "Flat" },
-            if grouped {
-                theme.accent_soft
-            } else {
-                theme.raised
-            },
-            theme.text,
-        )
-        .interact(Sense::click())
-        .on_hover_text("Group into a process tree, or show one flat list")
-        .clicked()
+        if widgets::choice_button(ui, theme, if grouped { "Tree" } else { "Flat" }, grouped)
+            .on_hover_text("Group into a process tree, or show one flat list")
+            .clicked()
         {
             app.processes.grouped = !grouped;
         }
@@ -467,7 +459,8 @@ fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fil
                             mark: key.mark(),
                             sorted,
                             claims_width: false,
-                            right_aligned: index > 0,
+                            right_aligned: widgets::numeric_column(*key),
+                            leading_inset: *key == SortKey::Name,
                             // The heading a drag is carrying is dimmed
                             // in place, so it reads as lifted out of the
                             // row rather than duplicated by the ghost.
@@ -695,7 +688,7 @@ fn group_heading(
         );
         ui.label(
             egui::RichText::new(format!("({})", totals.processes))
-                .color(theme::rgb(theme.text_faint))
+                .color(theme::rgb(theme.text_muted))
                 .text_style(egui::TextStyle::Small),
         );
     });
@@ -819,7 +812,7 @@ fn name_cell(
             } else {
                 crate::icon::Icon::Application
             };
-            icons::paint(ui.painter(), rect, mark, theme::rgb(theme.text_faint));
+            icons::paint(ui.painter(), rect, mark, theme::rgb(theme.text_muted));
         }
         ui.add_space(SPACE_XS);
 
@@ -1043,7 +1036,11 @@ fn metric_cell(
         widgets::heat_cell(ui, theme, rect, load);
     }
     let muted = text == crate::format::DASH;
-    widgets::number(ui, theme, &text, muted);
+    if widgets::numeric_column(key) {
+        widgets::number(ui, theme, &text, muted);
+    } else {
+        widgets::text_cell(ui, theme, &text, muted);
+    }
 }
 
 /// The right-click menu for a row. Returns the action chosen, if any.

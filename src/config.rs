@@ -59,6 +59,15 @@ pub struct Config {
     /// Which view was open, by its stable name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<String>,
+    /// Whether the navigation shows only destination icons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nav_collapsed: Option<bool>,
+    /// Preferred Performance picker width in logical points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performance_width: Option<f32>,
+    /// Preferred Details inspector width in logical points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspector_width: Option<f32>,
     /// How often to sample, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_ms: Option<u64>,
@@ -175,6 +184,9 @@ pub fn parse(text: &str) -> Config {
         theme: field(&table, "theme"),
         font: field(&table, "font"),
         view: field(&table, "view"),
+        nav_collapsed: field(&table, "nav_collapsed"),
+        performance_width: field(&table, "performance_width"),
+        inspector_width: field(&table, "inspector_width"),
         interval_ms: field(&table, "interval_ms"),
         sort: field(&table, "sort"),
         sort_descending: field(&table, "sort_descending"),
@@ -296,6 +308,9 @@ mod tests {
             theme: Some("midnight".to_string()),
             font: Some("Product Sans".to_string()),
             view: Some("performance".to_string()),
+            nav_collapsed: Some(true),
+            performance_width: Some(240.0),
+            inspector_width: Some(320.0),
             interval_ms: Some(2_000),
             sort: Some(SortKey::Memory),
             sort_descending: Some(true),
