@@ -13,7 +13,53 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 Nothing yet — the latest release is the tip of `main`.
 
-## [0.1.0] - 2026-08-25
+## [0.2.0] - 2026-10-15
+
+### Added
+
+- **gui:** unify the interface and make resource data easier to inspect ([`25f4005`](https://github.com/lnorton89/rustaman/commit/25f400548b5527e88e88929c2edfba275b29ff91))
+- **gui:** a tray and taskbar icon that looks like the logo, not a glyph ([`2da45d8`](https://github.com/lnorton89/rustaman/commit/2da45d8cd691035d894d9b6ac1aeea49d3d34f55))
+- **gui:** the taskbar button shows the CPU meter too ([`5995cac`](https://github.com/lnorton89/rustaman/commit/5995cac9ad67f53c69be38aedc8f34d8264643c5))
+- **gui:** a notification-area icon that lights with the CPU load ([`4ecbaf5`](https://github.com/lnorton89/rustaman/commit/4ecbaf571b7db1dee2f1a49686439054cedc22b2))
+
+### Fixed
+
+- **gui:** set the small window icon to the meter as well ([`8fdde10`](https://github.com/lnorton89/rustaman/commit/8fdde104488c89abe55d135f46efb756e8ffdd22))
+- **gui:** a left click on the tray icon hides the window again ([`aafb2e4`](https://github.com/lnorton89/rustaman/commit/aafb2e4ef36f96bec8cef8f39f79dee5bc9fcdcd))
+- **gui:** the tray icon survives Explorer restarting ([`01f4ff8`](https://github.com/lnorton89/rustaman/commit/01f4ff842b3667ba5528dc9b8c7fa5c67d5628be))
+- **gui:** Escape clears the filter that is on screen ([`9c5ff90`](https://github.com/lnorton89/rustaman/commit/9c5ff90ab33b6a492c83c65fe401dfb9abb1f53e))
+- **gui:** Ctrl+F focuses the search box, and stops eating the other keys ([`a69293f`](https://github.com/lnorton89/rustaman/commit/a69293f71eb761561d3b4a81cc21c72a53f19f73))
+- **gui:** a click on a category heading's chevron collapses it ([`60f376e`](https://github.com/lnorton89/rustaman/commit/60f376eb643cfa65f735f993e0af97063ab114c6))
+- **format:** judge a magnitude's precision after rounding it ([`eb3dec4`](https://github.com/lnorton89/rustaman/commit/eb3dec4ce5b1e013d12e6808ee5d5e10e7549bdd))
+- **gui:** a startup entry is its name and its location ([`f6d7b6f`](https://github.com/lnorton89/rustaman/commit/f6d7b6f78da127ca18bf1954dab0db58bf1d2146))
+- **gui:** clear every graph when the interval changes ([`29de5e9`](https://github.com/lnorton89/rustaman/commit/29de5e9918b3841b6324b0f73e35c13fafcdc356))
+- **gui:** a name leaves its chips the room they take ([`40b3110`](https://github.com/lnorton89/rustaman/commit/40b31101b1f78f7893f4152565c0c10297dcbecd))
+- **gui:** one row shape whether a column clips or not ([`123a016`](https://github.com/lnorton89/rustaman/commit/123a0166502a59c6df43e40164c846b4172d8083))
+
+### Performance
+
+- **build:** line-tables-only debuginfo for dependencies in dev builds ([`ed1f198`](https://github.com/lnorton89/rustaman/commit/ed1f198d150ca31733608729b5c9eb9be08dad57))
+- **build:** a release-fast profile for iterating on the optimised app ([`423adf5`](https://github.com/lnorton89/rustaman/commit/423adf51dfb092c01829a0b21bb25cf930fe75ef))
+
+### Documentation
+
+- tray is one of the portable modules ([`3b2cc8f`](https://github.com/lnorton89/rustaman/commit/3b2cc8fbfb38cdc9f5f4c7427e80a047f245cef3))
+- show the performance view in the README ([`0cac1a8`](https://github.com/lnorton89/rustaman/commit/0cac1a8c8e40278b7e8ad6b2d328d52c69c93899))
+- publish the release screenshot ([`7253f9c`](https://github.com/lnorton89/rustaman/commit/7253f9c7e12182d9780801c67bd8773b178c1be9))
+
+### Internal
+
+- **release:** bump rustaman to 0.2.0 ([`1360b2a`](https://github.com/lnorton89/rustaman/commit/1360b2a30cc8a1ac629b2307a7d6b5eb6e23c42f))
+- **deps:** bump dirs from 6.0.0 to 7.0.0 (#8) ([`30d0e84`](https://github.com/lnorton89/rustaman/commit/30d0e841b371af0fb54d0c7501e7614e9246bf73))
+- **deps:** bump the github-actions group with 3 updates (#7) ([`63a29b9`](https://github.com/lnorton89/rustaman/commit/63a29b9a7ffb3141b6b519231bafe4e204431232))
+- **deps:** bump the cargo-patch group across 1 directory with 7 updates (#6) ([`f8695a5`](https://github.com/lnorton89/rustaman/commit/f8695a578703086c2dc355e02f69ae0d06497349))
+- **deps:** bump dtolnay/rust-toolchain in the github-actions group (#5) ([`eafafa8`](https://github.com/lnorton89/rustaman/commit/eafafa8d6b7b50bd0873912e9ff4ad558d56a42a))
+
+### Tests
+
+- **screenshot:** a startup entry long enough to elide its name ([`4dd8dd9`](https://github.com/lnorton89/rustaman/commit/4dd8dd9e911a18749ebdcbb187db33a553417383))
+
+## [0.1.0] - 2026-08-23
 
 ### Added
 
@@ -117,5 +163,6 @@ Nothing yet — the latest release is the tip of `main`.
 - **gui:** check all five Performance panels against the window edge ([`7c75f99`](https://github.com/lnorton89/rustaman/commit/7c75f9996f276de9296aa2a879af3fb7b3366533))
 - **gui:** clear the discarded FullOutput's texture delta ([`5469f4c`](https://github.com/lnorton89/rustaman/commit/5469f4cb8434dddd74426936170ab08664aed796))
 
-[Unreleased]: https://github.com/lnorton89/rustaman/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/lnorton89/rustaman/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/lnorton89/rustaman/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/lnorton89/rustaman/releases/tag/v0.1.0
