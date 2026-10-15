@@ -93,13 +93,13 @@ pub fn title_bar(app: &mut App, ui: &mut Ui) -> bool {
         .frame(
             egui::Frame::new()
                 .fill(theme::rgb(theme.app))
-                .inner_margin(theme::margin_xy(SPACE_SM, SPACE_XS)),
+                .inner_margin(theme::margin_xy(PAD, SPACE_XS)),
         )
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 // The brand mark and name, at the left edge.
                 super::super::icons::paint_brand(ui, 18.0);
-                ui.add_space(SPACE_SM);
+                theme::gap(ui, SPACE_SM);
                 ui.label(
                     egui::RichText::new(crate::brand::NAME)
                         .color(theme::rgb(theme.text))
@@ -130,7 +130,7 @@ pub fn title_bar(app: &mut App, ui: &mut Ui) -> bool {
                         ui.ctx().send_viewport_cmd(ViewportCommand::Minimized(true));
                     }
 
-                    ui.add_space(SPACE_SM);
+                    theme::gap(ui, SPACE_MD);
                     // The status readout, right-aligned beside the
                     // controls: it is the one number worth having on
                     // screen whatever view is open.
@@ -309,6 +309,12 @@ fn resize_regions(rect: Rect) -> [(Rect, ResizeDirection, egui::CursorIcon); 8] 
 /// Draws the navigation rail.
 pub fn nav_rail(app: &mut App, ui: &mut Ui) {
     let theme = app.theme.clone();
+    let compact = app.config.nav_collapsed.unwrap_or(false);
+    let width = if compact {
+        theme::NAV_MINI_WIDTH
+    } else {
+        NAV_WIDTH
+    };
     // `show_separator_line(false)` below: `Panel` strokes a separator
     // at its inner edge by default, and every panel here is padded on
     // both sides — so the stroke lands as a pale hairline floating in a
@@ -316,15 +322,20 @@ pub fn nav_rail(app: &mut App, ui: &mut Ui) {
     // looks like. This panel is `resizable(false)`, so that is an
     // affordance for a gesture it cannot answer.
     egui::Panel::left("nav-rail")
-        .exact_size(NAV_WIDTH)
+        .exact_size(width)
         .resizable(false)
         .show_separator_line(false)
         .frame(
             egui::Frame::new()
-                .fill(theme::rgb(theme.app))
-                .inner_margin(theme::margin(SPACE_SM)),
+                .fill(theme::rgb(theme.panel))
+                .inner_margin(theme::margin(PAD)),
         )
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = SPACE_XS;
+            if widgets::nav_toggle(ui, &theme, compact).clicked() {
+                app.config.nav_collapsed = Some(!compact);
+            }
+            theme::gap(ui, SPACE_MD);
             for view in View::ALL {
                 // Settings sits at the bottom, away from the views that
                 // are switched between constantly — a destination reached
@@ -333,35 +344,47 @@ pub fn nav_rail(app: &mut App, ui: &mut Ui) {
                 if view == View::Settings {
                     continue;
                 }
-                if widgets::nav_item(ui, &theme, view.icon(), view.label(), app.view == view)
-                    .clicked()
+                if view == View::Services {
+                    theme::gap(ui, SPACE_LG);
+                }
+                if widgets::nav_destination(
+                    ui,
+                    &theme,
+                    view.icon(),
+                    view.label(),
+                    app.view == view,
+                    compact,
+                )
+                .clicked()
                 {
                     app.view = view;
                 }
-                ui.add_space(SPACE_XS);
             }
 
             ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                if widgets::nav_item(
+                if widgets::nav_destination(
                     ui,
                     &theme,
                     View::Settings.icon(),
                     View::Settings.label(),
                     app.view == View::Settings,
+                    compact,
                 )
                 .clicked()
                 {
                     app.view = View::Settings;
                 }
-                ui.add_space(SPACE_XS);
 
                 // The elevation notice. Not a warning — running
                 // unelevated is a perfectly reasonable way to use this —
                 // but the missing columns need an explanation, or they
                 // look like a bug in the app.
                 if !app.elevated {
-                    let response =
-                        widgets::chip(ui, "Limited access", theme.raised, theme.text_muted);
+                    let response = if compact {
+                        widgets::access_notice(ui, &theme)
+                    } else {
+                        widgets::chip(ui, "Limited access", theme.raised, theme.text_muted)
+                    };
                     response.on_hover_text(
                         "Some processes hide owner, path or architecture. \
                          Administrator rights improve access, but protected \
@@ -370,6 +393,31 @@ pub fn nav_rail(app: &mut App, ui: &mut Ui) {
                 }
             });
         });
+}
+
+/// Gives every destination a consistent title and a short description.
+pub fn view_heading(app: &App, ui: &mut Ui) {
+    let description = match app.view {
+        View::Processes => "Process tree and resource usage",
+        View::Performance => "CPU, memory, disks, network and GPU",
+        View::Memory => "Memory usage by process",
+        View::Details => "All processes and technical details",
+        View::Services => "Windows services",
+        View::Startup => "Programs that run at sign-in",
+        View::System => "Hardware and Windows information",
+        View::Settings => "Appearance and app preferences",
+    };
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(app.view.label()).heading().strong());
+        theme::gap(ui, SPACE_MD);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(description).color(theme::rgb(app.theme.text_muted)),
+            )
+            .truncate(),
+        );
+    });
+    theme::gap(ui, SPACE_MD);
 }
 
 /// Draws the status bar along the bottom.
@@ -443,7 +491,7 @@ pub fn status_bar(app: &mut App, ui: &mut Ui) {
                     } else if app.sampler_health() == SamplerHealth::Starting {
                         ui.label(
                             egui::RichText::new("Starting sampler…")
-                                .color(theme::rgb(theme.text_faint))
+                                .color(theme::rgb(theme.text_muted))
                                 .text_style(egui::TextStyle::Small),
                         );
                     } else {
@@ -452,7 +500,7 @@ pub fn status_bar(app: &mut App, ui: &mut Ui) {
                                 "Updating every {}",
                                 interval_label(app.engine.interval()),
                             ))
-                            .color(theme::rgb(theme.text_faint))
+                            .color(theme::rgb(theme.text_muted))
                             .text_style(egui::TextStyle::Small),
                         );
                     }
@@ -497,31 +545,129 @@ pub fn search_box_id() -> egui::Id {
     egui::Id::new("search-box")
 }
 
+/// A toolbar with a stable height and vertically centered controls.
+pub fn toolbar(ui: &mut Ui, contents: impl FnOnce(&mut Ui)) {
+    ui.allocate_ui_with_layout(
+        Vec2::new(ui.available_width(), theme::CONTROL_HEIGHT),
+        Layout::left_to_right(Align::Center),
+        contents,
+    );
+}
+
 /// Draws the search box that both the process list and Details share.
 ///
 /// Returns whether the text changed, which the caller uses to reparse the
 /// query — reparsing unconditionally would parse it once per frame rather
 /// than once per keystroke.
 pub fn search_box(ui: &mut Ui, theme: &Palette, text: &mut String, hint: &str) -> bool {
-    /// The box's width. Wide enough for a full path fragment, narrow
-    /// enough to leave the toolbar room for its buttons.
-    const WIDTH: f32 = 260.0;
+    /// Includes a leading search icon and a trailing shortcut or clear control.
+    const WIDTH: f32 = 300.0;
+    const HEIGHT: f32 = theme::CONTROL_HEIGHT;
+    const TRAILING: f32 = 44.0;
 
     let before = text.clone();
-    let response = ui.add_sized(
-        Vec2::new(WIDTH, 0.0),
+    // Egui releases focus for Escape before drawing the frame. Include
+    // the previous focus owner so the search still handles that key.
+    let clear_with_escape = ui.memory(|memory| {
+        memory.has_focus(search_box_id()) || memory.had_focus_last_frame(search_box_id())
+    }) && ui.input(|input| input.key_pressed(egui::Key::Escape));
+    let width = WIDTH.min(ui.available_width()).max(0.0);
+    let (rect, shell) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::hover());
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(theme::RADIUS),
+        theme::rgb(theme.raised),
+    );
+    super::icon::paint(
+        ui.painter(),
+        Rect::from_center_size(
+            egui::pos2(
+                rect.left() + SPACE_SM + super::icon::INLINE / 2.0,
+                rect.center().y,
+            ),
+            Vec2::splat(super::icon::INLINE),
+        ),
+        Icon::Search,
+        theme::rgb(theme.text_muted),
+    );
+    let input_rect = Rect::from_min_max(
+        rect.left_top() + Vec2::new(SPACE_SM * 2.0 + super::icon::INLINE, SPACE_XS),
+        rect.right_bottom() - Vec2::new(TRAILING + SPACE_SM, SPACE_XS),
+    );
+    // The shell already owns its place in the toolbar. A scoped layout
+    // would advance the parent again from the narrower input rectangle,
+    // allowing the next control to overlap the trailing button.
+    let mut input_ui = ui.new_child(egui::UiBuilder::new().max_rect(input_rect));
+    // `add_sized` makes the edit taller than one row, and egui places both
+    // the typed text and the hint at the top of that rect unless told
+    // otherwise (its default is `LEFT_TOP`), so center them vertically.
+    let response = input_ui.add_sized(
+        input_rect.size(),
         egui::TextEdit::singleline(text)
             .id(search_box_id())
+            .vertical_align(Align::Center)
             .hint_text(hint)
-            .background_color(theme::rgb(theme.raised))
-            .margin(theme::margin_xy(SPACE_SM, SPACE_XS))
-            .desired_width(WIDTH),
+            .frame(egui::Frame::NONE)
+            .margin(theme::margin_xy(0.0, 0.0))
+            .desired_width(input_rect.width()),
     );
+
+    let trailing = Rect::from_center_size(
+        egui::pos2(rect.right() - SPACE_SM - TRAILING / 2.0, rect.center().y),
+        Vec2::new(TRAILING, HEIGHT - SPACE_XS * 2.0),
+    );
+    if text.is_empty() {
+        ui.painter().text(
+            trailing.center(),
+            egui::Align2::CENTER_CENTER,
+            "Ctrl+F",
+            egui::TextStyle::Small.resolve(ui.style()),
+            theme::rgb(theme.text_muted),
+        );
+    } else {
+        let clear = ui.interact(trailing, shell.id.with("clear"), Sense::click());
+        clear.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Clear search")
+        });
+        ui.painter().rect_filled(
+            trailing,
+            CornerRadius::same(theme::RADIUS),
+            widgets::hover_fill(ui, clear.id, clear.hovered(), theme.raised, theme.hover),
+        );
+        super::icon::paint(
+            ui.painter(),
+            Rect::from_center_size(trailing.center(), Vec2::splat(super::icon::INLINE)),
+            Icon::Close,
+            theme::rgb(theme.text_muted),
+        );
+        widgets::focus_ring(ui, theme, &clear);
+        if clear.on_hover_text("Clear search (Esc)").clicked() {
+            text.clear();
+            response.request_focus();
+        }
+    }
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(theme::RADIUS),
+        egui::Stroke::new(
+            1.0,
+            theme::rgb(if response.has_focus() {
+                theme.accent
+            } else {
+                theme.border
+            }),
+        ),
+        egui::StrokeKind::Inside,
+    );
+    let mut field_focus = response.clone();
+    field_focus.rect = rect;
+    widgets::focus_ring(ui, theme, &field_focus);
 
     // Escape clears the box while it has focus, which is what every
     // search field does and what the hand reaches for.
-    if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+    if clear_with_escape {
         text.clear();
+        response.request_focus();
     }
     *text != before
 }
@@ -531,7 +677,7 @@ pub fn search_box(ui: &mut Ui, theme: &Palette, text: &mut String, hint: &str) -
 /// Between groups of controls in a toolbar, where a full rule would be
 /// too heavy and a gap alone does not read as a grouping.
 pub fn toolbar_dot(ui: &mut Ui, theme: &Palette) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(SPACE_MD, SPACE_MD), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(SPACE_XS, SPACE_MD), Sense::hover());
     ui.painter()
         .circle_filled(rect.center(), 2.0, theme::rgb(theme.border));
 }
@@ -544,12 +690,11 @@ pub fn panel_card<R>(ui: &mut Ui, theme: &Palette, add: impl FnOnce(&mut Ui) -> 
         .corner_radius(CornerRadius::same(theme::RADIUS_LG))
         .inner_margin(theme::margin(SPACE_MD))
         .show(ui, add);
-    ui.add_space(SPACE_SM);
     response.inner
 }
 
 /// The gap a view leaves between its toolbar and its content.
-pub const TOOLBAR_GAP: f32 = SPACE_SM;
+pub const TOOLBAR_GAP: f32 = SPACE_MD;
 
 /// The gap a view leaves between major sections.
 pub const SECTION_GAP: f32 = SPACE_LG;
@@ -557,7 +702,95 @@ pub const SECTION_GAP: f32 = SPACE_LG;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui_kittest::kittest::Queryable;
     use std::time::Duration;
+
+    #[test]
+    fn mini_navigation_keeps_destinations_named_and_can_expand_again() {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(780.0, 480.0))
+            .build_ui_state(
+                |ui, app: &mut App| {
+                    theme::apply(ui.ctx(), &app.theme.clone());
+                    nav_rail(app, ui);
+                },
+                App::new(crate::config::Config::default()),
+            );
+        harness.run();
+        harness.get_by_label("Collapse sidebar").click();
+        harness.run();
+        assert_eq!(harness.state().config.nav_collapsed, Some(true));
+        let performance = harness.get_by_label("Performance");
+        assert!((performance.rect().width() - theme::CONTROL_HEIGHT).abs() < 0.1);
+        assert!(!performance
+            .rect()
+            .intersects(harness.get_by_label("Settings").rect()));
+        performance.focus();
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert_eq!(harness.state().view, View::Performance);
+        harness.get_by_label("Expand sidebar").click();
+        harness.run();
+        assert_eq!(harness.state().config.nav_collapsed, Some(false));
+        assert!(harness.get_by_label("Performance").rect().width() > 100.0);
+    }
+
+    #[test]
+    fn clearing_search_reports_the_change_and_keeps_keyboard_focus() {
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, state: &mut (String, bool)| {
+                let theme = crate::theme::Catalog::load().get(None).clone();
+                theme::apply(ui.ctx(), &theme);
+                ui.horizontal(|ui| {
+                    state.1 |= search_box(ui, &theme, &mut state.0, "Search processes");
+                    let _ = ui.button("Tree");
+                });
+            },
+            ("chrome".to_string(), false),
+        );
+        harness.run();
+        let clear = harness.get_by_label("Clear search");
+        assert!(
+            !clear.rect().intersects(harness.get_by_label("Tree").rect()),
+            "the trailing search control must not overlap the next toolbar control"
+        );
+        clear.click();
+        harness.run();
+        assert!(harness.state().0.is_empty(), "Clear must empty the query");
+        assert!(
+            harness.state().1,
+            "the caller must know to reparse its filter"
+        );
+        assert!(
+            harness
+                .ctx
+                .memory(|memory| memory.has_focus(search_box_id())),
+            "clearing search must return typing focus to the field"
+        );
+
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::Text("pid:4242".to_string()));
+        harness.run();
+        assert_eq!(
+            harness.state().0,
+            "pid:4242",
+            "typing must continue after clearing"
+        );
+        harness.state_mut().1 = false;
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        assert!(
+            harness.state().0.is_empty(),
+            "Escape must also clear the query"
+        );
+        assert!(
+            harness.state().1,
+            "Escape must notify the caller of the change"
+        );
+    }
 
     #[test]
     fn every_resize_grip_has_one_unambiguous_direction() {

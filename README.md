@@ -39,7 +39,7 @@ does not.
 | View | |
 |---|---|
 | **Processes** | A real tree, grouped into Apps / Background / Windows. Collapsed parents carry their subtree's totals, so a browser's thirty renderers do not hide behind it. Cells are heat-tinted by load, so a glance down a column finds the heavy rows. |
-| **Performance** | CPU (total, kernel band, labeled logical-processor grid, and recent averages/peaks), memory and commit pressure including kernel pools, per-disk **active time** and throughput, network link/totals, and GPU engines and dedicated memory. |
+| **Performance** | CPU (total/kernel traces, labeled logical-processor grid, and recent averages/peaks), memory and commit pressure including kernel pools, per-disk **active time** and throughput, network link/totals, and grouped GPU engines and dedicated memory. Charts share readable axes, legends, and sample tooltips. |
 | **Memory** | A per-process treemap showing what is holding physical memory and how each selected process is using it. |
 | **Details** | One flat technical table plus an inspector: owner, session, bitness, elevation, handles, threads, cumulative I/O, full path. |
 | **Services** | Every Win32 service with its state and hosting PID, and "go to process" to jump from `svchost.exe` to whichever of its fifteen services is busy. |
@@ -48,6 +48,9 @@ does not.
 
 Actions: end task, end process tree best-effort from the current snapshot (children first), suspend, resume,
 priority, open file location, copy details, start/stop a service.
+
+Collapse the navigation to an icon rail, and drag the divider to resize the
+Performance resource picker or Details inspector. These preferences are saved.
 
 ### Search
 

@@ -9,11 +9,11 @@
 //! The graphs.
 //!
 //! Painted from [`crate::model::history::Series`] rings straight onto the
-//! painter. No plotting crate: these are four chart types with no axes to
-//! configure, no legends to lay out, and no interaction beyond a hover
-//! readout — and every one of them has to take its colours from the theme
-//! and its gridlines from the spacing scale, which is most of what a
-//! plotting crate would otherwise decide for us.
+//! painter. The main resource panels share [`timeline`]: labelled value
+//! and time axes, a wrapping legend, and pointer/keyboard inspection of
+//! actual recorded samples. Compact core graphs and sparklines keep the
+//! same scale and clipping math without repeating the full chart chrome.
+//! All surfaces, strokes and typography follow the active theme.
 //!
 //! ## The gradient is not decoration
 //!
@@ -36,7 +36,8 @@
 //! whose behaviour is changing, and there is no way to tell the
 //! difference from the picture.
 
-use super::theme::{self, RADIUS, SPACE_SM, SPACE_XS};
+use super::theme::{self, RADIUS, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS};
+use super::widgets;
 use crate::color::Rgb;
 use crate::model::history::Series;
 use crate::theme::Palette;
@@ -88,6 +89,449 @@ impl Unit {
             Self::Bytes => crate::format::bytes(value.max(0.0) as u64),
         }
     }
+
+    /// Formats an actual reading or tick, including percentages below the maximum.
+    #[must_use]
+    pub fn value(self, value: f32) -> String {
+        if self == Self::Percent {
+            crate::format::percent(f64::from(value))
+        } else {
+            self.label(value)
+        }
+    }
+
+    /// Keeps rate ticks round in the same binary units as their labels.
+    /// Quantising raw bytes to decimal steps would print a 5 MB axis as 4.77 MB.
+    fn axis_ceiling(self, value: f32) -> f32 {
+        if self == Self::Percent {
+            return value;
+        }
+        // Every tick should be at least one byte apart, including an idle graph.
+        let value = value.max(GRID_BANDS as f32);
+        let unit = 1024.0_f32.powf((value.log(1024.0).floor()).clamp(0.0, 6.0));
+        let scaled = value / unit;
+        let magnitude = 10.0_f32.powf(scaled.log10().floor());
+        let step = [1.0, 2.0, 5.0, 10.0]
+            .into_iter()
+            .find(|step| *step * magnitude >= scaled)
+            .unwrap_or(10.0);
+        (step * magnitude * unit).min(f32::MAX)
+    }
+}
+
+/// One named line in an inspectable timeline.
+pub struct TimelineLine<'a> {
+    /// The quantity represented by this line.
+    pub label: &'a str,
+    /// Samples, unit, color, and scale floor.
+    pub graph: Graph<'a>,
+}
+
+/// The relationship between two lines sharing an axis.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Composition {
+    /// Independent quantities such as disk read and write.
+    Independent,
+    /// A whole followed by a part, such as total CPU and kernel CPU.
+    PartOfTotal,
+}
+
+/// The shared main-chart contract for every resource panel.
+pub struct Timeline<'a> {
+    /// Metric and accessible name, independent of the device heading.
+    pub label: &'a str,
+    /// Named lines in their legend order. The second uses a dashed stroke.
+    pub lines: &'a [TimelineLine<'a>],
+    /// Nominal sampling interval. Ages are approximate; readings are actual samples.
+    pub interval: std::time::Duration,
+    /// Whether the second line is part of the first.
+    pub composition: Composition,
+}
+
+/// Draws labelled axes, named lines, sample inspection, and a wrapping legend.
+/// Returns the axes rectangle; the legend below it is measured by the caller.
+pub fn timeline(ui: &mut Ui, theme: &Palette, height: f32, chart: &Timeline<'_>) -> Rect {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+    let Some(first) = chart.lines.first() else {
+        return rect;
+    };
+    let scale = if chart.composition == Composition::PartOfTotal {
+        axis_maximum(&first.graph)
+    } else {
+        chart
+            .lines
+            .iter()
+            .map(|line| axis_maximum(&line.graph))
+            .fold(0.0, f32::max)
+    }
+    .max(f32::EPSILON);
+    let ticks: Vec<_> = (0..=GRID_BANDS)
+        .map(|band| {
+            let value = scale * band as f32 / GRID_BANDS as f32;
+            let galley = ui.painter().layout_no_wrap(
+                first.graph.unit.value(value),
+                TextStyle::Small.resolve(ui.style()),
+                theme::rgb(theme.text_muted),
+            );
+            (value, galley)
+        })
+        .collect();
+    let axis_width = ticks
+        .iter()
+        .map(|(_, label)| label.size().x)
+        .fold(0.0, f32::max)
+        + SPACE_SM;
+    let plot = Rect::from_min_max(
+        rect.min + Vec2::new(axis_width.min(rect.width() / 3.0), SPACE_LG + SPACE_SM),
+        rect.max - Vec2::new(SPACE_XS, SPACE_LG + SPACE_XS),
+    );
+    ui.painter().text(
+        rect.min,
+        Align2::LEFT_TOP,
+        chart.label,
+        TextStyle::Small.resolve(ui.style()),
+        theme::rgb(theme.text_muted),
+    );
+    if rect.width() >= 400.0 {
+        ui.painter().text(
+            rect.right_top(),
+            Align2::RIGHT_TOP,
+            if first.graph.unit == Unit::Percent {
+                "Fixed 0–100%"
+            } else {
+                "Auto scale"
+            },
+            TextStyle::Small.resolve(ui.style()),
+            theme::rgb(theme.text_muted),
+        );
+    }
+    ui.painter()
+        .rect_filled(plot, CornerRadius::same(RADIUS), theme::rgb(theme.app));
+    grid(ui, theme, plot);
+    let painter = clipped(ui, plot);
+    for line in chart.lines {
+        fill_under(
+            &painter,
+            plot,
+            &plot_points(line.graph.series, plot, scale),
+            line.graph.color,
+        );
+    }
+    for (index, line) in chart.lines.iter().enumerate() {
+        let points = plot_points(line.graph.series, plot, scale);
+        let stroke = Stroke::new(1.5, theme::rgb(line.graph.color));
+        if index % 2 == 1 {
+            painter.extend(Shape::dashed_line(&points, stroke, SPACE_XS, SPACE_XS));
+        } else if points.len() >= 2 {
+            painter.add(Shape::line(points, stroke));
+        }
+    }
+    frame(ui, theme, plot);
+    for (value, label) in ticks {
+        let y = plot.bottom() - plot.height() * value / scale;
+        ui.painter().galley(
+            egui::pos2(
+                plot.left() - SPACE_SM - label.size().x,
+                y - label.size().y / 2.0,
+            ),
+            label,
+            theme::rgb(theme.text_muted),
+        );
+    }
+    let capacity = first.graph.series.capacity();
+    let span = capacity.saturating_sub(1) as f64 * chart.interval.as_secs_f64();
+    let left_tick = ui
+        .painter()
+        .layout_no_wrap(
+            age_label(span),
+            TextStyle::Small.resolve(ui.style()),
+            theme::rgb(theme.text_muted),
+        )
+        .size()
+        .x;
+    let middle_tick = ui
+        .painter()
+        .layout_no_wrap(
+            age_label(span / 2.0),
+            TextStyle::Small.resolve(ui.style()),
+            theme::rgb(theme.text_muted),
+        )
+        .size()
+        .x;
+    for (fraction, alignment) in [
+        (0.0, Align2::LEFT_TOP),
+        (0.5, Align2::CENTER_TOP),
+        (1.0, Align2::RIGHT_TOP),
+    ] {
+        if fraction == 0.5 && plot.width() < left_tick * 2.0 + middle_tick + SPACE_SM * 2.0 {
+            continue;
+        }
+        let label = age_label(span * (1.0 - fraction));
+        ui.painter().text(
+            egui::pos2(
+                plot.left() + plot.width() * fraction as f32,
+                plot.bottom() + SPACE_XS,
+            ),
+            alignment,
+            label,
+            TextStyle::Small.resolve(ui.style()),
+            theme::rgb(theme.text_muted),
+        );
+    }
+    let id = ui.make_persistent_id(("timeline", chart.label));
+    let response = ui.interact(plot, id, Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Other, ui.is_enabled(), chart.label)
+    });
+    let recorded = chart
+        .lines
+        .iter()
+        .map(|line| line.graph.series.len())
+        .max()
+        .unwrap_or(0);
+    let key = id.with("sample-age");
+    let mode_key = id.with("keyboard-inspection");
+    let pointer_age = response
+        .hover_pos()
+        .map(|position| nearest_age(plot, capacity, position.x));
+    let mut keyboard_mode = ui
+        .data(|data| data.get_temp::<bool>(mode_key))
+        .unwrap_or(false);
+    let mut keyboard_age = ui
+        .data(|data| data.get_temp::<usize>(key))
+        .unwrap_or(0)
+        .min(recorded.saturating_sub(1));
+    // A discarded layout pass replays the same input, not another key press.
+    let frame_key = id.with("inspection-input-frame");
+    let frame = ui.ctx().cumulative_frame_nr();
+    let new_input = ui.data(|data| data.get_temp::<u64>(frame_key)) != Some(frame);
+    if new_input {
+        if ui.input(|input| {
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::PointerMoved(_)))
+        }) || response.clicked()
+        {
+            keyboard_mode = false;
+            if let Some(age) = pointer_age {
+                keyboard_age = age.min(recorded.saturating_sub(1));
+            }
+        }
+        if response.has_focus() {
+            ui.input(|input| {
+                if input.key_pressed(egui::Key::ArrowLeft) {
+                    keyboard_mode = true;
+                    keyboard_age = keyboard_age
+                        .saturating_add(1)
+                        .min(recorded.saturating_sub(1));
+                }
+                if input.key_pressed(egui::Key::ArrowRight) {
+                    keyboard_mode = true;
+                    keyboard_age = keyboard_age.saturating_sub(1);
+                }
+                if input.key_pressed(egui::Key::Home) {
+                    keyboard_mode = true;
+                    keyboard_age = recorded.saturating_sub(1);
+                }
+                if input.key_pressed(egui::Key::End) {
+                    keyboard_mode = true;
+                    keyboard_age = 0;
+                }
+                if input.key_pressed(egui::Key::Escape) {
+                    response.surrender_focus();
+                }
+            });
+        }
+        ui.data_mut(|data| data.insert_temp(frame_key, frame));
+    }
+    ui.data_mut(|data| {
+        data.insert_temp(key, keyboard_age);
+        data.insert_temp(mode_key, keyboard_mode);
+    });
+    let age = if response.has_focus() && keyboard_mode {
+        Some(keyboard_age)
+    } else {
+        pointer_age.or_else(|| response.has_focus().then_some(keyboard_age))
+    };
+    if recorded > 0 && recorded < capacity {
+        let empty_width = sample_x(plot, capacity, recorded - 1) - plot.left();
+        if empty_width >= 180.0 {
+            ui.painter().text(
+                egui::pos2(plot.left() + empty_width / 2.0, plot.center().y),
+                Align2::CENTER_CENTER,
+                "No earlier samples yet",
+                TextStyle::Small.resolve(ui.style()),
+                theme::rgb(theme.text_muted),
+            );
+        }
+    }
+    if let Some(age) = age {
+        let x = sample_x(plot, capacity, age);
+        painter.vline(
+            x,
+            plot.y_range(),
+            Stroke::new(1.0, theme::rgb(theme.text_muted)),
+        );
+        for line in chart.lines {
+            if let Some(value) = line.graph.series.from_latest(age) {
+                let y = plot.bottom() - plot.height() * (value / scale).clamp(0.0, 1.0);
+                painter.circle_filled(egui::pos2(x, y), SPACE_XS, theme::rgb(theme.app));
+                painter.circle_stroke(
+                    egui::pos2(x, y),
+                    SPACE_XS,
+                    Stroke::new(2.0, theme::rgb(line.graph.color)),
+                );
+            }
+        }
+        egui::Tooltip::always_open(
+            ui.ctx().clone(),
+            response.layer_id,
+            id,
+            egui::PopupAnchor::Position(if response.has_focus() && keyboard_mode {
+                egui::pos2(x, plot.center().y)
+            } else {
+                response
+                    .hover_pos()
+                    .unwrap_or(egui::pos2(x, plot.center().y))
+            }),
+        )
+        .show(|ui| {
+            ui.set_max_width(280.0);
+            ui.label(
+                egui::RichText::new(age_label(age as f64 * chart.interval.as_secs_f64()))
+                    .color(theme::rgb(theme.text)),
+            );
+            for (index, line) in chart.lines.iter().enumerate() {
+                timeline_legend(ui, theme, line, index, line.graph.series.from_latest(age));
+            }
+            if chart
+                .lines
+                .iter()
+                .all(|line| line.graph.series.from_latest(age).is_none())
+            {
+                ui.label("No sample recorded here yet.");
+            }
+        });
+    } else if recorded < 2 {
+        ui.painter().text(
+            plot.center(),
+            Align2::CENTER_CENTER,
+            "Collecting history…",
+            TextStyle::Body.resolve(ui.style()),
+            theme::rgb(theme.text_muted),
+        );
+    }
+    widgets::focus_ring(ui, theme, &response);
+    theme::gap(ui, SPACE_SM);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(SPACE_LG, SPACE_SM);
+        for (index, line) in chart.lines.iter().enumerate() {
+            let value = match age {
+                Some(age) => line.graph.series.from_latest(age),
+                None => line.graph.series.from_latest(0),
+            };
+            timeline_legend(ui, theme, line, index, value);
+        }
+    });
+    rect
+}
+
+fn axis_maximum(graph: &Graph<'_>) -> f32 {
+    if graph.unit == Unit::Percent {
+        graph.series.scale(graph.floor)
+    } else {
+        graph
+            .unit
+            .axis_ceiling((graph.series.max() * 1.15).max(graph.floor))
+    }
+}
+
+fn sample_x(rect: Rect, capacity: usize, age: usize) -> f32 {
+    rect.right()
+        - rect.width() * age.min(capacity.saturating_sub(1)) as f32
+            / capacity.saturating_sub(1).max(1) as f32
+}
+
+fn nearest_age(rect: Rect, capacity: usize, x: f32) -> usize {
+    (((rect.right() - x) / rect.width().max(1.0)).clamp(0.0, 1.0)
+        * capacity.saturating_sub(1) as f32)
+        .round() as usize
+}
+
+fn age_label(seconds: f64) -> String {
+    if seconds < 0.001 {
+        return "Latest".to_string();
+    }
+    if seconds < 1.0 {
+        return format!("~{} ms earlier", (seconds * 1_000.0).round() as u64);
+    }
+    let seconds = seconds.round() as u64;
+    if seconds < 60 {
+        format!("~{seconds}s earlier")
+    } else if seconds < 3600 {
+        format!("~{}m {:02}s earlier", seconds / 60, seconds % 60)
+    } else {
+        format!("~{}h {:02}m earlier", seconds / 3600, (seconds / 60) % 60)
+    }
+}
+
+fn timeline_legend(
+    ui: &mut Ui,
+    theme: &Palette,
+    line: &TimelineLine<'_>,
+    index: usize,
+    value: Option<f32>,
+) {
+    let label = ui.painter().layout_no_wrap(
+        line.label.to_string(),
+        TextStyle::Small.resolve(ui.style()),
+        theme::rgb(theme.text_muted),
+    );
+    let text = value.map_or_else(
+        || crate::format::DASH.to_string(),
+        |value| line.graph.unit.value(value),
+    );
+    let value = ui.painter().layout_no_wrap(
+        text,
+        TextStyle::Monospace.resolve(ui.style()),
+        theme::rgb(theme.text),
+    );
+    let width = SPACE_MD + SPACE_XS * 2.0 + label.size().x + value.size().x;
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(
+            width.min(ui.max_rect().width()),
+            label.size().y.max(value.size().y),
+        ),
+        Sense::hover(),
+    );
+    let points = [
+        rect.left_center(),
+        rect.left_center() + Vec2::new(SPACE_MD, 0.0),
+    ];
+    let stroke = Stroke::new(2.0, theme::rgb(line.graph.color));
+    if index % 2 == 1 {
+        ui.painter()
+            .extend(Shape::dashed_line(&points, stroke, SPACE_XS, SPACE_XS));
+    } else {
+        ui.painter().line_segment(points, stroke);
+    }
+    ui.painter().galley(
+        egui::pos2(
+            rect.left() + SPACE_MD + SPACE_XS,
+            rect.center().y - label.size().y / 2.0,
+        ),
+        label.clone(),
+        theme::rgb(theme.text_muted),
+    );
+    ui.painter().galley(
+        egui::pos2(
+            rect.left() + SPACE_MD + SPACE_XS * 2.0 + label.size().x,
+            rect.center().y - value.size().y / 2.0,
+        ),
+        value,
+        theme::rgb(theme.text),
+    );
 }
 
 /// A painter that cannot draw outside `rect`.
@@ -114,26 +558,8 @@ fn clipped(ui: &Ui, rect: Rect) -> egui::Painter {
     ui.painter().with_clip_rect(rect)
 }
 
-/// Draws a filled area graph into `rect`.
+/// Draws a filled area graph into `rect`, with its axis maximum labelled.
 pub fn area(ui: &Ui, theme: &Palette, rect: Rect, graph: &Graph<'_>) {
-    area_with(ui, theme, rect, graph, Axis::Labelled);
-}
-
-/// Whether an area graph states the value at the top of its own axis.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Axis {
-    /// The usual case: a graph standing on its own needs its scale
-    /// stated, because the shape means nothing without it.
-    Labelled,
-    /// For a graph in a grid of identical ones. Sixteen core tiles share
-    /// one fixed axis, so sixteen copies of "100%" state a fact once and
-    /// then repeat it fifteen times in the corner of every tile — the
-    /// grid's own heading already says what these are.
-    Shared,
-}
-
-/// [`area`], with the axis label optional.
-fn area_with(ui: &Ui, theme: &Palette, rect: Rect, graph: &Graph<'_>, axis: Axis) {
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::same(RADIUS), theme::rgb(theme.app));
     grid(ui, theme, rect);
@@ -144,9 +570,8 @@ fn area_with(ui: &Ui, theme: &Palette, rect: Rect, graph: &Graph<'_>, axis: Axis
         // One point is not a line. Drawing nothing is right: the graph's
         // frame and gridlines are already on screen, so it reads as
         // "waiting for data" rather than as broken.
-        if axis == Axis::Labelled {
-            axis_label(ui, theme, rect, graph.unit.label(scale));
-        }
+        frame(ui, theme, rect);
+        axis_label(ui, theme, rect, graph.unit.label(scale));
         return;
     }
 
@@ -157,9 +582,7 @@ fn area_with(ui: &Ui, theme: &Palette, rect: Rect, graph: &Graph<'_>, axis: Axis
         Stroke::new(1.5, theme::rgb(graph.color)),
     ));
     frame(ui, theme, rect);
-    if axis == Axis::Labelled {
-        axis_label(ui, theme, rect, graph.unit.label(scale));
-    }
+    axis_label(ui, theme, rect, graph.unit.label(scale));
 }
 
 /// Draws a two-band area graph: a total with a second series shaded
@@ -288,6 +711,7 @@ pub fn core_grid(
     rect: Rect,
     cores: &[Series],
     kinds: &[crate::model::CoreKind],
+    interval: std::time::Duration,
 ) {
     if cores.is_empty() {
         return;
@@ -312,60 +736,72 @@ pub fn core_grid(
                 (cell.y + SPACE_XS) * row as f32,
             );
         let cell_rect = Rect::from_min_size(origin, cell);
-        area_with(
-            ui,
-            theme,
-            cell_rect,
-            &Graph {
-                series,
-                color: theme.series(index, count),
-                floor: 100.0,
-                unit: Unit::Percent,
-            },
-            // One axis, shared by every tile — see `Axis::Shared`.
-            Axis::Shared,
+        ui.painter()
+            .rect_filled(cell_rect, CornerRadius::same(RADIUS), theme::rgb(theme.app));
+        let plot_rect = Rect::from_min_max(
+            cell_rect.min + Vec2::new(SPACE_XS, SPACE_LG),
+            cell_rect.max - Vec2::splat(SPACE_XS),
         );
-        // Each tile identifies itself and carries the current value. The
-        // graph still owns most of the pixels; these two short labels turn
-        // sixteen otherwise-anonymous shapes into actual logical processors.
+        let plot = clipped(ui, plot_rect);
+        grid(ui, theme, plot_rect);
+        let points = plot_points(series, plot_rect, 100.0);
+        fill_under(&plot, plot_rect, &points, theme.series(index, count));
+        if points.len() >= 2 {
+            plot.add(Shape::line(
+                points,
+                Stroke::new(1.5, theme::rgb(theme.series(index, count))),
+            ));
+        }
+        frame(ui, theme, cell_rect);
         let kind = kinds.get(index).copied().unwrap_or_default();
-        if cell_rect.width() >= 46.0 && cell_rect.height() >= 24.0 {
-            let font = TextStyle::Small.resolve(ui.style());
-            // The marker goes in the tile's own label rather than in a
-            // second line or a tinted background: a hybrid machine has
-            // two dozen of these on screen at once, and anything that
-            // costs a tile more than one character costs the graph the
-            // room it was drawn for.
-            let label = match kind.marker() {
-                Some(marker) => format!("CPU {index} · {marker}"),
-                None => format!("CPU {index}"),
+        let label = match kind.marker() {
+            Some(marker) => format!("CPU {index} · {marker}"),
+            None => format!("CPU {index}"),
+        };
+        let font = TextStyle::Small.resolve(ui.style());
+        let value = ui.painter().layout_no_wrap(
+            crate::format::percent(series.latest().into()),
+            font.clone(),
+            theme::rgb(theme.text),
+        );
+        let show_value = cell_rect.width() >= 104.0;
+        let label_width = cell_rect.width()
+            - SPACE_XS * 2.0
+            - if show_value {
+                value.size().x + SPACE_SM
+            } else {
+                0.0
             };
-            ui.painter().text(
-                cell_rect.left_top() + Vec2::new(SPACE_XS, SPACE_XS),
-                Align2::LEFT_TOP,
-                label,
-                font.clone(),
-                theme::rgb(theme.text_faint),
-            );
-            ui.painter().text(
-                cell_rect.right_top() + Vec2::new(-SPACE_XS, SPACE_XS),
-                Align2::RIGHT_TOP,
-                crate::format::percent(f64::from(series.latest())),
-                font,
+        ui.painter().galley(
+            cell_rect.min + Vec2::splat(SPACE_XS),
+            widgets::truncated(ui, &label, font, theme.text_muted, label_width),
+            theme::rgb(theme.text_muted),
+        );
+        if show_value {
+            ui.painter().galley(
+                egui::pos2(
+                    cell_rect.right() - SPACE_XS - value.size().x,
+                    cell_rect.top() + SPACE_XS,
+                ),
+                value,
                 theme::rgb(theme.text),
             );
         }
-        // Hover carries the window statistics that would be too dense to
-        // print on every tile at once.
-        ui.interact(cell_rect, ui.id().with("core").with(index), Sense::hover())
-            .on_hover_text(format!(
-                "{} {index}\nCurrent {}\nRecent average {}\nRecent peak {}\n{} samples",
+        let response = ui.interact(cell_rect, ui.id().with("core").with(index), Sense::hover());
+        if let Some(position) = response.hover_pos() {
+            let age = nearest_age(plot_rect, series.capacity(), position.x);
+            let value = series.from_latest(age).map_or_else(
+                || "Not recorded yet".to_string(),
+                |value| Unit::Percent.value(value),
+            );
+            response.on_hover_text(format!(
+                "{} {index}\n{}: {value}\nWindow average {}\nWindow peak {}",
                 kind.label(),
-                crate::format::percent(f64::from(series.latest())),
-                crate::format::percent(f64::from(series.mean())),
-                crate::format::percent(f64::from(series.max())),
-                series.len(),
+                age_label(age as f64 * interval.as_secs_f64()),
+                Unit::Percent.value(series.mean()),
+                Unit::Percent.value(series.max())
             ));
+        }
     }
 }
 
@@ -470,7 +906,7 @@ fn axis_label(ui: &Ui, theme: &Palette, rect: Rect, text: String) {
         Align2::LEFT_TOP,
         text,
         TextStyle::Small.resolve(ui.style()),
-        theme::rgb(theme.text_faint),
+        theme::rgb(theme.text_muted),
     );
 }
 
@@ -483,13 +919,13 @@ pub fn legend(ui: &mut Ui, theme: &Palette, color: Rgb, label: &str, value: &str
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(SWATCH), Sense::hover());
         ui.painter()
             .rect_filled(rect, CornerRadius::same(2), theme::rgb(color));
-        ui.add_space(SPACE_XS);
+        theme::gap(ui, SPACE_XS);
         ui.label(
             egui::RichText::new(label)
                 .color(theme::rgb(theme.text_muted))
                 .text_style(TextStyle::Small),
         );
-        ui.add_space(SPACE_XS);
+        theme::gap(ui, SPACE_XS);
         // A plain label, not `Layout::right_to_left` — that layout
         // justifies against the *whole remaining row*, not against this
         // legend entry's own few pixels. Harmless when `legend` is the
@@ -506,7 +942,6 @@ pub fn legend(ui: &mut Ui, theme: &Palette, color: Rgb, label: &str, value: &str
                 .text_style(TextStyle::Monospace),
         );
     });
-    ui.add_space(SPACE_XS);
 }
 
 /// A sparkline: a bare line with no frame, grid, or label.
@@ -540,6 +975,118 @@ pub const GRAPH_GAP: f32 = SPACE_SM;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn rate_axes_round_in_the_displayed_units_and_keep_peak_headroom() {
+        let mut series = Series::new(4);
+        series.push(4_200_000.0);
+        let graph = Graph {
+            series: &series,
+            color: Rgb::new(0, 0, 0),
+            floor: 0.0,
+            unit: Unit::Rate,
+        };
+        let maximum = axis_maximum(&graph);
+        assert!(maximum >= series.max() * 1.15);
+        assert_eq!(Unit::Rate.value(maximum), "5.00 MB/s");
+        assert_eq!(Unit::Rate.value(maximum / 2.0), "2.50 MB/s");
+        assert!(Unit::Rate.axis_ceiling(0.0) >= GRID_BANDS as f32);
+        assert!(Unit::Rate.axis_ceiling(f32::MAX).is_finite());
+    }
+
+    #[test]
+    fn sample_inspection_matches_the_plot_including_unrecorded_history() {
+        let rect = panel();
+        for capacity in [1, 5, 240] {
+            for age in 0..capacity {
+                assert_eq!(
+                    nearest_age(rect, capacity, sample_x(rect, capacity, age)),
+                    age
+                );
+            }
+        }
+        assert_eq!(Unit::Percent.label(50.0), "100%");
+        assert_eq!(Unit::Percent.value(50.0), "50%");
+        assert_eq!(age_label(0.25), "~250 ms earlier");
+        assert_eq!(age_label(239.0), "~3m 59s earlier");
+    }
+
+    #[test]
+    fn keyboard_inspection_keeps_working_with_the_pointer_over_the_chart() -> anyhow::Result<()> {
+        let mut series = Series::new(5);
+        for value in [10.0, 20.0, 30.0, 40.0, 50.0] {
+            series.push(value);
+        }
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, state: &mut (Series, Option<egui::Id>)| {
+                let palette = crate::theme::Catalog::load().get(None).clone();
+                theme::apply(ui.ctx(), &palette);
+                state.1 = Some(
+                    ui.make_persistent_id(("timeline", "CPU timeline"))
+                        .with("sample-age"),
+                );
+                timeline(
+                    ui,
+                    &palette,
+                    200.0,
+                    &Timeline {
+                        label: "CPU timeline",
+                        interval: std::time::Duration::from_secs(1),
+                        composition: Composition::Independent,
+                        lines: &[TimelineLine {
+                            label: "Total",
+                            graph: Graph {
+                                series: &state.0,
+                                color: palette.accent,
+                                floor: 100.0,
+                                unit: Unit::Percent,
+                            },
+                        }],
+                    },
+                );
+            },
+            (series, None),
+        );
+        harness.run();
+        harness.get_by_label("CPU timeline").focus();
+        harness.run();
+        harness.key_press(egui::Key::ArrowLeft);
+        harness.run();
+        let key = harness
+            .state()
+            .1
+            .ok_or_else(|| anyhow::anyhow!("no sample selection key"))?;
+        assert_eq!(
+            harness.ctx.data(|data| data.get_temp::<usize>(key)),
+            Some(1)
+        );
+        let focus = harness.ctx.memory(|memory| memory.focused());
+        harness.get_by_label("CPU timeline").hover();
+        harness.run();
+        assert_eq!(
+            harness.ctx.memory(|memory| memory.focused()),
+            focus,
+            "hover must keep chart focus"
+        );
+        assert_eq!(
+            harness.ctx.data(|data| data.get_temp::<usize>(key)),
+            Some(2),
+            "pointer must select the middle sample"
+        );
+        harness.key_press(egui::Key::ArrowLeft);
+        harness.run();
+        assert_eq!(
+            harness.ctx.data(|data| data.get_temp::<usize>(key)),
+            Some(3),
+            "the pointer selected age 2, then Left selected age 3"
+        );
+        assert!(
+            harness.query_by_label("~3s earlier").is_some(),
+            "the tooltip must describe the selected historical time"
+        );
+        Ok(())
+    }
 
     fn filled(capacity: usize, count: usize, value: f32) -> Series {
         let mut series = Series::new(capacity);

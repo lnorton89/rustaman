@@ -54,3 +54,31 @@ cargo run --example changelog -- --release v0.2.0
 rewritten on every run. See [`CONTRIBUTING.md`](../CONTRIBUTING.md) for
 the release ordering, and the module docs in `changelog.rs` for what is
 worth knowing before changing how it groups things.
+
+## `screenshot`
+
+Renders the real native UI offscreen against repeatable machine fixtures:
+
+```powershell
+cargo run --example screenshot -- --all
+cargo run --example screenshot -- --scene settings --focus-control Midnight
+cargo run --example screenshot -- --scene processes-selected --hover-control "End task"
+cargo run --example screenshot -- --scene modal --focus-control "End snapshot tree"
+cargo run --example screenshot -- --scene cpu --mini-nav --secondary-width 260
+cargo run --example screenshot -- --scene details-selected --search no-such-process
+cargo run --example screenshot -- --scene network-short
+cargo run --example screenshot -- --scene gpu-many-engines --mini-nav
+cargo run --example screenshot -- --scene cpu --hover-control "CPU utilisation history"
+```
+
+`--focus-control` and `--hover-control` select a control by its accessible
+label, so state captures survive spacing and typography changes. They only
+focus or hover; they do not activate the control. `--theme daylight`,
+`--size 780x480`, and `--scale 1.25` cover compact and scaled layouts.
+PNG output goes to `target/screenshots/` unless `--out` names another path.
+`--mini-nav` captures the compact rail. `--secondary-width` exercises a
+resized Performance picker or Details inspector. `--search` captures
+filtered and empty table states without depending on machine contents.
+`network-short` checks a fitting adapter inventory; `gpu-many-engines` checks
+repeated driver counters and partially filled history. Chart accessible labels
+work with both state-capture flags, including keyboard focus tooltips.

@@ -1,6 +1,6 @@
 [package]
 name = "rustaman"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.98"
 description = "A modern Windows task manager: process, service, startup and performance management in one native app."

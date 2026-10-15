@@ -165,6 +165,9 @@ pub struct Palette {
     /// text is unreadable on the first.
     pub text_on_accent: Rgb,
 
+    /// Text on a destructive action, derived from the danger fill itself.
+    pub text_on_danger: Rgb,
+
     /// The primary accent.
     pub accent: Rgb,
     /// The accent lifted, for a hovered accent surface.
@@ -191,6 +194,8 @@ pub struct Palette {
 
     /// Errors and destructive actions.
     pub danger: Rgb,
+    /// A destructive action's hover fill.
+    pub danger_hover: Rgb,
     /// Warnings.
     pub warning: Rgb,
     /// Success.
@@ -271,6 +276,11 @@ impl Palette {
             } else {
                 Rgb::new(16, 16, 20)
             },
+            text_on_danger: if danger.prefers_light_text() {
+                Rgb::new(255, 255, 255)
+            } else {
+                Rgb::new(16, 16, 20)
+            },
             accent,
             accent_hover: accent.lerp(forward, 0.18),
             accent_soft: accent.lerp(panel, 0.74),
@@ -295,6 +305,7 @@ impl Palette {
             control,
             control_hover: control.lerp(text, 0.28),
             danger,
+            danger_hover: danger.lerp(forward, 0.12),
             warning,
             success,
             info,
@@ -531,6 +542,7 @@ fn default_palette() -> &'static Palette {
             text_muted: Rgb::new(154, 165, 188),
             text_faint: Rgb::new(110, 120, 140),
             text_on_accent: Rgb::new(16, 16, 20),
+            text_on_danger: Rgb::new(16, 16, 20),
             accent: Rgb::new(76, 201, 240),
             accent_hover: Rgb::new(110, 214, 244),
             accent_soft: Rgb::new(40, 68, 86),
@@ -539,6 +551,7 @@ fn default_palette() -> &'static Palette {
             control: Rgb::new(90, 99, 120),
             control_hover: Rgb::new(130, 140, 160),
             danger: Rgb::new(255, 92, 122),
+            danger_hover: Rgb::new(255, 112, 138),
             warning: Rgb::new(255, 179, 71),
             success: Rgb::new(74, 222, 128),
             info: Rgb::new(76, 201, 240),
@@ -677,6 +690,13 @@ mod tests {
             );
 
             // Text on a selected row.
+            for fill in [theme.danger, theme.danger_hover] {
+                let ratio = theme.text_on_danger.contrast(fill);
+                assert!(
+                    ratio >= SECONDARY_CONTRAST,
+                    "{name}: destructive-button text is only {ratio:.2}:1 against its fill"
+                );
+            }
             let on_selection = theme.selection_text.contrast(theme.selection);
             assert!(
                 on_selection >= SECONDARY_CONTRAST,

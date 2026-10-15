@@ -24,8 +24,8 @@
 //! control in the toolbar to make sense in both modes, and half of them
 //! do not.
 
-use super::theme::{self, HEADER_HEIGHT, ROW_HEIGHT, SPACE_MD, SPACE_SM, SPACE_XS};
-use super::{chrome, widgets};
+use super::theme::{self, HEADER_HEIGHT, ROW_HEIGHT, SPACE_MD, SPACE_SM};
+use super::{chrome, dnd, widgets};
 use crate::gui::app::actions::Action;
 use crate::gui::app::{rows::RowKey, App};
 use crate::model::sort::SortKey;
@@ -117,7 +117,7 @@ const _: () = assert!(
 pub fn draw(app: &mut App, ui: &mut Ui) {
     let theme = app.theme.clone();
     toolbar(app, ui, &theme);
-    ui.add_space(chrome::TOOLBAR_GAP);
+    theme::gap(ui, chrome::TOOLBAR_GAP);
 
     if app.snapshot.is_none() {
         widgets::empty_state(ui, &theme, "Waiting for the first sample…");
@@ -125,55 +125,56 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     }
     refresh_rows(app);
 
-    // The pane is split by hand rather than with `egui::Panel::right`.
-    //
-    // A right panel reserves its width by moving the parent's *cursor*,
-    // and in a top-down layout `available_rect_before_wrap` is derived
-    // from the parent's `max_rect` — so the table measured the full pane,
-    // laid its last columns out across the inspector, and painted its row
-    // backgrounds over the inspector's own text. Splitting the rect here
-    // and handing each half an explicit `max_rect` makes the reservation
-    // a fact rather than a request, and it is the same arithmetic the
-    // panel would have done.
-    //
-    // The inspector only exists when a row is selected. A permanently
-    // reserved three-hundred-point pane reading "Select a process" costs
-    // the table a quarter of its width to say nothing, on a view whose
-    // whole job is breadth.
+    // Explicit regions keep table fills and scrollbars out of the inspector.
     let pane = ui.available_rect_before_wrap();
     let inspector_open = app.selected_row().is_some();
-    let reserved = if inspector_open {
-        INSPECTOR_WIDTH + SPACE_MD * 2.0
-    } else {
-        0.0
-    };
-    let table_rect = egui::Rect::from_min_max(
-        pane.min,
-        egui::pos2((pane.right() - reserved).max(pane.left()), pane.bottom()),
-    );
-
-    if inspector_open {
-        let inspector_rect = egui::Rect::from_min_max(
-            egui::pos2(pane.right() - INSPECTOR_WIDTH, pane.top()),
-            pane.max,
+    let table_rect = if inspector_open {
+        let (main, secondary) = dnd::split_pane(
+            ui,
+            &theme,
+            "Resize process inspector",
+            &mut app.config.inspector_width,
+            dnd::PaneSplit {
+                default_width: INSPECTOR_WIDTH,
+                min_width: 260.0,
+                max_width: 480.0,
+                main_min_width: 240.0,
+                secondary_on_right: true,
+            },
         );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(inspector_rect), |ui| {
-            inspector(app, ui, &theme);
-        });
-    }
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .id_salt("details-secondary")
+                .max_rect(secondary),
+            |ui| {
+                inspector(app, ui, &theme);
+            },
+        );
+        main
+    } else {
+        pane
+    };
 
-    if app.details.rows.entries().is_empty() {
-        widgets::empty_state(ui, &theme, "No processes match that search");
-        return;
-    }
-    ui.scope_builder(egui::UiBuilder::new().max_rect(table_rect), |ui| {
-        table(app, ui, &theme, table_rect);
-    });
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .id_salt("details-main")
+            .max_rect(table_rect),
+        |ui| {
+            if app.details.rows.entries().is_empty() {
+                if widgets::no_matches(ui, &theme, "processes") {
+                    app.details.search.clear();
+                    app.details.query = crate::model::filter::Query::parse("");
+                }
+            } else {
+                table(app, ui, &theme, table_rect);
+            }
+        },
+    );
 }
 
 /// The row above the table.
 fn toolbar(app: &mut App, ui: &mut Ui, theme: &Palette) {
-    ui.horizontal(|ui| {
+    chrome::toolbar(ui, |ui| {
         if chrome::search_box(ui, theme, &mut app.details.search, "Search all processes") {
             app.details.query = crate::model::filter::Query::parse(&app.details.search);
         }
@@ -436,7 +437,7 @@ fn table_body(
 
     builder
         .header(HEADER_HEIGHT, |mut header| {
-            for (index, (key, _)) in COLUMNS.iter().enumerate() {
+            for (key, _) in &COLUMNS {
                 header.col(|ui| {
                     let sorted = (app.details.sort == *key).then_some(app.details.descending);
                     // `claims_width: false` for every column now that
@@ -450,7 +451,8 @@ fn table_body(
                             mark: key.mark(),
                             sorted,
                             claims_width: false,
-                            right_aligned: index > 0,
+                            right_aligned: widgets::numeric_column(*key),
+                            leading_inset: *key == SortKey::Name,
                             lifted: false,
                         },
                     )
@@ -576,7 +578,11 @@ fn cell_text(ui: &mut Ui, theme: &Palette, column: usize, process: &ProcessRow) 
         | SortKey::Path => String::new(),
     };
     let muted = text == crate::format::DASH;
-    widgets::number(ui, theme, &text, muted);
+    if widgets::numeric_column(*key) {
+        widgets::number(ui, theme, &text, muted);
+    } else {
+        widgets::text_cell(ui, theme, &text, muted);
+    }
 }
 
 /// An account name without its domain prefix.
@@ -599,124 +605,122 @@ fn inspector(app: &mut App, ui: &mut Ui, theme: &Palette) {
         return;
     };
 
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            widgets::section(ui, theme, process.display_name());
+    widgets::scroll_body(ui, |ui| {
+        widgets::section(ui, theme, process.display_name());
 
-            widgets::detail_row(ui, theme, "Image", &process.name);
-            widgets::detail_row(ui, theme, "PID", &process.pid.to_string());
-            widgets::detail_row(ui, theme, "Parent PID", &process.parent_pid.to_string());
-            widgets::detail_row(ui, theme, "Status", process.status.label());
-            widgets::detail_row(
-                ui,
-                theme,
-                "User",
-                if process.user.is_empty() {
-                    crate::format::DASH
-                } else {
-                    &process.user
-                },
+        widgets::detail_row(ui, theme, "Image", &process.name);
+        widgets::detail_row(ui, theme, "PID", &process.pid.to_string());
+        widgets::detail_row(ui, theme, "Parent PID", &process.parent_pid.to_string());
+        widgets::detail_row(ui, theme, "Status", process.status.label());
+        widgets::detail_row(
+            ui,
+            theme,
+            "User",
+            if process.user.is_empty() {
+                crate::format::DASH
+            } else {
+                &process.user
+            },
+        );
+        widgets::detail_row(ui, theme, "Session", &process.session_id.to_string());
+        widgets::detail_row(
+            ui,
+            theme,
+            "Elevated",
+            if process.elevated { "Yes" } else { "No" },
+        );
+        widgets::detail_row(ui, theme, "Architecture", process.architecture.label());
+        widgets::detail_row(ui, theme, "Priority", process.priority.label());
+        // Shown on every machine rather than only on Windows 11: on
+        // 10 it reads as a dash, which is the truth about a machine
+        // that has no such state, where hiding the row would leave a
+        // reader wondering whether the app looked.
+        widgets::detail_row(
+            ui,
+            theme,
+            "Efficiency mode",
+            app.efficiency_of(&process).label(),
+        );
+        if let Some(title) = process.window_title.as_deref() {
+            widgets::detail_row(ui, theme, "Window", title);
+        }
+
+        theme::gap(ui, chrome::SECTION_GAP);
+        widgets::section(ui, theme, "Resources");
+        widgets::detail_row(
+            ui,
+            theme,
+            "CPU",
+            &crate::format::percent(process.cpu_percent),
+        );
+        widgets::detail_row(
+            ui,
+            theme,
+            "CPU time",
+            &crate::format::cpu_time(process.cpu_time_ms),
+        );
+        widgets::detail_row(
+            ui,
+            theme,
+            "Working set",
+            &crate::format::bytes(process.working_set),
+        );
+        widgets::detail_row(
+            ui,
+            theme,
+            "Private bytes",
+            &crate::format::bytes(process.private_bytes),
+        );
+        widgets::detail_row(
+            ui,
+            theme,
+            "Virtual size",
+            &crate::format::bytes(process.virtual_bytes),
+        );
+        widgets::detail_row(ui, theme, "Threads", &process.thread_count.to_string());
+        widgets::detail_row(
+            ui,
+            theme,
+            "Handles",
+            &crate::format::count(u64::from(process.handle_count)),
+        );
+        widgets::detail_row(
+            ui,
+            theme,
+            "Disk read",
+            &crate::format::bytes(process.io_read_bytes),
+        );
+        widgets::detail_row(
+            ui,
+            theme,
+            "Disk written",
+            &crate::format::bytes(process.io_write_bytes),
+        );
+        widgets::detail_row(ui, theme, "Connections", &process.connections.to_string());
+
+        if let Some(path) = process.path.as_ref() {
+            theme::gap(ui, chrome::SECTION_GAP);
+            widgets::section(ui, theme, "Image");
+            // Wrapped rather than elided: a path is the one field
+            // where the *end* is what identifies it, and an ellipsis
+            // in a 300-point pane would hide exactly that.
+            ui.label(
+                egui::RichText::new(path.to_string_lossy())
+                    .color(theme::rgb(theme.text_muted))
+                    .text_style(egui::TextStyle::Small),
             );
-            widgets::detail_row(ui, theme, "Session", &process.session_id.to_string());
-            widgets::detail_row(
-                ui,
-                theme,
-                "Elevated",
-                if process.elevated { "Yes" } else { "No" },
-            );
-            widgets::detail_row(ui, theme, "Architecture", process.architecture.label());
-            widgets::detail_row(ui, theme, "Priority", process.priority.label());
-            // Shown on every machine rather than only on Windows 11: on
-            // 10 it reads as a dash, which is the truth about a machine
-            // that has no such state, where hiding the row would leave a
-            // reader wondering whether the app looked.
-            widgets::detail_row(
-                ui,
-                theme,
-                "Efficiency mode",
-                app.efficiency_of(&process).label(),
-            );
-            if let Some(title) = process.window_title.as_deref() {
-                widgets::detail_row(ui, theme, "Window", title);
+        }
+
+        theme::gap(ui, SPACE_MD);
+        ui.horizontal(|ui| {
+            if widgets::secondary_button(ui, theme, "Open location").clicked() {
+                app.dispatch(Action::Reveal(process.key()), ui);
             }
-
-            ui.add_space(SPACE_XS);
-            widgets::section(ui, theme, "Resources");
-            widgets::detail_row(
-                ui,
-                theme,
-                "CPU",
-                &crate::format::percent(process.cpu_percent),
-            );
-            widgets::detail_row(
-                ui,
-                theme,
-                "CPU time",
-                &crate::format::cpu_time(process.cpu_time_ms),
-            );
-            widgets::detail_row(
-                ui,
-                theme,
-                "Working set",
-                &crate::format::bytes(process.working_set),
-            );
-            widgets::detail_row(
-                ui,
-                theme,
-                "Private bytes",
-                &crate::format::bytes(process.private_bytes),
-            );
-            widgets::detail_row(
-                ui,
-                theme,
-                "Virtual size",
-                &crate::format::bytes(process.virtual_bytes),
-            );
-            widgets::detail_row(ui, theme, "Threads", &process.thread_count.to_string());
-            widgets::detail_row(
-                ui,
-                theme,
-                "Handles",
-                &crate::format::count(u64::from(process.handle_count)),
-            );
-            widgets::detail_row(
-                ui,
-                theme,
-                "Disk read",
-                &crate::format::bytes(process.io_read_bytes),
-            );
-            widgets::detail_row(
-                ui,
-                theme,
-                "Disk written",
-                &crate::format::bytes(process.io_write_bytes),
-            );
-            widgets::detail_row(ui, theme, "Connections", &process.connections.to_string());
-
-            if let Some(path) = process.path.as_ref() {
-                ui.add_space(SPACE_XS);
-                widgets::section(ui, theme, "Image");
-                // Wrapped rather than elided: a path is the one field
-                // where the *end* is what identifies it, and an ellipsis
-                // in a 300-point pane would hide exactly that.
-                ui.label(
-                    egui::RichText::new(path.to_string_lossy())
-                        .color(theme::rgb(theme.text_muted))
-                        .text_style(egui::TextStyle::Small),
-                );
+            if widgets::secondary_button(ui, theme, "Copy").clicked() {
+                app.dispatch(Action::Copy(process.key()), ui);
             }
-
-            ui.add_space(SPACE_MD);
-            ui.horizontal(|ui| {
-                if widgets::primary_button(ui, theme, "Open location").clicked() {
-                    app.dispatch(Action::Reveal(process.key()), ui);
-                }
-                if widgets::primary_button(ui, theme, "Copy").clicked() {
-                    app.dispatch(Action::Copy(process.key()), ui);
-                }
-            });
         });
+    });
 }
 
 #[cfg(test)]
@@ -731,7 +735,7 @@ mod tests {
     fn pane_for(window: f32, inspector: bool) -> f32 {
         let pane = window - theme::NAV_WIDTH - theme::PAD * 2.0;
         if inspector {
-            pane - (INSPECTOR_WIDTH + SPACE_MD * 2.0)
+            pane - (INSPECTOR_WIDTH + theme::PANE_GUTTER)
         } else {
             pane
         }

@@ -75,6 +75,35 @@ pub fn hover_fill(ui: &Ui, id: egui::Id, hovered: bool, rest: Rgb, lifted: Rgb) 
     theme::rgb(rest.lerp(lifted, t))
 }
 
+/// The shared, inset keyboard-focus ring, visible on neutral and filled controls.
+pub fn focus_ring(ui: &Ui, theme: &Palette, response: &Response) {
+    if response.has_focus() {
+        paint_focus_ring(
+            ui.painter(),
+            theme,
+            response.rect,
+            CornerRadius::same(RADIUS),
+        );
+    }
+}
+
+fn paint_focus_ring(painter: &egui::Painter, theme: &Palette, rect: Rect, radius: CornerRadius) {
+    // A surface-colored gap keeps the accent ring visible even on an
+    // accent-filled primary button. Both strokes stay inside its clip.
+    painter.rect_stroke(
+        rect.shrink(1.0),
+        radius,
+        Stroke::new(4.0, theme::rgb(theme.app)),
+        StrokeKind::Inside,
+    );
+    painter.rect_stroke(
+        rect.shrink(2.0),
+        radius,
+        Stroke::new(2.0, theme::rgb(theme.accent)),
+        StrokeKind::Inside,
+    );
+}
+
 /// Maximum height for a table's scrolling body inside the remaining pane.
 ///
 /// `TableBuilder::header` advances the cursor by the header and the Ui's
@@ -83,6 +112,29 @@ pub fn hover_fill(ui: &Ui, id: egui::Id, hovered: bool, rest: Rgb, lifted: Rgb) 
 #[must_use]
 pub fn table_body_height(ui: &Ui, pane_height: f32) -> f32 {
     (pane_height - theme::HEADER_HEIGHT - ui.spacing().item_spacing.y).max(0.0)
+}
+
+/// A scrolling reading pane with shared scrollbar clearance and bottom padding.
+///
+/// Dense tables manage their own scrolling; graphs, cards, pickers and
+/// inspectors use this container so their content has the same inset.
+pub fn scroll_body(ui: &mut Ui, contents: impl FnOnce(&mut Ui)) -> Rect {
+    scroll_body_output(ui, contents).inner
+}
+
+/// The same reading pane with its actual content and viewport measurements.
+pub(super) fn scroll_body_output(
+    ui: &mut Ui,
+    contents: impl FnOnce(&mut Ui),
+) -> egui::scroll_area::ScrollAreaOutput<Rect> {
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.set_max_width((ui.available_width() - PAD).max(0.0));
+            contents(ui);
+            theme::gap(ui, PAD);
+            ui.min_rect()
+        })
 }
 
 /// Where a selection bar sits, which follows from what it marks.
@@ -179,21 +231,56 @@ pub fn selection_fill(
     }
 }
 
+/// Hover and pressed fills for a selectable card or destination.
+pub fn selectable_surface(
+    ui: &Ui,
+    theme: &Palette,
+    id: egui::Id,
+    response: &Response,
+    selected: bool,
+    rest: Rgb,
+) -> Color32 {
+    if response.is_pointer_button_down_on() {
+        theme::rgb(theme.selection)
+    } else {
+        selection_fill(ui, theme, id, selected, response.hovered(), rest)
+    }
+}
+
 /// A navigation-rail entry: icon, label, and an accent bar when active.
 ///
-/// The bar rather than a filled background because the rail is narrow and
-/// a full-width fill at this size reads as a text field rather than a
-/// selected item.
+/// The selected fill and leading bar identify the current destination;
+/// a focus outline distinguishes keyboard focus from selection.
 pub fn nav_item(ui: &mut Ui, theme: &Palette, icon: Icon, label: &str, active: bool) -> Response {
+    nav_destination(ui, theme, icon, label, active, false)
+}
+
+/// A destination with the same target and label in expanded and icon-only rails.
+pub fn nav_destination(
+    ui: &mut Ui,
+    theme: &Palette,
+    icon: Icon,
+    label: &str,
+    active: bool,
+    compact: bool,
+) -> Response {
     /// The rail entry's height. Taller than a table row — this is a
     /// primary destination, not a list item.
-    const HEIGHT: f32 = 36.0;
+    const HEIGHT: f32 = theme::CONTROL_HEIGHT;
     /// The icon column's width, so every label starts on one column
     /// whatever shape the icon beside it draws.
     const ICON_COLUMN: f32 = 22.0;
 
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            active,
+            label,
+        )
+    });
     let painter = ui.painter();
 
     // Keyed on the label rather than on `response.id`, which an
@@ -201,14 +288,7 @@ pub fn nav_item(ui: &mut Ui, theme: &Palette, icon: Icon, label: &str, active: b
     // list today, and would hand one destination another's animation
     // the day a view is added in the middle.
     let id = egui::Id::new(("nav", label));
-    let fill = selection_fill(
-        ui,
-        theme,
-        response.id,
-        active,
-        response.hovered(),
-        theme.app,
-    );
+    let fill = selectable_surface(ui, theme, id, &response, active, theme.panel);
     painter.rect_filled(rect, CornerRadius::same(RADIUS), fill);
 
     if active {
@@ -229,19 +309,92 @@ pub fn nav_item(ui: &mut Ui, theme: &Palette, icon: Icon, label: &str, active: b
     // label, so every label in the rail starts on one x however wide the
     // icon beside it happens to draw.
     let icon_box = Rect::from_center_size(
-        egui::pos2(rect.left() + SPACE_MD + ICON_COLUMN / 2.0, rect.center().y),
+        if compact {
+            rect.center()
+        } else {
+            egui::pos2(rect.left() + SPACE_MD + ICON_COLUMN / 2.0, rect.center().y)
+        },
         Vec2::splat(icons::NAV),
     );
     icons::paint(painter, icon_box, icon, icon_colour);
 
-    painter.text(
-        rect.left_center() + Vec2::new(SPACE_MD + ICON_COLUMN + SPACE_XS, 0.0),
-        Align2::LEFT_CENTER,
-        label,
-        TextStyle::Body.resolve(ui.style()),
-        text_color,
-    );
+    if !compact {
+        painter.text(
+            rect.left_center() + Vec2::new(SPACE_MD + ICON_COLUMN + SPACE_XS, 0.0),
+            Align2::LEFT_CENTER,
+            label,
+            TextStyle::Body.resolve(ui.style()),
+            text_color,
+        );
+    }
 
+    focus_ring(ui, theme, &response);
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if compact {
+        response.on_hover_text(label)
+    } else {
+        response
+    }
+}
+
+/// A stable, visible rail toggle; the chevron points toward the resulting width.
+pub fn nav_toggle(ui: &mut Ui, theme: &Palette, compact: bool) -> Response {
+    let label = if compact {
+        "Expand sidebar"
+    } else {
+        "Collapse sidebar"
+    };
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), theme::CONTROL_HEIGHT),
+        Sense::click(),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(RADIUS),
+        selectable_surface(ui, theme, response.id, &response, false, theme.panel),
+    );
+    let center = if compact {
+        rect.center()
+    } else {
+        rect.right_center() - Vec2::new(SPACE_MD, 0.0)
+    };
+    icons::paint_rotated(
+        ui.painter(),
+        Rect::from_center_size(center, Vec2::splat(icons::INLINE)),
+        Icon::ChevronRight,
+        theme::rgb(theme.text_muted),
+        if compact { 0.0 } else { 0.5 },
+    );
+    if !compact {
+        ui.painter().text(
+            rect.left_center() + Vec2::new(SPACE_SM, 0.0),
+            Align2::LEFT_CENTER,
+            "Navigation",
+            TextStyle::Small.resolve(ui.style()),
+            theme::rgb(theme.text_muted),
+        );
+    }
+    focus_ring(ui, theme, &response);
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(label)
+}
+
+/// Non-interactive compact counterpart of the rail's access notice.
+pub fn access_notice(ui: &mut Ui, theme: &Palette) -> Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::splat(theme::CONTROL_HEIGHT), Sense::hover());
+    icons::paint(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), Vec2::splat(icons::INLINE)),
+        Icon::Info,
+        theme::rgb(theme.text_muted),
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Limited access"));
     response
 }
 
@@ -270,6 +423,14 @@ pub fn disclosure(
         Vec2::new(icons::DISCLOSURE + SPACE_XS, theme::ROW_HEIGHT),
         Sense::click(),
     );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::CollapsingHeader,
+            ui.is_enabled(),
+            open,
+            "Expand group",
+        )
+    });
 
     let turn = motion::toggle(ui.ctx(), id, open, motion::QUICK);
     // A quarter turn: right-pointing when closed, down-pointing when
@@ -284,6 +445,7 @@ pub fn disclosure(
         theme::rgb(colour),
         turn * 0.25,
     );
+    focus_ring(ui, theme, &response);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -348,7 +510,7 @@ pub fn card_grid(ui: &mut Ui, minimum: f32, count: usize, mut card: impl FnMut(&
             }
         });
         if end < count {
-            ui.add_space(SPACE_MD);
+            theme::gap(ui, SPACE_MD);
         }
     }
 }
@@ -555,6 +717,8 @@ pub struct Heading<'a> {
     pub right_aligned: bool,
     /// Whether a drag is carrying this heading.
     pub lifted: bool,
+    /// Matches the leading inset in the name cell, independently of column order.
+    pub leading_inset: bool,
 }
 
 /// A column heading: its name, its sort arrow, and the click and drag
@@ -572,6 +736,7 @@ pub fn sortable_header(ui: &mut Ui, theme: &Palette, heading: Heading<'_>) -> Re
         claims_width,
         right_aligned,
         lifted,
+        leading_inset,
     } = heading;
     let font = TextStyle::Small.resolve(ui.style());
     let color = if sorted.is_some() {
@@ -611,18 +776,30 @@ pub fn sortable_header(ui: &mut Ui, theme: &Palette, heading: Heading<'_>) -> Re
     let needed = galley.size().x + SPACE_SM + arrow_column + mark_column;
     let mark = mark.filter(|_| needed <= cell.width());
 
-    let leading = if mark.is_some() { mark_column } else { 0.0 };
+    let inset = if leading_inset { SPACE_SM } else { 0.0 };
+    let leading = if mark.is_some() { mark_column } else { 0.0 } + inset;
+    let height = cell.height().min(theme::HEADER_HEIGHT);
     let wanted = if claims_width {
-        Vec2::new(cell.width(), galley.size().y + SPACE_XS)
+        Vec2::new(cell.width(), height)
     } else {
-        galley.size() + Vec2::new(SPACE_SM + arrow_column + leading, SPACE_XS)
+        Vec2::new(galley.size().x + SPACE_SM + arrow_column + leading, height)
     };
     // `click_and_drag`, so the same control sorts on a click and reorders
     // on a drag. egui reports `clicked()` as false once the pointer has
     // moved far enough to count as a drag, so the two cannot both fire —
     // which is what lets a heading be its own drag handle rather than
     // needing a separate grip beside it.
-    let (rect, response) = ui.allocate_exact_size(wanted, super::dnd::Lane::sense());
+    let (_, allocation) = ui.allocate_exact_size(wanted, Sense::hover());
+    let rect = Rect::from_min_size(cell.min, Vec2::new(cell.width(), height));
+    let response = ui.interact(rect, allocation.id, super::dnd::Lane::sense());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(RADIUS),
+        selectable_surface(ui, theme, response.id, &response, false, theme.app),
+    );
 
     // Sensed across the whole cell so the click target is the column
     // heading rather than only its glyphs, without the allocation that
@@ -668,17 +845,19 @@ pub fn sortable_header(ui: &mut Ui, theme: &Palette, heading: Heading<'_>) -> Re
         theme::rgb(color),
     );
 
-    if let Some(descending) = sorted {
+    if sorted.is_some() || response.hovered() || response.has_focus() {
         // The arrow rotates between the two directions rather than being
         // swapped, so a click on an already-sorted heading reads as
         // "this reversed" rather than as the heading being redrawn.
         let flip = motion::toggle(
             ui.ctx(),
             response.id.with("sort"),
-            descending,
+            sorted.unwrap_or(false),
             motion::QUICK,
         );
-        let icon = if flip > 0.5 {
+        let icon = if sorted.is_none() {
+            Icon::ChevronDown
+        } else if flip > 0.5 {
             Icon::ArrowDown
         } else {
             Icon::ArrowUp
@@ -690,10 +869,19 @@ pub fn sortable_header(ui: &mut Ui, theme: &Palette, heading: Heading<'_>) -> Re
                 Vec2::splat(icons::DISCLOSURE),
             ),
             icon,
-            theme::rgb(theme.accent),
+            theme::rgb(if sorted.is_some() {
+                theme.accent
+            } else {
+                theme.text_muted
+            }),
         );
     }
-    response
+    focus_ring(ui, theme, &response);
+    response.on_hover_text(match sorted {
+        Some(true) => "Sorted descending. Click to sort ascending.",
+        Some(false) => "Sorted ascending. Click to sort descending.",
+        None => "Click to sort this column.",
+    })
 }
 
 /// A horizontal rule under a section heading.
@@ -717,12 +905,11 @@ pub fn section(ui: &mut Ui, theme: &Palette, title: &str) {
     ui.label(
         egui::RichText::new(title)
             .color(theme::rgb(theme.text))
-            .size(15.0)
-            .strong(),
+            .font(theme::section_font(ui)),
     );
-    ui.add_space(SPACE_XS);
+    theme::gap(ui, SPACE_SM);
     section_rule(ui, theme);
-    ui.add_space(SPACE_SM);
+    theme::gap(ui, SPACE_MD);
 }
 
 /// A large readout: a value, its unit, and a caption.
@@ -750,7 +937,7 @@ pub fn stat(ui: &mut Ui, theme: &Palette, caption: &str, value: &str, accent: Rg
         rect.left_bottom() + Vec2::new(0.0, -SPACE_XS),
         Align2::LEFT_BOTTOM,
         value,
-        FontId::new(24.0, egui::FontFamily::Proportional),
+        theme::display_font(ui),
         theme::rgb(accent),
     );
     response
@@ -1058,6 +1245,7 @@ pub struct Row<'a, 'b, 'r> {
     theme: &'r Palette,
     viewport: Rect,
     fill: RowFill,
+    painter: Option<egui::Painter>,
 }
 
 impl<'a, 'b, 'r> Row<'a, 'b, 'r> {
@@ -1091,6 +1279,7 @@ impl<'a, 'b, 'r> Row<'a, 'b, 'r> {
                 striped,
                 accent: None,
             },
+            painter: None,
         }
     }
 
@@ -1122,6 +1311,7 @@ impl<'a, 'b, 'r> Row<'a, 'b, 'r> {
             theme,
             viewport: viewport.0,
             fill: RowFill::Group,
+            painter: None,
         }
     }
 
@@ -1130,7 +1320,13 @@ impl<'a, 'b, 'r> Row<'a, 'b, 'r> {
         // Copied out before the call: `TableRow::col` borrows the row
         // mutably, so the closure cannot read `self` while it runs.
         let (theme, viewport, fill) = (self.theme, self.viewport, self.fill);
+        let painter = &mut self.painter;
         self.row.col(|ui| {
+            if painter.is_none() {
+                let mut clipped = ui.painter().clone();
+                clipped.set_clip_rect(row_clip(ui, viewport));
+                *painter = Some(clipped);
+            }
             match fill {
                 RowFill::Record {
                     id,
@@ -1153,7 +1349,18 @@ impl<'a, 'b, 'r> Row<'a, 'b, 'r> {
     /// The row's response: the union of its cells, which is what a click
     /// anywhere along the row lands on.
     pub fn response(&self) -> Response {
-        self.row.response()
+        let response = self.row.response();
+        if response.has_focus() {
+            if let Some(painter) = &self.painter {
+                paint_focus_ring(
+                    painter,
+                    self.theme,
+                    response.rect.intersect(self.viewport),
+                    CornerRadius::ZERO,
+                );
+            }
+        }
+        response
     }
 }
 
@@ -1234,15 +1441,49 @@ pub fn number(ui: &mut Ui, theme: &Palette, text: &str, muted: bool) {
     });
 }
 
+/// Alignment follows the meaning of a column, including after reordering.
+#[must_use]
+pub fn numeric_column(key: crate::model::sort::SortKey) -> bool {
+    use crate::model::sort::SortKey;
+    match key {
+        SortKey::Pid
+        | SortKey::Cpu
+        | SortKey::Memory
+        | SortKey::Disk
+        | SortKey::Network
+        | SortKey::Gpu
+        | SortKey::PrivateBytes
+        | SortKey::Threads
+        | SortKey::Handles
+        | SortKey::CpuTime
+        | SortKey::Session => true,
+        SortKey::Name
+        | SortKey::Status
+        | SortKey::User
+        | SortKey::Priority
+        | SortKey::Architecture
+        | SortKey::Path => false,
+    }
+}
+
+/// A text cell shares the numeric cell's center baseline, with readable elision.
+pub fn text_cell(ui: &mut Ui, theme: &Palette, text: &str, muted: bool) {
+    let color = if muted { theme.text_muted } else { theme.text };
+    elided_text(ui, text, color, 0.0).on_hover_text(text);
+}
+
 /// A borderless icon button, for the title bar and toolbars.
 pub fn icon_button(ui: &mut Ui, theme: &Palette, icon: Icon, tooltip: &str) -> Response {
     /// The button's square size. Matches the title bar's own height less
     /// its padding, so the window controls fill the bar's full height and
     /// are hittable by throwing the pointer at the corner.
-    const SIZE: f32 = 32.0;
+    const SIZE: f32 = theme::CONTROL_HEIGHT;
 
     let (rect, response) = ui.allocate_exact_size(Vec2::new(SIZE, SIZE), Sense::click());
-    let fill = hover_fill(ui, response.id, response.hovered(), theme.app, theme.hover);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tooltip)
+    });
+    let fill = selectable_surface(ui, theme, response.id, &response, false, theme.app);
     ui.painter()
         .rect_filled(rect, CornerRadius::same(RADIUS), fill);
     icons::paint(
@@ -1251,7 +1492,10 @@ pub fn icon_button(ui: &mut Ui, theme: &Palette, icon: Icon, tooltip: &str) -> R
         icon,
         theme::rgb(theme.text),
     );
-    response.on_hover_text(tooltip)
+    focus_ring(ui, theme, &response);
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tooltip)
 }
 
 /// The window's close button, which highlights in the danger colour.
@@ -1261,94 +1505,180 @@ pub fn icon_button(ui: &mut Ui, theme: &Palette, icon: Icon, tooltip: &str) -> R
 /// Windows does this, and one that did not would be the odd one out in a
 /// way people notice without being able to say why.
 pub fn close_button(ui: &mut Ui, theme: &Palette) -> Response {
-    const SIZE: f32 = 32.0;
+    const SIZE: f32 = theme::CONTROL_HEIGHT;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(SIZE, SIZE), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Close")
+    });
     let fill = hover_fill(ui, response.id, response.hovered(), theme.app, theme.danger);
     ui.painter()
         .rect_filled(rect, CornerRadius::same(RADIUS), fill);
     // The mark flips to the on-accent colour as the danger fill comes
     // up, or it goes unreadable against it at the end of the ramp.
     let t = hover_t(ui, response.id, response.hovered());
-    let mark = theme.text.lerp(theme.text_on_accent, t);
+    let mark = theme.text.lerp(theme.text_on_danger, t);
     icons::paint(
         ui.painter(),
         Rect::from_center_size(rect.center(), Vec2::splat(icons::INLINE)),
         Icon::Close,
         theme::rgb(mark),
     );
-    response.on_hover_text("Close")
+    focus_ring(ui, theme, &response);
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Close")
 }
 
-/// A primary (accent-filled) button.
-pub fn primary_button(ui: &mut Ui, theme: &Palette, label: &str) -> Response {
-    let font = TextStyle::Button.resolve(ui.style());
-    let galley =
-        ui.painter()
-            .layout_no_wrap(label.to_string(), font, theme::rgb(theme.text_on_accent));
-    let size = galley.size() + Vec2::new(SPACE_MD * 2.0, SPACE_SM);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-
-    let fill = hover_fill(
-        ui,
-        response.id,
-        response.hovered(),
-        theme.accent,
-        theme.accent_hover,
-    );
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(RADIUS), fill);
-    ui.painter().galley(
-        rect.center() - galley.size() / 2.0,
-        galley,
-        theme::rgb(theme.text_on_accent),
-    );
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+#[derive(Clone, Copy)]
+enum ButtonTone {
+    Primary,
+    Secondary,
+    Danger,
+    Selected,
 }
 
-/// A destructive button — the danger colour, for "End task".
-pub fn danger_button(ui: &mut Ui, theme: &Palette, label: &str, enabled: bool) -> Response {
-    let text_color = if enabled {
-        theme.text_on_accent
+/// One implementation owns action and choice controls in every view.
+fn button(
+    ui: &mut Ui,
+    theme: &Palette,
+    label: &str,
+    tone: ButtonTone,
+    enabled: bool,
+    selected: Option<bool>,
+) -> Response {
+    let enabled = enabled && ui.is_enabled();
+    let (rest, hover, pressed, ink, border) = if enabled {
+        match tone {
+            ButtonTone::Primary => (
+                theme.accent,
+                theme.accent_hover,
+                theme.accent,
+                theme.text_on_accent,
+                theme.accent,
+            ),
+            ButtonTone::Secondary => (
+                theme.raised,
+                theme.hover,
+                theme.selection,
+                theme.text,
+                theme.border,
+            ),
+            ButtonTone::Danger => (
+                theme.danger,
+                theme.danger_hover,
+                theme.danger,
+                theme.text_on_danger,
+                theme.danger,
+            ),
+            ButtonTone::Selected => (
+                theme.selection,
+                theme.hover,
+                theme.selection,
+                theme.text,
+                theme.accent,
+            ),
+        }
     } else {
-        theme.text_faint
+        (
+            theme.panel,
+            theme.panel,
+            theme.panel,
+            theme.text_faint,
+            theme.border,
+        )
     };
     let font = TextStyle::Button.resolve(ui.style());
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_string(), font, theme::rgb(text_color));
-    let size = galley.size() + Vec2::new(SPACE_MD * 2.0, SPACE_SM);
+        .layout_no_wrap(label.to_string(), font, theme::rgb(ink));
+    let size = Vec2::new(galley.size().x + SPACE_MD * 2.0, theme::CONTROL_HEIGHT);
     let sense = if enabled {
         Sense::click()
     } else {
         Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(size, sense);
-
-    let fill = if enabled {
-        hover_fill(
-            ui,
-            response.id,
-            response.hovered(),
-            theme.danger,
-            theme.danger,
-        )
+    response.widget_info(|| match selected {
+        Some(selected) => {
+            egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, enabled, selected, label)
+        }
+        None => egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label),
+    });
+    let fill = if response.is_pointer_button_down_on() {
+        theme::rgb(pressed)
     } else {
-        theme::rgb(theme.raised)
+        hover_fill(ui, response.id, response.hovered() && enabled, rest, hover)
     };
     ui.painter()
         .rect_filled(rect, CornerRadius::same(RADIUS), fill);
     ui.painter().rect_stroke(
         rect,
         CornerRadius::same(RADIUS),
-        Stroke::new(1.0, theme::rgb(theme.border)),
+        Stroke::new(
+            1.0,
+            theme::rgb(
+                if response.hovered() && enabled && matches!(tone, ButtonTone::Secondary) {
+                    theme.border_strong
+                } else {
+                    border
+                },
+            ),
+        ),
         StrokeKind::Inside,
     );
-    ui.painter().galley(
-        rect.center() - galley.size() / 2.0,
-        galley,
-        theme::rgb(text_color),
-    );
-    response
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, theme::rgb(ink));
+    if enabled {
+        focus_ring(ui, theme, &response);
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    }
+}
+
+/// The main, accent-filled action.
+pub fn primary_button(ui: &mut Ui, theme: &Palette, label: &str) -> Response {
+    button(ui, theme, label, ButtonTone::Primary, true, None)
+}
+
+/// A supporting action with a neutral surface and border.
+pub fn secondary_button(ui: &mut Ui, theme: &Palette, label: &str) -> Response {
+    button(ui, theme, label, ButtonTone::Secondary, true, None)
+}
+
+/// A destructive action, disabled when it cannot currently be performed.
+pub fn danger_button(ui: &mut Ui, theme: &Palette, label: &str, enabled: bool) -> Response {
+    button(ui, theme, label, ButtonTone::Danger, enabled, None)
+}
+
+/// A selected or unselected view option with full button interaction feedback.
+pub fn choice_button(ui: &mut Ui, theme: &Palette, label: &str, selected: bool) -> Response {
+    button(
+        ui,
+        theme,
+        label,
+        if selected {
+            ButtonTone::Selected
+        } else {
+            ButtonTone::Secondary
+        },
+        true,
+        Some(selected),
+    )
+}
+
+/// Readable supporting prose with a bounded line length, distinct from metadata.
+pub fn prose(ui: &mut Ui, text: impl Into<String>, color: Rgb) -> Response {
+    const MEASURE: f32 = 600.0;
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width().min(MEASURE));
+        ui.label(
+            egui::RichText::new(text)
+                .color(theme::rgb(color))
+                .text_style(TextStyle::Body),
+        )
+    })
+    .inner
 }
 
 /// An empty-state message, centred in the space available.
@@ -1358,17 +1688,58 @@ pub fn danger_button(ui: &mut Ui, theme: &Palette, label: &str, enabled: bool) -
 /// matters most on the views — Services, Startup — where an empty result
 /// can mean "access denied" rather than "nothing here".
 pub fn empty_state(ui: &mut Ui, theme: &Palette, message: &str) {
-    let rect = ui.available_rect_before_wrap();
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        message,
-        TextStyle::Body.resolve(ui.style()),
-        theme::rgb(theme.text_faint),
-    );
+    let rect = ui.available_rect_before_wrap().intersect(ui.clip_rect());
+    empty_state_in(ui, theme, rect, message);
     // Consume the space so a caller that draws after this does not
     // overlap the message.
     ui.allocate_space(rect.size());
+}
+
+/// A wrapped, centered message inside an already allocated chart or map.
+pub fn empty_state_in(ui: &Ui, theme: &Palette, rect: Rect, message: &str) {
+    let width = (rect.width() - PAD * 2.0).clamp(0.0, 480.0);
+    let galley = ui.painter().layout(
+        message.to_owned(),
+        TextStyle::Body.resolve(ui.style()),
+        theme::rgb(theme.text_muted),
+        width,
+    );
+    ui.painter()
+        .with_clip_rect(rect.intersect(ui.clip_rect()))
+        .galley(
+            rect.center() - galley.size() / 2.0,
+            galley,
+            theme::rgb(theme.text_muted),
+        );
+}
+
+/// The same recovery path for every filtered table. Returns whether to clear search.
+pub fn no_matches(ui: &mut Ui, theme: &Palette, items: &str) -> bool {
+    let rect = ui.available_rect_before_wrap().intersect(ui.clip_rect());
+    let width = (rect.width() - PAD * 2.0).clamp(0.0, 400.0);
+    let block = Rect::from_center_size(rect.center(), Vec2::new(width, 112.0));
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(block)
+            .layout(egui::Layout::top_down(Align::Center)),
+        |ui| {
+            ui.label(
+                egui::RichText::new(format!("No matching {items}"))
+                    .font(theme::section_font(ui))
+                    .color(theme::rgb(theme.text)),
+            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("Try another search or clear the current filter.")
+                        .color(theme::rgb(theme.text_muted)),
+                )
+                .wrap(),
+            );
+            theme::gap(ui, SPACE_MD);
+            secondary_button(ui, theme, "Clear filter").clicked()
+        },
+    )
+    .inner
 }
 
 /// A one-line note where a *section* has nothing to list.
@@ -1383,14 +1754,18 @@ pub fn empty_state(ui: &mut Ui, theme: &Palette, message: &str) {
 ///
 /// So this one is a line, and the panel goes on underneath.
 pub fn empty_note(ui: &mut Ui, theme: &Palette, message: &str) {
-    let height = ui.text_style_height(&TextStyle::Body) + SPACE_SM * 2.0;
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        message,
+    let galley = ui.painter().layout(
+        message.to_owned(),
         TextStyle::Body.resolve(ui.style()),
-        theme::rgb(theme.text_faint),
+        theme::rgb(theme.text_muted),
+        (ui.available_width() - PAD * 2.0).max(0.0),
+    );
+    let height = galley.size().y + SPACE_SM * 2.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+    ui.painter().galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        theme::rgb(theme.text_muted),
     );
 }
 
@@ -1440,10 +1815,225 @@ pub const fn pane_inset() -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn numeric_headings_align_to_the_column_and_sort_from_its_empty_space() -> anyhow::Result<()> {
+        let palette = crate::theme::Catalog::load().get(None).clone();
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, &palette);
+        let cell = egui::Rect::from_min_size(
+            egui::pos2(20.0, 20.0),
+            egui::vec2(300.0, theme::HEADER_HEIGHT),
+        );
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(cell), |ui| {
+                super::sortable_header(
+                    ui,
+                    &palette,
+                    super::Heading {
+                        label: "CPU",
+                        mark: None,
+                        sorted: Some(true),
+                        claims_width: false,
+                        right_aligned: true,
+                        lifted: false,
+                        leading_inset: false,
+                    },
+                );
+            });
+        });
+        output.textures_delta.clear();
+        let right = output
+            .shapes
+            .iter()
+            .find_map(|clipped| {
+                if let egui::Shape::Text(text) = &clipped.shape {
+                    (text.galley.text() == "CPU").then_some(text.pos.x + text.galley.size().x)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| anyhow::anyhow!("no CPU heading drawn"))?;
+        assert!(
+            (right - cell.right()).abs() < 0.1,
+            "heading stops at {right}, column at {}",
+            cell.right()
+        );
+
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, clicks: &mut usize| {
+                ui.set_width(300.0);
+                if super::sortable_header(
+                    ui,
+                    &palette,
+                    super::Heading {
+                        label: "CPU",
+                        mark: None,
+                        sorted: Some(true),
+                        claims_width: false,
+                        right_aligned: true,
+                        lifted: false,
+                        leading_inset: false,
+                    },
+                )
+                .clicked()
+                {
+                    *clicks += 1;
+                }
+            },
+            0,
+        );
+        harness.run();
+        assert!(harness.get_by_label("CPU").rect().width() >= 299.0);
+        harness.get_by_label("CPU").click();
+        harness.run();
+        assert_eq!(
+            *harness.state(),
+            1,
+            "the middle of the column must sort even when the label is at the right edge"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_no_results_state_offers_keyboard_recovery() {
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, cleared: &mut bool| {
+                let palette = crate::theme::Catalog::load().get(None).clone();
+                *cleared |= super::no_matches(ui, &palette, "services");
+            },
+            false,
+        );
+        harness.run();
+        harness.get_by_label("Clear filter").focus();
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert!(*harness.state());
+    }
+
     use super::card_grid_layout;
     use super::table_body_height;
     use super::theme;
     use super::theme::SPACE_MD;
+    use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn action_buttons_support_keyboard_activation_and_respect_disabled_state() {
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, counts: &mut [usize; 3]| {
+                let palette = crate::theme::Catalog::load().get(None).clone();
+                theme::apply(ui.ctx(), &palette);
+                if super::primary_button(ui, &palette, "Start").clicked() {
+                    counts[0] += 1;
+                }
+                if super::secondary_button(ui, &palette, "Copy").clicked() {
+                    counts[1] += 1;
+                }
+                if super::danger_button(ui, &palette, "End task", false).clicked() {
+                    counts[2] += 1;
+                }
+            },
+            [0; 3],
+        );
+        harness.run();
+        harness.get_by_label("Start").focus();
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert_eq!(
+            harness.state()[0],
+            1,
+            "Enter must activate the focused primary action"
+        );
+        harness.get_by_label("Copy").focus();
+        harness.run();
+        harness.key_press(egui::Key::Space);
+        harness.run();
+        assert_eq!(
+            harness.state()[1],
+            1,
+            "Space must activate the focused secondary action"
+        );
+        harness.get_by_label("End task").click();
+        harness.run();
+        assert_eq!(
+            harness.state()[2],
+            0,
+            "a disabled destructive action must never fire"
+        );
+    }
+
+    #[test]
+    fn choice_controls_are_keyboard_operable() {
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, selected: &mut bool| {
+                let palette = crate::theme::Catalog::load().get(None).clone();
+                theme::apply(ui.ctx(), &palette);
+                if super::choice_button(ui, &palette, "Tree", *selected).clicked() {
+                    *selected = !*selected;
+                }
+            },
+            false,
+        );
+        harness.run();
+        harness.get_by_label("Tree").focus();
+        harness.run();
+        harness.key_press(egui::Key::Space);
+        harness.run();
+        assert!(*harness.state(), "Space must select the option");
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert!(
+            !*harness.state(),
+            "Enter must toggle the selected option again"
+        );
+    }
+
+    #[test]
+    fn rendered_card_gutters_are_equal_in_both_axes() -> anyhow::Result<()> {
+        for scale in [1.0, 1.25, 1.5] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(scale);
+            let mut cards = Vec::new();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(460.0, 300.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.set_width(460.0);
+                    ui.spacing_mut().item_spacing = egui::vec2(theme::SPACE_SM, theme::SPACE_XS);
+                    super::card_grid(ui, 200.0, 4, |ui, _| {
+                        cards.push(
+                            ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), 40.0),
+                                egui::Sense::hover(),
+                            )
+                            .0,
+                        );
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            let [first, second, third, _] = cards.as_slice() else {
+                anyhow::bail!("the grid did not draw four cards");
+            };
+            let horizontal = second.left() - first.right();
+            let vertical = third.top() - first.bottom();
+            assert!(
+                (horizontal - SPACE_MD).abs() < 0.1,
+                "horizontal gutter is {horizontal} at {scale}x"
+            );
+            assert!(
+                (vertical - horizontal).abs() < 0.1,
+                "vertical gutter {vertical} differs from horizontal {horizontal} at {scale}x"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn a_real_table_header_and_body_end_inside_the_pane() -> anyhow::Result<()> {

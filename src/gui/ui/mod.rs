@@ -120,6 +120,7 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
         .frame(theme::content(&app.theme))
         .show(ui, |ui| {
             enter_view(app, ui);
+            chrome::view_heading(app, ui);
             match app.view {
                 View::Processes => processes::draw(app, ui),
                 View::Performance => performance::draw(app, ui),

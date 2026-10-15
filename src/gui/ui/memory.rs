@@ -113,7 +113,7 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     };
 
     toolbar(app, ui, &theme, &snapshot);
-    ui.add_space(chrome::TOOLBAR_GAP);
+    theme::gap(ui, chrome::TOOLBAR_GAP);
 
     // Capture the viewport before entering the ScrollArea. Inside a scroll
     // area's content Ui, `available_height` describes its scrollable canvas,
@@ -122,29 +122,20 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     // manufacturing a scrollbar even on a tall window.
     let viewport_height = ui.available_height();
 
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-        .show(ui, |ui| {
-            // The same trailing trim the Performance view takes, and for
-            // the same reason: nothing here is a dense table that has to
-            // be squeezed to the pane's own edge.
-            let width = (ui.available_width() - SPACE_MD).max(0.0);
-            ui.set_max_width(width);
+    widgets::scroll_body(ui, |ui| {
+        // The map takes whatever the breakdown below it does not.
+        //
+        // A fixed height left a third of a tall window empty while
+        // the thing the view is *for* was cropped — and a treemap
+        // given more room does not merely look better, it shows more
+        // of the machine, because every extra square point is
+        // another process over the fold-in threshold.
+        let height = map_height(viewport_height, app.memory_view.selected.is_some());
 
-            // The map takes whatever the breakdown below it does not.
-            //
-            // A fixed height left a third of a tall window empty while
-            // the thing the view is *for* was cropped — and a treemap
-            // given more room does not merely look better, it shows more
-            // of the machine, because every extra square point is
-            // another process over the fold-in threshold.
-            let height = map_height(viewport_height, app.memory_view.selected.is_some());
-
-            map(app, ui, &theme, &snapshot, height);
-            ui.add_space(chrome::SECTION_GAP);
-            breakdown(app, ui, &theme, &snapshot);
-        });
+        map(app, ui, &theme, &snapshot, height);
+        theme::gap(ui, chrome::SECTION_GAP);
+        breakdown(app, ui, &theme, &snapshot);
+    });
 }
 
 /// Height left for the treemap after the appropriate lower summary.
@@ -160,35 +151,24 @@ fn map_height(viewport_height: f32, selected: bool) -> f32 {
 /// The row above the map: what is being measured, and the machine's own
 /// totals.
 fn toolbar(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) {
-    ui.horizontal(|ui| {
+    chrome::toolbar(ui, |ui| {
         for measure in MemoryMeasure::ALL {
             let active = app.memory_view.measure == measure;
-            if widgets::chip(
-                ui,
-                measure.label(),
-                if active {
-                    theme.accent_soft
-                } else {
-                    theme.raised
-                },
-                theme.text,
-            )
-            .interact(Sense::click())
-            .on_hover_text(match measure {
-                MemoryMeasure::Resident => {
-                    "Size tiles by memory each process is holding in RAM \
+            if widgets::choice_button(ui, theme, measure.label(), active)
+                .on_hover_text(match measure {
+                    MemoryMeasure::Resident => {
+                        "Size tiles by memory each process is holding in RAM \
                      right now, shared with nobody"
-                }
-                MemoryMeasure::Committed => {
-                    "Size tiles by everything each process has been \
+                    }
+                    MemoryMeasure::Committed => {
+                        "Size tiles by everything each process has been \
                      promised, whether it is resident or paged out"
-                }
-            })
-            .clicked()
+                    }
+                })
+                .clicked()
             {
                 app.memory_view.measure = measure;
             }
-            ui.add_space(SPACE_XS);
         }
 
         chrome::toolbar_dot(ui, theme);
@@ -251,8 +231,7 @@ enum Slice<'a> {
 fn map(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot, height: f32) {
     let measure = app.memory_view.measure;
 
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
     ui.painter().rect_filled(
         rect,
         egui::CornerRadius::same(theme::RADIUS),
@@ -298,13 +277,12 @@ fn map(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot, height:
 
     let tiles = crate::treemap::layout(&weights, rect.width(), rect.height());
     if tiles.is_empty() {
-        widgets::empty_state(ui, theme, "No process is holding any memory");
+        widgets::empty_state_in(ui, theme, rect, "No process is holding any memory");
         return;
     }
 
-    let pointer = response.hover_pos();
     let mut clicked = None;
-    let mut hovered: Option<&ProcessRow> = None;
+    let mut hovered: Option<(&ProcessRow, egui::Response)> = None;
 
     for tile in &tiles {
         let Some(slice) = slices.get(tile.index) else {
@@ -322,12 +300,34 @@ fn map(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot, height:
             continue;
         }
 
-        let under = pointer.is_some_and(|at| placed.contains(at));
+        let tile_response = match slice {
+            Slice::Process(row) => {
+                let hit = ui
+                    .interact(
+                        placed,
+                        ui.id().with(("memory-tile", row.key())),
+                        Sense::click(),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                hit.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::SelectableLabel,
+                        ui.is_enabled(),
+                        app.memory_view.selected == Some(row.key()),
+                        format!("{} (PID {})", row.display_name(), row.pid),
+                    )
+                });
+                Some(hit)
+            }
+            Slice::Others { .. } => None,
+        };
         let (name, amount, base, selected) = match slice {
             Slice::Process(row) => {
-                if under {
-                    hovered = Some(row);
-                    if response.clicked() {
+                if let Some(hit) = tile_response.as_ref() {
+                    if hit.hovered() {
+                        hovered = Some((row, hit.clone()));
+                    }
+                    if hit.clicked() {
                         clicked = Some(row.key());
                     }
                 }
@@ -356,15 +356,20 @@ fn map(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot, height:
             ),
         };
 
-        let fill = if selected {
-            theme.accent
-        } else if under && matches!(slice, Slice::Process(_)) {
-            base.lerp(theme.text, 0.25)
-        } else {
-            base
+        let fill = match tile_response.as_ref() {
+            Some(hit) => widgets::selectable_surface(ui, theme, hit.id, hit, selected, base),
+            None => theme::rgb(base),
         };
         ui.painter()
-            .rect_filled(placed, egui::CornerRadius::same(2), theme::rgb(fill));
+            .rect_filled(placed, egui::CornerRadius::same(2), fill);
+        if selected {
+            ui.painter().rect_stroke(
+                placed,
+                egui::CornerRadius::same(2),
+                egui::Stroke::new(2.0, theme::rgb(theme.accent)),
+                egui::StrokeKind::Inside,
+            );
+        }
 
         if placed.width() >= LABEL_MINIMUM && placed.height() >= theme::ROW_HEIGHT {
             let label = widgets::truncated(
@@ -394,10 +399,13 @@ fn map(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot, height:
                 );
             }
         }
+        if let Some(hit) = tile_response.as_ref() {
+            widgets::focus_ring(ui, theme, hit);
+        }
     }
 
-    if let Some(row) = hovered {
-        response.clone().on_hover_text(format!(
+    if let Some((row, hit)) = hovered {
+        hit.on_hover_text(format!(
             "{}\nPID {}\nIn RAM {} · committed {}\nShared with others {}",
             row.display_name(),
             row.pid,
@@ -482,7 +490,7 @@ fn breakdown(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) {
             ("Committed, paged out", paged_out, theme.series(2, 3)),
         ],
     );
-    ui.add_space(chrome::SECTION_GAP);
+    theme::gap(ui, chrome::SECTION_GAP);
 
     ui.horizontal_top(|ui| {
         let width = stat_width(ui.available_width(), 4);
@@ -515,7 +523,7 @@ fn breakdown(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) {
             &crate::format::bytes(row.peak_private_bytes),
         );
     });
-    ui.add_space(SPACE_MD);
+    theme::gap(ui, SPACE_MD);
     ui.horizontal_top(|ui| {
         let width = stat_width(ui.available_width(), 4);
         stat(
@@ -587,7 +595,7 @@ fn machine(ui: &mut Ui, theme: &Palette, snapshot: &Snapshot) {
             ),
         ],
     );
-    ui.add_space(chrome::SECTION_GAP);
+    theme::gap(ui, chrome::SECTION_GAP);
     legend(ui, theme);
 }
 
@@ -602,13 +610,13 @@ fn legend(ui: &mut Ui, theme: &Palette) {
                 egui::CornerRadius::same(2),
                 theme::rgb(kind_colour(theme, kind)),
             );
-            ui.add_space(SPACE_XS);
+            theme::gap(ui, SPACE_XS);
             ui.label(
                 egui::RichText::new(kind.label())
                     .color(theme::rgb(theme.text_muted))
                     .text_style(egui::TextStyle::Small),
             );
-            ui.add_space(SPACE_LG);
+            theme::gap(ui, SPACE_LG);
         }
     });
 }
@@ -647,25 +655,25 @@ fn composition(ui: &mut Ui, theme: &Palette, parts: &[(&str, u64, crate::color::
         x += span;
     }
 
-    ui.add_space(SPACE_SM);
+    theme::gap(ui, SPACE_SM);
     ui.horizontal_wrapped(|ui| {
         for (label, value, colour) in parts {
             let (swatch, _) = ui.allocate_exact_size(Vec2::splat(SPACE_MD), Sense::hover());
             ui.painter()
                 .rect_filled(swatch, egui::CornerRadius::same(2), theme::rgb(*colour));
-            ui.add_space(SPACE_XS);
+            theme::gap(ui, SPACE_XS);
             ui.label(
                 egui::RichText::new(*label)
                     .color(theme::rgb(theme.text_muted))
                     .text_style(egui::TextStyle::Small),
             );
-            ui.add_space(SPACE_XS);
+            theme::gap(ui, SPACE_XS);
             ui.label(
                 egui::RichText::new(crate::format::bytes(*value))
                     .color(theme::rgb(theme.text))
                     .text_style(egui::TextStyle::Monospace),
             );
-            ui.add_space(SPACE_LG);
+            theme::gap(ui, SPACE_LG);
         }
     });
 }

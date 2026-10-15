@@ -207,6 +207,81 @@ The same rule holds for spacing: four steps (`SPACE_XS`, `SPACE_SM`,
 pixel gap. Four values are what make the title bar, the sidebar, every
 view heading and every table share one column of left edges.
 
+Use `gui/ui/theme::gap` after a widget when a gap must equal a scale step;
+it counts egui's automatic item spacing once. Page and card insets are
+12 points, related controls are 8 points apart, card gutters are 12 points
+in both axes, and sections and independent panes use 20 points. Scrolling
+reading panes share `widgets::scroll_body` for scrollbar clearance and
+bottom padding; dense tables keep their own scrolling. Toolbars and
+action buttons share the 32-point `CONTROL_HEIGHT`.
+
+Dense tables share 28-point rows, 4-point row spacing (32-point pitch),
+and 32-point headers. Numeric columns align right in the tabular face;
+names, statuses and account names align left. `widgets::numeric_column`
+keeps header and cell alignment tied to the column's meaning when columns
+are reordered. Sort headings paint and sense the whole cell while only
+allocating their intrinsic width, so column resizing can still shrink.
+The active sort has a persistent direction arrow; other headings reveal
+their affordance on hover or focus. Filtered tables share a wrapped empty
+state with a Clear filter action. Map/section emptiness stays inside the
+region it describes, and loading views keep their toolbar in place.
+
+Navigation switches between the 168-point labeled sidebar and a 56-point
+icon rail, with named destinations, tooltips and a persistent toggle.
+Performance's resource picker and Details' inspector share `dnd::split_pane`:
+drag or focus the divider and press Left/Right, double-click to reset.
+Widths and navigation mode are saved in `Config`. Split bounds preserve
+usable main content, and a narrow window clamps the displayed width
+without overwriting the user's preferred width. Each pane has a distinct
+stable egui ID so scroll state cannot collide with its neighbor.
+
+Resource cards share a 112-point layout and a 248-point default picker
+width (224–360 points when resized). A 16-point tabular headline leads;
+device/capacity context and a second supporting reading follow in the
+metadata role, with a full-width history strip below. Summaries use only
+snapshot data: CPU topology, physical RAM, physical-disk activity and
+read/write throughput, scoped network receive/send rates, and the busiest
+GPU's identity and dedicated memory. Missing counters read as unavailable.
+Tooltips explain scope and expose full device names and history duration.
+
+Performance timelines share labelled value and time axes, wrapping line-style
+legends, and sample-level pointer and keyboard inspection. Percentages keep a
+fixed 0–100% range; rates round to readable steps in the displayed binary units.
+Time labels are approximate, based on the configured sample interval: history
+rings do not store timestamps. Unfilled history stays blank and is identified.
+Left/Right inspect adjacent samples, Home/End jump to the oldest/latest reading,
+and Escape leaves chart focus. Grouped live statistics stay distinct from the
+historical readings in the legend and tooltip. Chart height reserves the measured
+content below it and the shared bottom inset, so fitting panes have no scroll range.
+
+GPU engine counters collapse into named families using the busiest counter in
+each family, never a sum of parallel activity. Raw numbered counters remain in a
+disclosure. Adapters with the same display name share a visual section, but each
+reported adapter keeps its own dedicated-memory use and capacity; a matching name
+does not establish that two records describe one physical GPU.
+
+Typography is a fixed product scale: 12-point metadata, 12.5-point
+monospaced data, 14-point body and control text, 16-point section/dialog
+titles, 20-point page titles, and 24-point display values. `theme::apply`
+owns the styles; `section_font` and `display_font` also resolve safely for
+isolated widget rendering. The configured typeface and its glyph fallbacks
+remain authoritative. In egui, `strong()` changes emphasis color rather
+than selecting a font weight, so hierarchy must use the named roles.
+
+Action buttons, secondary actions, destructive actions, and choice controls
+share `widgets`' button renderer. Status chips remain passive. Selectable
+cards and destinations use `selectable_surface`; all custom controls and
+table rows use the same inset focus ring. Egui's modal layer confines
+confirmation focus, initially on Cancel; Enter/Space can activate a button
+that the user deliberately focuses. Destructive fills derive their own
+contrasting text rather than borrowing the accent's foreground.
+
+The component hierarchy follows the patterns documented by
+[Geist](https://vercel.com/geist/button) and
+[Radix Themes](https://www.radix-ui.com/themes/docs/components/button),
+with keyboard behavior aligned to the
+[WAI button pattern](https://www.w3.org/WAI/ARIA/apg/patterns/button/).
+
 ## Where a change usually goes
 
 | You want to… | Start in |

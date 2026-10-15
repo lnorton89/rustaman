@@ -38,7 +38,7 @@ use super::motion;
 use super::theme::{self, SPACE_LG, SPACE_MD, SPACE_SM};
 use super::widgets;
 use crate::gui::app::{App, Pending};
-use egui::{Align2, CornerRadius, Key, Sense, Ui, Vec2};
+use egui::{Align2, CornerRadius, Key, Ui, Vec2};
 
 /// The modal card's width.
 ///
@@ -135,7 +135,11 @@ const RISE: f32 = 6.0;
 
 /// Draws the modal, if one is pending. Returns the answer, if given.
 pub fn draw(app: &mut App, ui: &mut Ui) -> Option<bool> {
-    let pending = app.pending.as_ref()?;
+    let focus_id = egui::Id::new("confirmation-focus-initialized");
+    let Some(pending) = app.pending.as_ref() else {
+        ui.data_mut(|data| data.remove::<bool>(focus_id));
+        return None;
+    };
     let question = Confirmation::of(pending);
     let theme = app.theme.clone();
 
@@ -146,30 +150,20 @@ pub fn draw(app: &mut App, ui: &mut Ui) -> Option<bool> {
     // fade from zero.
     let progress = motion::transition(ui.ctx(), egui::Id::new("modal-card"), true, motion::QUICK);
 
-    let screen = ui.ctx().content_rect();
-    // Painted on a foreground layer so it covers every panel, including
-    // ones drawn after this call.
-    let painter = ui.ctx().layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("modal"),
-    ));
     let scrim_alpha = (f32::from(SCRIM_ALPHA) * progress) as u8;
-    painter.rect_filled(
-        screen,
-        CornerRadius::ZERO,
-        theme::translucent(theme.app, scrim_alpha),
-    );
 
     let mut answer = None;
-    // An `Area` rather than a `Window`: no title bar, no move handle, no
-    // close button, and it cannot be left open behind the main window.
-    // See the module docs.
-    egui::Area::new(egui::Id::new("modal-card"))
-        .order(egui::Order::Foreground)
-        .anchor(
-            Align2::CENTER_CENTER,
-            Vec2::new(0.0, RISE * (1.0 - progress)),
-        )
+    // Egui's modal layer confines keyboard focus and blocks interaction
+    // with the views underneath, while preserving the app's own card.
+    let modal_id = egui::Id::new("modal-card");
+    let area = egui::Modal::default_area(modal_id).anchor(
+        Align2::CENTER_CENTER,
+        Vec2::new(0.0, RISE * (1.0 - progress)),
+    );
+    egui::Modal::new(modal_id)
+        .area(area)
+        .frame(egui::Frame::NONE)
+        .backdrop_color(theme::translucent(theme.app, scrim_alpha))
         .show(ui.ctx(), |ui| {
             ui.set_opacity(progress);
             egui::Frame::new()
@@ -190,16 +184,11 @@ pub fn draw(app: &mut App, ui: &mut Ui) -> Option<bool> {
                     ui.label(
                         egui::RichText::new(&question.title)
                             .color(theme::rgb(theme.text))
-                            .size(16.0)
-                            .strong(),
+                            .font(theme::section_font(ui)),
                     );
-                    ui.add_space(SPACE_SM);
-                    ui.label(
-                        egui::RichText::new(&question.body)
-                            .color(theme::rgb(theme.text_muted))
-                            .text_style(egui::TextStyle::Small),
-                    );
-                    ui.add_space(SPACE_LG);
+                    theme::gap(ui, SPACE_SM);
+                    widgets::prose(ui, &question.body, theme.text_muted);
+                    theme::gap(ui, SPACE_LG);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // The destructive button is on the right,
@@ -215,8 +204,12 @@ pub fn draw(app: &mut App, ui: &mut Ui) -> Option<bool> {
                         if confirmed.clicked() {
                             answer = Some(true);
                         }
-                        ui.add_space(SPACE_SM);
-                        let cancel = ui.button("Cancel");
+                        theme::gap(ui, SPACE_SM);
+                        let cancel = widgets::secondary_button(ui, &theme, "Cancel");
+                        if !ui.data(|data| data.get_temp::<bool>(focus_id).unwrap_or(false)) {
+                            cancel.request_focus();
+                            ui.data_mut(|data| data.insert_temp(focus_id, true));
+                        }
                         if cancel.clicked() {
                             answer = Some(false);
                         }
@@ -231,16 +224,10 @@ pub fn draw(app: &mut App, ui: &mut Ui) -> Option<bool> {
         if input.key_pressed(Key::Escape) {
             answer = Some(false);
         }
-        if input.key_pressed(Key::Enter) {
+        if answer.is_none() && input.key_pressed(Key::Enter) {
             answer = Some(question.default_is_confirm());
         }
     });
-
-    // The scrim swallows clicks so a click that misses the card does not
-    // reach the table behind it and change the selection the question is
-    // about.
-    let blocker = ui.interact(screen, egui::Id::new("modal-scrim"), Sense::click());
-    let _ = blocker;
 
     answer
 }
@@ -252,6 +239,45 @@ pub const BUTTON_GAP: f32 = SPACE_MD;
 mod tests {
     use super::*;
     use crate::model::ProcessKey;
+    use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn confirmation_defaults_to_cancel_and_keeps_tab_focus_inside() {
+        let mut app = App::new(crate::config::Config::default());
+        app.pending = Some(Pending::EndTask(key(), "Example".to_string()));
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, state: &mut (App, Option<bool>)| {
+                theme::apply(ui.ctx(), &state.0.theme);
+                let _ = ui.button("Background");
+                if let Some(answer) = draw(&mut state.0, ui) {
+                    state.1 = Some(answer);
+                }
+            },
+            (app, None),
+        );
+        harness.run();
+        assert!(
+            harness.get_by_label("Cancel").is_focused(),
+            "Cancel must receive initial focus"
+        );
+        for _ in 0..4 {
+            harness.key_press(Key::Tab);
+            harness.run();
+            assert!(
+                !harness.get_by_label("Background").is_focused(),
+                "focus escaped the dialog"
+            );
+        }
+        harness.get_by_label("End task").focus();
+        harness.run();
+        harness.key_press(Key::Enter);
+        harness.run();
+        assert_eq!(
+            harness.state().1,
+            Some(true),
+            "a deliberately focused confirmation must activate"
+        );
+    }
 
     fn key() -> ProcessKey {
         ProcessKey {
