@@ -41,7 +41,7 @@ crossbeam-channel = "0.5"
 # is the one that fails on machines with a stale or hybrid OpenGL ICD —
 # common on exactly the switchable-graphics laptops this app is most
 # useful on.
-eframe = { version = "0.36", default-features = false, features = [
+eframe = { version = "0.37", default-features = false, features = [
     "wgpu",
     "default_fonts",
 ] }
