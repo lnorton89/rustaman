@@ -45,7 +45,7 @@ eframe = { version = "0.36", default-features = false, features = [
     "wgpu",
     "default_fonts",
 ] }
-egui = "0.36"
+egui = "0.37"
 egui_extras = "0.36"
 
 # Every system fact in this app comes through here. `windows-sys` rather
