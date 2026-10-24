@@ -1485,7 +1485,14 @@ pub fn icon_button(ui: &mut Ui, theme: &Palette, icon: Icon, tooltip: &str) -> R
     const SIZE: f32 = theme::CONTROL_HEIGHT;
 
     let (rect, response) = ui.allocate_exact_size(Vec2::new(SIZE, SIZE), Sense::click());
-    let response = ui.interact(caption_hit_area(ui, rect), response.id, Sense::click());
+    // Not the right edge: the close button is the outermost control, and
+    // stretching these to an edge they do not touch would have them
+    // answering clicks over their neighbour.
+    let response = ui.interact(
+        caption_hit_area(ui, rect, false),
+        response.id,
+        Sense::click(),
+    );
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), tooltip));
     let fill = selectable_surface(ui, theme, response.id, &response, false, theme.app);
@@ -1520,20 +1527,24 @@ pub fn icon_button(ui: &mut Ui, theme: &Palette, icon: Icon, tooltip: &str) -> R
 /// is what keeps the bar looking padded while behaving as though it is
 /// not.
 ///
-/// An edge is only closed up when the control is already against it —
-/// within the padding that separates the two. A control in the middle of
-/// the bar keeps its own bounds, so this cannot quietly grow something
-/// that was never meant to reach an edge.
-fn caption_hit_area(ui: &Ui, painted: Rect) -> Rect {
+/// Which edges to close up is stated by the caller rather than guessed
+/// from how far the control sits from them. A distance test looks
+/// tidier and is wrong: the gap to the right edge is the title bar's
+/// padding *plus* the layout's own item spacing, and the first attempt
+/// at this measured twelve points where the real gap was twenty, so the
+/// close button kept a dead corner while appearing to be fixed. The
+/// caller knows which control is the outermost one; the control cannot.
+///
+/// Both of this module's caption controls sit in the title bar and
+/// nowhere else, so the top edge is always theirs to take.
+fn caption_hit_area(ui: &Ui, painted: Rect, to_right_edge: bool) -> Rect {
     // `content_rect`, the same rectangle `chrome::resize_handles`
     // measures its border against, so the two agree on where the window
     // ends.
     let window = ui.ctx().content_rect();
     let mut hit = painted;
-    if painted.top() - window.top() <= theme::PAD {
-        hit.min.y = window.top();
-    }
-    if window.right() - painted.right() <= theme::PAD {
+    hit.min.y = window.top();
+    if to_right_edge {
         hit.max.x = window.right();
     }
     hit
@@ -1548,7 +1559,13 @@ fn caption_hit_area(ui: &Ui, painted: Rect) -> Rect {
 pub fn close_button(ui: &mut Ui, theme: &Palette) -> Response {
     const SIZE: f32 = theme::CONTROL_HEIGHT;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(SIZE, SIZE), Sense::click());
-    let response = ui.interact(caption_hit_area(ui, rect), response.id, Sense::click());
+    // The outermost control in the caption, so this one takes the
+    // corner — which is the whole reason any of this is here.
+    let response = ui.interact(
+        caption_hit_area(ui, rect, true),
+        response.id,
+        Sense::click(),
+    );
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), "Close"));
     let fill = hover_fill(ui, response.id, response.hovered(), theme.app, theme.danger);

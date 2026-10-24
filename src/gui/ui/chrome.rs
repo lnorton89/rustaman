@@ -326,6 +326,21 @@ fn resize_regions(rect: Rect) -> [(Rect, ResizeDirection, egui::CursorIcon); 8] 
 /// grew on hover would reflow the whole view — on every accidental pass
 /// of the pointer, for a reveal nobody asked for. The overlay leaves the
 /// content exactly where it is.
+///
+/// **A collapsed rail's controls live in that overlay and only there.**
+/// The first version drew them in the panel and swapped them for the
+/// overlay's copy as the reveal opened, so that no destination appeared
+/// twice. The swap was driven by the previous frame's hover, which meant
+/// a frame where the panel had already given its controls up and the
+/// overlay had not yet taken them — and a press and its release land on
+/// different frames, so a click that straddled the swap was delivered to
+/// a widget that no longer existed and silently went nowhere. The
+/// sidebar could be collapsed and then not expanded again.
+///
+/// So where the controls are drawn now depends on `collapsed` alone: a
+/// state that only a click changes, and a click cannot land across its
+/// own result. Hovering changes how wide the overlay is and nothing
+/// about who owns the controls.
 pub fn nav_rail(app: &mut App, ui: &mut Ui) {
     let theme = app.theme.clone();
     let compact = app.config.nav_collapsed.unwrap_or(false);
@@ -337,17 +352,6 @@ pub fn nav_rail(app: &mut App, ui: &mut Ui) {
     } else {
         NAV_WIDTH
     };
-    // While the flyout is up it *is* the rail, so the panel behind it
-    // draws its surface and nothing else. Leaving the narrow copy drawn
-    // under an opaque overlay puts every destination in the frame twice:
-    // unreachable by pointer, still reachable by Tab, and read out twice
-    // by a screen reader.
-    //
-    // Both surfaces are `theme.panel`, so the handover is invisible —
-    // what fades in over an unchanged background is the icons and their
-    // labels. The flag is last frame's answer, which is a frame of lag
-    // on a reveal that takes a tenth of a second.
-    let showing_flyout = compact && app.nav_flyout;
     // `show_separator_line(false)` below: `Panel` strokes a separator
     // at its inner edge by default, and every panel here is padded on
     // both sides — so the stroke lands as a pale hairline floating in a
@@ -364,22 +368,16 @@ pub fn nav_rail(app: &mut App, ui: &mut Ui) {
                 .inner_margin(theme::margin(PAD)),
         )
         .show(ui, |ui| {
-            if !showing_flyout {
-                rail_body(app, ui, compact, compact);
+            // Collapsed, the panel reserves the width and paints the
+            // surface; `nav_flyout` owns the controls.
+            if !compact {
+                rail_body(app, ui, false, false);
             }
         })
         .response
         .rect;
 
-    // Re-read, because the body above may have just answered a click on
-    // the toggle. `compact` is this frame's *layout*, decided before the
-    // click; `still_collapsed` is the preference as it now stands. On
-    // the frame the rail is expanded the two disagree, and unfolding a
-    // flyout over a rail that has just been pinned open puts a second
-    // copy of every control on screen for that frame — including a
-    // second toggle, on top of the one the pointer is resting on.
-    let still_collapsed = app.config.nav_collapsed.unwrap_or(false);
-    if compact && still_collapsed {
+    if compact {
         nav_flyout(app, ui, rail);
     }
 }
@@ -499,45 +497,36 @@ fn nav_flyout(app: &mut App, ui: &mut Ui, rail: Rect) {
     // - A confirmation awaiting an answer. Its scrim covers the rail,
     //   and this layer would unfold straight through it.
     // - The about panel, for the same reason.
-    // - A pointer button that is already down. This one is not taste:
-    //   a press and its release arrive on separate frames, and opening
-    //   the flyout between them takes the rail's own body off screen
-    //   mid-gesture — so the widget egui recorded the press against no
-    //   longer exists on the release frame, and the click is silently
-    //   lost. That is what broke `mini_navigation_…`: the toggle under
-    //   the pointer stopped answering, because unfolding the rail
-    //   removed it halfway through being clicked. A press that began on
-    //   the narrow rail finishes on the narrow rail.
-    let blocked = app.pending.is_some()
-        || app.about
-        || ui.ctx().dragged_id().is_some()
-        || ui.ctx().input(|input| input.pointer.any_down());
+    let blocked = app.pending.is_some() || app.about || ui.ctx().dragged_id().is_some();
     let open = pointer && !app.nav_flyout_shut && !blocked;
     app.nav_flyout = open;
 
+    // Always drawn, however shut: this layer owns a collapsed rail's
+    // controls, so it cannot come and go without taking them with it.
+    // Only its width answers the pointer.
     let progress = motion::transition(
         ui.ctx(),
         egui::Id::unique("nav-flyout"),
         open,
         motion::QUICK,
     );
-    if progress <= 0.0 {
-        return;
-    }
+    let width = theme::NAV_MINI_WIDTH + (NAV_WIDTH - theme::NAV_MINI_WIDTH) * progress;
     let theme = app.theme.clone();
     egui::Area::new(egui::Id::unique("nav-flyout-area"))
         .order(egui::Order::Foreground)
         .constrain(false)
         .fixed_pos(rail.min)
         .show(ui.ctx(), |ui| {
-            // Faded rather than unrolled. A width that animates would
-            // re-lay-out the rail's own contents every frame of the
-            // reveal, and a label half-clipped mid-slide reads as a
-            // rendering fault rather than as motion.
-            ui.multiply_opacity(progress);
+            // The frame's lift fades in with the reveal while the fill
+            // stays solid. Fading the fill too would show the content
+            // through a half-transparent rail on the way past.
+            let lift = (progress * 255.0) as u8;
             egui::Frame::new()
                 .fill(theme::rgb(theme.panel))
-                .stroke(egui::Stroke::new(1.0, theme::rgb(theme.border)))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    theme::translucent(theme.border, lift),
+                ))
                 .corner_radius(CornerRadius {
                     nw: 0,
                     sw: 0,
@@ -551,17 +540,17 @@ fn nav_flyout(app: &mut App, ui: &mut Ui, rail: Rect) {
                     spread: 0,
                     // Alpha-only: a shadow is lighting, not a theme
                     // colour. See `gui::ui::theme`.
-                    color: egui::Color32::from_black_alpha(96),
+                    color: egui::Color32::from_black_alpha(lift.saturating_sub(159)),
                 })
                 .show(ui, |ui| {
-                    ui.set_width(NAV_WIDTH - PAD * 2.0);
+                    ui.set_width(width - PAD * 2.0);
                     ui.set_height(rail.height() - PAD * 2.0);
-                    // Drawn full-width, with the preference read live
-                    // rather than assumed collapsed: the toggle inside
-                    // must decide from the state as it stands, or a
-                    // click here writes from a stale reading of it.
+                    // The labels appear with the room for them, and the
+                    // growing edge clips them in. `collapsed` is read
+                    // live so the toggle decides from the state as it
+                    // stands rather than from a stale copy of it.
                     let collapsed = app.config.nav_collapsed.unwrap_or(false);
-                    rail_body(app, ui, false, collapsed);
+                    rail_body(app, ui, !open, collapsed);
                 });
         });
 }
