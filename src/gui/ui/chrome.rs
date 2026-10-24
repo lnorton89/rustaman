@@ -360,7 +360,15 @@ pub fn nav_rail(app: &mut App, ui: &mut Ui) {
         .response
         .rect;
 
-    if compact {
+    // Re-read, because the body above may have just answered a click on
+    // the toggle. `compact` is this frame's *layout*, decided before the
+    // click; `still_collapsed` is the preference as it now stands. On
+    // the frame the rail is expanded the two disagree, and unfolding a
+    // flyout over a rail that has just been pinned open puts a second
+    // copy of every control on screen for that frame — including a
+    // second toggle, on top of the one the pointer is resting on.
+    let still_collapsed = app.config.nav_collapsed.unwrap_or(false);
+    if compact && still_collapsed {
         nav_flyout(app, ui, rail);
     }
 }
@@ -480,7 +488,19 @@ fn nav_flyout(app: &mut App, ui: &mut Ui, rail: Rect) {
     // - A confirmation awaiting an answer. Its scrim covers the rail,
     //   and this layer would unfold straight through it.
     // - The about panel, for the same reason.
-    let blocked = app.pending.is_some() || app.about || ui.ctx().dragged_id().is_some();
+    // - A pointer button that is already down. This one is not taste:
+    //   a press and its release arrive on separate frames, and opening
+    //   the flyout between them takes the rail's own body off screen
+    //   mid-gesture — so the widget egui recorded the press against no
+    //   longer exists on the release frame, and the click is silently
+    //   lost. That is what broke `mini_navigation_…`: the toggle under
+    //   the pointer stopped answering, because unfolding the rail
+    //   removed it halfway through being clicked. A press that began on
+    //   the narrow rail finishes on the narrow rail.
+    let blocked = app.pending.is_some()
+        || app.about
+        || ui.ctx().dragged_id().is_some()
+        || ui.ctx().input(|input| input.pointer.any_down());
     let open = pointer && !app.nav_flyout_shut && !blocked;
     app.nav_flyout = open;
 
@@ -525,7 +545,12 @@ fn nav_flyout(app: &mut App, ui: &mut Ui, rail: Rect) {
                 .show(ui, |ui| {
                     ui.set_width(NAV_WIDTH - PAD * 2.0);
                     ui.set_height(rail.height() - PAD * 2.0);
-                    rail_body(app, ui, false, true);
+                    // Drawn full-width, with the preference read live
+                    // rather than assumed collapsed: the toggle inside
+                    // must decide from the state as it stands, or a
+                    // click here writes from a stale reading of it.
+                    let collapsed = app.config.nav_collapsed.unwrap_or(false);
+                    rail_body(app, ui, false, collapsed);
                 });
         });
 }
@@ -865,7 +890,14 @@ mod tests {
         assert_eq!(harness.state().view, View::Performance);
         harness.get_by_label("Expand sidebar").click();
         harness.run();
-        assert_eq!(harness.state().config.nav_collapsed, Some(false));
+        assert_eq!(
+            harness.state().config.nav_collapsed,
+            Some(false),
+            "the rail's own toggle must expand it again (flyout open: {}, \
+             held shut: {})",
+            harness.state().nav_flyout,
+            harness.state().nav_flyout_shut,
+        );
         assert!(harness.get_by_label("Performance").rect().width() > 100.0);
     }
 
@@ -948,6 +980,28 @@ mod tests {
         assert!(
             harness.get_by_label("Performance").rect().width() > NAV_WIDTH / 2.0,
             "the flyout must survive the pointer moving onto it"
+        );
+    }
+
+    #[test]
+    fn a_click_begun_on_the_narrow_rail_is_not_swallowed_by_the_reveal() {
+        // A press and its release arrive on separate frames. The reveal
+        // takes the narrow rail's own body off screen, so if it opens
+        // between the two, the widget egui recorded the press against
+        // has stopped existing by the release frame and the click is
+        // lost — the control under the pointer simply stops answering.
+        //
+        // This is not hypothetical: it is what the reveal did to the
+        // rail's own toggle the first time, and the symptom was a
+        // sidebar that could be collapsed and then not expanded again.
+        let mut harness = collapsed_rail();
+        harness.get_by_label("Memory").click();
+        harness.run();
+        assert_eq!(
+            harness.state().view,
+            View::Memory,
+            "a destination clicked on the narrow rail must still answer \
+             while the pointer's arrival is opening the flyout over it"
         );
     }
 
