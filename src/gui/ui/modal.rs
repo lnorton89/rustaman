@@ -135,7 +135,7 @@ const RISE: f32 = 6.0;
 
 /// Draws the modal, if one is pending. Returns the answer, if given.
 pub fn draw(app: &mut App, ui: &mut Ui) -> Option<bool> {
-    let focus_id = egui::Id::new("confirmation-focus-initialized");
+    let focus_id = egui::Id::unique("confirmation-focus-initialized");
     let Some(pending) = app.pending.as_ref() else {
         ui.data_mut(|data| data.remove::<bool>(focus_id));
         return None;
@@ -148,14 +148,19 @@ pub fn draw(app: &mut App, ui: &mut Ui) -> Option<bool> {
     // *different* confirmation while one is already up — Stop, then
     // immediately End task on the row behind it — does not restart the
     // fade from zero.
-    let progress = motion::transition(ui.ctx(), egui::Id::new("modal-card"), true, motion::QUICK);
+    let progress = motion::transition(
+        ui.ctx(),
+        egui::Id::unique("modal-card"),
+        true,
+        motion::QUICK,
+    );
 
     let scrim_alpha = (f32::from(SCRIM_ALPHA) * progress) as u8;
 
     let mut answer = None;
     // Egui's modal layer confines keyboard focus and blocks interaction
     // with the views underneath, while preserving the app's own card.
-    let modal_id = egui::Id::new("modal-card");
+    let modal_id = egui::Id::unique("modal-card");
     let area = egui::Modal::default_area(modal_id).anchor(
         Align2::CENTER_CENTER,
         Vec2::new(0.0, RISE * (1.0 - progress)),

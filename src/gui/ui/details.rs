@@ -486,7 +486,7 @@ fn table_body(
                     &mut row,
                     theme,
                     viewport,
-                    egui::Id::new("detail-row").with(key),
+                    egui::Id::unique("detail-row").with(key),
                     selected,
                     position % 2 == 1,
                 );

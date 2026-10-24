@@ -305,13 +305,13 @@ fn map(app: &mut App, ui: &mut Ui, theme: &Palette, snapshot: &Snapshot, height:
                 let hit = ui
                     .interact(
                         placed,
-                        ui.id().with(("memory-tile", row.key())),
+                        ui.scope_id().with(("memory-tile", row.key())),
                         Sense::click(),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                 hit.widget_info(|| {
                     egui::WidgetInfo::selected(
-                        egui::WidgetType::SelectableLabel,
+                        egui::Role::Button,
                         ui.is_enabled(),
                         app.memory_view.selected == Some(row.key()),
                         format!("{} (PID {})", row.display_name(), row.pid),

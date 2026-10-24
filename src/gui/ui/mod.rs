@@ -81,7 +81,7 @@ fn enter_view(app: &App, ui: &mut Ui) {
     // animation rather than continuing whatever the last one was doing.
     let progress = motion::transition(
         ui.ctx(),
-        egui::Id::new("view-enter").with(app.view),
+        egui::Id::unique("view-enter").with(app.view),
         true,
         motion::ENTER,
     );
