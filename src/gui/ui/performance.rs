@@ -94,7 +94,7 @@ const GPU: &str = "performance-below-gpu";
 /// What a panel drew below its graph when it was last drawn, if it has
 /// been drawn.
 fn measured_below(ui: &Ui, panel: &'static str) -> Option<f32> {
-    ui.data(|data| data.get_temp::<f32>(egui::Id::new(panel)))
+    ui.data(|data| data.get_temp::<f32>(egui::Id::unique(panel)))
 }
 
 /// The height a panel's main graph takes: the pane's own remainder, once
@@ -175,7 +175,7 @@ fn record_below(ui: &Ui, panel: &'static str, graph_bottom: f32) {
     let below = ui.min_rect().bottom() - graph_bottom + theme::PAD + SLACK;
     let settled = measured_below(ui, panel).is_some_and(|old| (old - below).abs() <= TOLERANCE);
     if !settled {
-        ui.data_mut(|data| data.insert_temp(egui::Id::new(panel), below));
+        ui.data_mut(|data| data.insert_temp(egui::Id::unique(panel), below));
         ui.ctx()
             .request_discard("a Performance panel measured what sits under its graph");
     }
@@ -360,7 +360,7 @@ fn picker_entry(
         ui.allocate_exact_size(Vec2::new(ui.available_width(), PICKER_ROW), Sense::click());
     response.widget_info(|| {
         let mut info = egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
+            egui::Role::Button,
             ui.is_enabled(),
             active,
             format!("{label}: {}", summary.value),
@@ -368,7 +368,7 @@ fn picker_entry(
         info.hint_text = Some(format!("{}. {}", summary.context, summary.detail));
         info
     });
-    let id = ui.id().with(("picker", focus));
+    let id = ui.scope_id().with(("picker", focus));
     let fill = widgets::selectable_surface(ui, theme, id, &response, active, theme.panel);
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(theme::RADIUS), fill);
@@ -1246,13 +1246,13 @@ fn adapter_list(
             let row = ui
                 .interact(
                     header.response.rect,
-                    ui.id().with("network-virtual-row"),
+                    ui.scope_id().with("network-virtual-row"),
                     Sense::click(),
                 )
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             row.widget_info(|| {
                 egui::WidgetInfo::selected(
-                    egui::WidgetType::CollapsingHeader,
+                    egui::Role::DisclosureTriangle,
                     ui.is_enabled(),
                     expanded,
                     "Virtual adapters",
@@ -1328,12 +1328,7 @@ fn adapter_row(
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), ADAPTER_ROW), Sense::click());
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
-            ui.is_enabled(),
-            selected,
-            &adapter.name,
-        )
+        egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, &adapter.name)
     });
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
@@ -1341,7 +1336,7 @@ fn adapter_row(
     // built from the loop index animates the *slot*, so an adapter
     // appearing above another one hands its hover state to whatever now
     // sits where it did.
-    let id = ui.id().with(("adapter", adapter.luid));
+    let id = ui.scope_id().with(("adapter", adapter.luid));
     let fill = widgets::selectable_surface(ui, theme, id, &response, selected, theme.raised);
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(theme::RADIUS), fill);
@@ -2463,6 +2458,7 @@ mod tests {
                 | egui::Shape::Mesh(_)
                 | egui::Shape::QuadraticBezier(_)
                 | egui::Shape::CubicBezier(_)
+                | egui::Shape::Band(_)
                 | egui::Shape::Callback(_) => false,
             })
             .count();

@@ -281,7 +281,7 @@ pub fn timeline(ui: &mut Ui, theme: &Palette, height: f32, chart: &Timeline<'_>)
     let id = ui.make_persistent_id(("timeline", chart.label));
     let response = ui.interact(plot, id, Sense::click());
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Other, ui.is_enabled(), chart.label)
+        egui::WidgetInfo::labeled(egui::Role::Unknown, ui.is_enabled(), chart.label)
     });
     let recorded = chart
         .lines
@@ -787,7 +787,11 @@ pub fn core_grid(
                 theme::rgb(theme.text),
             );
         }
-        let response = ui.interact(cell_rect, ui.id().with("core").with(index), Sense::hover());
+        let response = ui.interact(
+            cell_rect,
+            ui.scope_id().with("core").with(index),
+            Sense::hover(),
+        );
         if let Some(position) = response.hover_pos() {
             let age = nearest_age(plot_rect, series.capacity(), position.x);
             let value = series.from_latest(age).map_or_else(

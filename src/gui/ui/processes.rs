@@ -361,7 +361,7 @@ fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fil
     // and in immediate mode the answer to "what is under the pointer"
     // is not available until every heading has been drawn anyway.
     let mut lane = Some(dnd::Lane::new(
-        egui::Id::new("process-columns"),
+        egui::Id::unique("process-columns"),
         dnd::Axis::Horizontal,
     ));
 
@@ -548,7 +548,7 @@ fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fil
                             &mut row,
                             theme,
                             viewport,
-                            egui::Id::new("row").with(key),
+                            egui::Id::unique("row").with(key),
                             selected,
                             index % 2 == 1,
                             accent,
@@ -930,7 +930,7 @@ fn metric_cell(
     // re-sorts constantly, and keyed on position a row would animate to
     // the value of whatever used to be in its slot.
     let smooth = |ui: &Ui, value: f64| -> f64 {
-        let id = egui::Id::new("cell")
+        let id = egui::Id::unique("cell")
             .with(process.key())
             .with(key)
             .with(aggregated);

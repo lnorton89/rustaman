@@ -196,7 +196,7 @@ pub fn resize_handles(ui: &mut Ui) {
 
 fn resize_handles_in(ui: &mut Ui, rect: Rect) {
     for (index, (area, direction, cursor)) in resize_regions(rect).into_iter().enumerate() {
-        let id = egui::Id::new("resize-handle").with(index);
+        let id = egui::Id::unique("resize-handle").with(index);
         // A foreground Area gives the native border its own interaction
         // layer. Registering the rectangles on the root Ui looked correct but
         // left them underneath panel widgets in egui's hit-test order, so a
@@ -542,7 +542,7 @@ pub fn interval_label(interval: std::time::Duration) -> String {
 /// That was Ctrl+F for as long as the shortcut existed.
 #[must_use]
 pub fn search_box_id() -> egui::Id {
-    egui::Id::new("search-box")
+    egui::Id::unique("search-box")
 }
 
 /// A toolbar with a stable height and vertically centered controls.
@@ -605,7 +605,7 @@ pub fn search_box(ui: &mut Ui, theme: &Palette, text: &mut String, hint: &str) -
         input_rect.size(),
         egui::TextEdit::singleline(text)
             .id(search_box_id())
-            .vertical_align(Align::Center)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text(hint)
             .frame(egui::Frame::NONE)
             .margin(theme::margin_xy(0.0, 0.0))
@@ -626,9 +626,7 @@ pub fn search_box(ui: &mut Ui, theme: &Palette, text: &mut String, hint: &str) -
         );
     } else {
         let clear = ui.interact(trailing, shell.id.with("clear"), Sense::click());
-        clear.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Clear search")
-        });
+        clear.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Clear search"));
         ui.painter().rect_filled(
             trailing,
             CornerRadius::same(theme::RADIUS),

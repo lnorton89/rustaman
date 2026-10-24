@@ -274,12 +274,7 @@ pub fn nav_destination(
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::click());
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
-            ui.is_enabled(),
-            active,
-            label,
-        )
+        egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), active, label)
     });
     let painter = ui.painter();
 
@@ -287,7 +282,7 @@ pub fn nav_destination(
     // `allocate_exact_size` derives from the slot: the rail is a fixed
     // list today, and would hand one destination another's animation
     // the day a view is added in the middle.
-    let id = egui::Id::new(("nav", label));
+    let id = egui::Id::unique(("nav", label));
     let fill = selectable_surface(ui, theme, id, &response, active, theme.panel);
     painter.rect_filled(rect, CornerRadius::same(RADIUS), fill);
 
@@ -348,9 +343,7 @@ pub fn nav_toggle(ui: &mut Ui, theme: &Palette, compact: bool) -> Response {
         Vec2::new(ui.available_width(), theme::CONTROL_HEIGHT),
         Sense::click(),
     );
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
-    });
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
     ui.painter().rect_filled(
         rect,
         CornerRadius::same(RADIUS),
@@ -393,8 +386,7 @@ pub fn access_notice(ui: &mut Ui, theme: &Palette) -> Response {
         Icon::Info,
         theme::rgb(theme.text_muted),
     );
-    response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Limited access"));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, "Limited access"));
     response
 }
 
@@ -418,14 +410,14 @@ pub fn disclosure(
     open: bool,
     id_source: impl std::hash::Hash + std::fmt::Debug,
 ) -> Response {
-    let id = ui.id().with("disclosure").with(id_source);
+    let id = ui.scope_id().with("disclosure").with(id_source);
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(icons::DISCLOSURE + SPACE_XS, theme::ROW_HEIGHT),
         Sense::click(),
     );
     response.widget_info(|| {
         egui::WidgetInfo::selected(
-            egui::WidgetType::CollapsingHeader,
+            egui::Role::DisclosureTriangle,
             ui.is_enabled(),
             open,
             "Expand group",
@@ -792,9 +784,7 @@ pub fn sortable_header(ui: &mut Ui, theme: &Palette, heading: Heading<'_>) -> Re
     let (_, allocation) = ui.allocate_exact_size(wanted, Sense::hover());
     let rect = Rect::from_min_size(cell.min, Vec2::new(cell.width(), height));
     let response = ui.interact(rect, allocation.id, super::dnd::Lane::sense());
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
-    });
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
     ui.painter().rect_filled(
         rect,
         CornerRadius::same(RADIUS),
@@ -1480,9 +1470,8 @@ pub fn icon_button(ui: &mut Ui, theme: &Palette, icon: Icon, tooltip: &str) -> R
     const SIZE: f32 = theme::CONTROL_HEIGHT;
 
     let (rect, response) = ui.allocate_exact_size(Vec2::new(SIZE, SIZE), Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tooltip)
-    });
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), tooltip));
     let fill = selectable_surface(ui, theme, response.id, &response, false, theme.app);
     ui.painter()
         .rect_filled(rect, CornerRadius::same(RADIUS), fill);
@@ -1507,9 +1496,8 @@ pub fn icon_button(ui: &mut Ui, theme: &Palette, icon: Icon, tooltip: &str) -> R
 pub fn close_button(ui: &mut Ui, theme: &Palette) -> Response {
     const SIZE: f32 = theme::CONTROL_HEIGHT;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(SIZE, SIZE), Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Close")
-    });
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), "Close"));
     let fill = hover_fill(ui, response.id, response.hovered(), theme.app, theme.danger);
     ui.painter()
         .rect_filled(rect, CornerRadius::same(RADIUS), fill);
@@ -1599,10 +1587,8 @@ fn button(
     };
     let (rect, response) = ui.allocate_exact_size(size, sense);
     response.widget_info(|| match selected {
-        Some(selected) => {
-            egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, enabled, selected, label)
-        }
-        None => egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label),
+        Some(selected) => egui::WidgetInfo::selected(egui::Role::Button, enabled, selected, label),
+        None => egui::WidgetInfo::labeled(egui::Role::Button, enabled, label),
     });
     let fill = if response.is_pointer_button_down_on() {
         theme::rgb(pressed)
@@ -2207,7 +2193,7 @@ mod tests {
                 ui.scope_builder(egui::UiBuilder::new().max_rect(cell), |ui| {
                     ui.set_clip_rect(cell);
                     ui.allocate_exact_size(cell.size(), Sense::hover());
-                    row_background(ui, &theme, row, egui::Id::new("row"), true, false, None);
+                    row_background(ui, &theme, row, egui::Id::unique("row"), true, false, None);
                 });
             }
         });
@@ -2305,7 +2291,7 @@ mod tests {
                                 &mut row,
                                 &palette,
                                 viewport,
-                                egui::Id::new("row").with(index),
+                                egui::Id::unique("row").with(index),
                                 false,
                                 index % 2 == 1,
                             );

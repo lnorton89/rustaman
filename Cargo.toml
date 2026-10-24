@@ -41,12 +41,12 @@ crossbeam-channel = "0.5"
 # is the one that fails on machines with a stale or hybrid OpenGL ICD —
 # common on exactly the switchable-graphics laptops this app is most
 # useful on.
-eframe = { version = "0.36", default-features = false, features = [
+eframe = { version = "0.37", default-features = false, features = [
     "wgpu",
     "default_fonts",
 ] }
-egui = "0.36"
-egui_extras = "0.36"
+egui = "0.37"
+egui_extras = "0.37"
 
 # Every system fact in this app comes through here. `windows-sys` rather
 # than `windows`: this crate's Win32 surface is raw structs and function
@@ -119,7 +119,7 @@ windows-sys = { version = "0.61", features = [
 winresource = "0.1"
 
 [target.'cfg(windows)'.dev-dependencies]
-egui_kittest = { version = "0.36.1", features = ["wgpu", "snapshot"] }
+egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
 
 [dev-dependencies]
 # The brand-asset generator (`cargo run --example brand_assets`) writes

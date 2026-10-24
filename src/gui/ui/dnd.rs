@@ -145,9 +145,8 @@ pub fn split_pane(
         ui.make_persistent_id(label),
         Sense::click_and_drag(),
     );
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::DragValue, ui.is_enabled(), label)
-    });
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::SpinButton, ui.is_enabled(), label));
     let direction = if split.secondary_on_right { -1.0 } else { 1.0 };
     let keyboard = if response.has_focus() {
         ui.input(|input| {
@@ -546,7 +545,7 @@ mod tests {
 
     /// A lane of five items, each 100 wide, starting at x = 0.
     fn lane() -> Lane {
-        let mut lane = Lane::new(Id::new("test"), Axis::Horizontal);
+        let mut lane = Lane::new(Id::unique("test"), Axis::Horizontal);
         for index in 0..5 {
             let left = index as f32 * 100.0;
             lane.items.push((
@@ -620,7 +619,7 @@ mod tests {
 
     #[test]
     fn an_empty_lane_offers_no_target_rather_than_panicking() -> Result<()> {
-        let lane = Lane::new(Id::new("empty"), Axis::Vertical);
+        let lane = Lane::new(Id::unique("empty"), Axis::Vertical);
         assert!(lane.bounds().is_none());
         assert_eq!(lane.slot_for(egui::pos2(0.0, 0.0)), None);
         Ok(())

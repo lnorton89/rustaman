@@ -322,7 +322,7 @@ fn table_body(app: &mut App, ui: &mut Ui, theme: &Palette, pane: egui::Rect, fil
                     &mut row,
                     theme,
                     viewport,
-                    egui::Id::new("service-row").with(&service.name),
+                    egui::Id::unique("service-row").with(&service.name),
                     selected,
                     position % 2 == 1,
                 );
@@ -826,7 +826,7 @@ fn startup_table_body(
                     // location: keyed on the name alone, a per-user and
                     // an all-users registration of one program shared a
                     // hover animation. See `StartupKey`.
-                    egui::Id::new("startup-row")
+                    egui::Id::unique("startup-row")
                         .with(&entry.name)
                         .with(entry.location),
                     selected,

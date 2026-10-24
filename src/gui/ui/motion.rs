@@ -96,7 +96,7 @@ mod tests {
         // would never converge and the window would repaint forever for
         // a change nobody could see.
         let ctx = Context::default();
-        let id = Id::new("nonsense-target");
+        let id = Id::unique("nonsense-target");
         let result = settled(&ctx, id, f32::NAN, SETTLE);
         assert!(
             result.is_finite(),
@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn a_settled_value_arrives_at_its_finite_target() {
         let ctx = Context::default();
-        let id = Id::new("real-target");
+        let id = Id::unique("real-target");
         // The first observation of an id returns the target rather than
         // the start — see `value`'s docs — so one call already lands on
         // it rather than needing frames to advance.

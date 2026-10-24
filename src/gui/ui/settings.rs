@@ -132,7 +132,7 @@ fn theme_card(ui: &mut Ui, active: &Palette, candidate: &Palette, selected: bool
         ui.allocate_exact_size(Vec2::new(ui.available_width(), HEIGHT), Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
+            egui::Role::Button,
             ui.is_enabled(),
             selected,
             &candidate.name,
@@ -143,7 +143,7 @@ fn theme_card(ui: &mut Ui, active: &Palette, candidate: &Palette, selected: bool
     // Keyed on the theme rather than on its position in the gallery, so
     // adding a theme does not hand its hover state to whichever card now
     // sits where another one did.
-    let id = ui.id().with(("theme", &candidate.id));
+    let id = ui.scope_id().with(("theme", &candidate.id));
     let fill = widgets::selectable_surface(ui, active, id, &response, selected, active.panel);
     ui.painter()
         .rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
