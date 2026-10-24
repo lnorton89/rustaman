@@ -54,6 +54,27 @@ const GRID_BANDS: usize = 4;
 /// The alpha the area fill starts at, directly under the line.
 const FILL_TOP_ALPHA: u8 = 110;
 
+/// The width of a plotted data line.
+///
+/// One value rather than a literal at each call site because
+/// [`LINE_CAP`] is derived from it, and an inset computed from a width
+/// the strokes no longer use is worse than no inset at all.
+const LINE_WIDTH: f32 = 1.5;
+
+/// Half a data line's stroke: how far it reaches either side of its path.
+///
+/// A stroke is centred on the path, so a sample mapped exactly onto
+/// `rect.top()` has half its width above the rect — and every graph here
+/// paints through a clip, which cuts it (see [`clipped`]). A saturated
+/// series then draws along the frame as a flat line of half the
+/// thickness, which is what the CPU panel showed at 100%.
+///
+/// So the top of the plot is pulled in by this much. It costs under a
+/// point of a graph's height, which no reader can see, and it is the
+/// difference between a peak that touches the frame and one that is
+/// shaved off by it.
+const LINE_CAP: f32 = LINE_WIDTH / 2.0;
+
 /// A graph's own configuration.
 pub struct Graph<'a> {
     /// The samples, oldest first.
@@ -219,7 +240,7 @@ pub fn timeline(ui: &mut Ui, theme: &Palette, height: f32, chart: &Timeline<'_>)
     }
     for (index, line) in chart.lines.iter().enumerate() {
         let points = plot_points(line.graph.series, plot, scale);
-        let stroke = Stroke::new(1.5, theme::rgb(line.graph.color));
+        let stroke = Stroke::new(LINE_WIDTH, theme::rgb(line.graph.color));
         if index % 2 == 1 {
             painter.extend(Shape::dashed_line(&points, stroke, SPACE_XS, SPACE_XS));
         } else if points.len() >= 2 {
@@ -375,7 +396,7 @@ pub fn timeline(ui: &mut Ui, theme: &Palette, height: f32, chart: &Timeline<'_>)
         );
         for line in chart.lines {
             if let Some(value) = line.graph.series.from_latest(age) {
-                let y = plot.bottom() - plot.height() * (value / scale).clamp(0.0, 1.0);
+                let y = sample_y(plot, value, scale);
                 painter.circle_filled(egui::pos2(x, y), SPACE_XS, theme::rgb(theme.app));
                 painter.circle_stroke(
                     egui::pos2(x, y),
@@ -579,7 +600,7 @@ pub fn area(ui: &Ui, theme: &Palette, rect: Rect, graph: &Graph<'_>) {
     fill_under(&plot, rect, &points, graph.color);
     plot.add(Shape::line(
         points,
-        Stroke::new(1.5, theme::rgb(graph.color)),
+        Stroke::new(LINE_WIDTH, theme::rgb(graph.color)),
     ));
     frame(ui, theme, rect);
     axis_label(ui, theme, rect, graph.unit.label(scale));
@@ -614,7 +635,7 @@ pub fn banded(ui: &Ui, theme: &Palette, rect: Rect, total: &Graph<'_>, under: &G
     if total_points.len() >= 2 {
         plot.add(Shape::line(
             total_points,
-            Stroke::new(1.5, theme::rgb(total.color)),
+            Stroke::new(LINE_WIDTH, theme::rgb(total.color)),
         ));
     }
     if under_points.len() >= 2 {
@@ -682,7 +703,7 @@ pub fn layered(ui: &Ui, theme: &Palette, rect: Rect, series: &[Graph<'_>]) {
         if points.len() >= 2 {
             plot.add(Shape::line(
                 points.clone(),
-                Stroke::new(1.5, theme::rgb(graph.color)),
+                Stroke::new(LINE_WIDTH, theme::rgb(graph.color)),
             ));
         }
     }
@@ -749,7 +770,7 @@ pub fn core_grid(
         if points.len() >= 2 {
             plot.add(Shape::line(
                 points,
-                Stroke::new(1.5, theme::rgb(theme.series(index, count))),
+                Stroke::new(LINE_WIDTH, theme::rgb(theme.series(index, count))),
             ));
         }
         frame(ui, theme, cell_rect);
@@ -841,12 +862,26 @@ fn plot_points(series: &Series, rect: Rect, scale: f32) -> Vec<Pos2> {
     series
         .iter()
         .enumerate()
-        .map(|(index, value)| {
-            let x = first + step * index as f32;
-            let fraction = (value / scale).clamp(0.0, 1.0);
-            Pos2::new(x, rect.bottom() - rect.height() * fraction)
-        })
+        .map(|(index, value)| Pos2::new(first + step * index as f32, sample_y(rect, value, scale)))
         .collect()
+}
+
+/// Maps one sample onto its vertical position inside `rect`.
+///
+/// Shared by the plotted path and by the hover marker, which is drawn
+/// from a value rather than from a point: two copies of this arithmetic
+/// is how a dot ends up sitting beside the line it is supposed to be
+/// marking.
+///
+/// The axis maximum lands a [`LINE_CAP`] below the top rather than on it,
+/// for the reason given there. The baseline is *not* pulled in to match:
+/// a zero sample is meant to rest exactly on the line the area fill ends
+/// at, and lifting it off that line would leave a sliver of fill under an
+/// idle graph.
+fn sample_y(rect: Rect, value: f32, scale: f32) -> f32 {
+    let fraction = (value / scale).clamp(0.0, 1.0);
+    let top = rect.top() + LINE_CAP;
+    rect.bottom() - (rect.bottom() - top).max(0.0) * fraction
 }
 
 /// Fills the area under a line with a vertical gradient.
@@ -1232,20 +1267,35 @@ mod tests {
     #[test]
     fn a_value_at_the_axis_maximum_reaches_the_top() {
         let series = filled(10, 10, 100.0);
-        let points = plot_points(&series, panel(), 100.0);
+        let rect = panel();
+        let points = plot_points(&series, rect, 100.0);
         assert!(
-            points.iter().all(|point| (point.y - 0.0).abs() < 0.01),
-            "a saturated series should touch the top of the panel"
+            points
+                .iter()
+                .all(|point| (point.y - (rect.top() + LINE_CAP)).abs() < 0.01),
+            "a saturated series should reach the top of the panel"
+        );
+        assert!(
+            points.iter().all(|point| point.y - LINE_CAP >= rect.top()),
+            "and keep its whole stroke inside it: a line centred on the top \
+             edge loses the half of its width that falls above the clip, \
+             which draws a saturated graph as a flat shaved line along its \
+             own frame"
         );
     }
 
     #[test]
     fn a_zero_series_sits_on_the_baseline() {
         let series = filled(10, 10, 0.0);
-        let points = plot_points(&series, panel(), 100.0);
+        let rect = panel();
+        let points = plot_points(&series, rect, 100.0);
         assert!(
-            points.iter().all(|point| (point.y - 100.0).abs() < 0.01),
-            "an idle series should sit on the bottom of the panel"
+            points
+                .iter()
+                .all(|point| (point.y - rect.bottom()).abs() < 0.01),
+            "an idle series should sit exactly on the bottom of the panel — \
+             the baseline is where the area fill ends, and a line lifted off \
+             it by a half-stroke leaves a sliver of fill under an idle graph"
         );
     }
 
