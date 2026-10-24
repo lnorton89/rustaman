@@ -282,7 +282,15 @@ pub fn nav_destination(
     // `allocate_exact_size` derives from the slot: the rail is a fixed
     // list today, and would hand one destination another's animation
     // the day a view is added in the middle.
-    let id = egui::Id::unique(("nav", label));
+    //
+    // Salted from the enclosing scope rather than rooted at the label,
+    // because the rail is drawn twice while the hover flyout is open —
+    // once narrow in the panel, once full-width over it. A label-rooted
+    // id is the same id in both, so the two would write one hover
+    // animation in the same frame and the destination under the pointer
+    // would be told it is not hovered by the copy that is hidden behind
+    // the flyout.
+    let id = ui.scope_id().with(("nav", label));
     let fill = selectable_surface(ui, theme, id, &response, active, theme.panel);
     painter.rect_filled(rect, CornerRadius::same(RADIUS), fill);
 
@@ -333,8 +341,16 @@ pub fn nav_destination(
 }
 
 /// A stable, visible rail toggle; the chevron points toward the resulting width.
-pub fn nav_toggle(ui: &mut Ui, theme: &Palette, compact: bool) -> Response {
-    let label = if compact {
+///
+/// Two flags, because the two differ in the hover flyout: `compact` is
+/// how this rail is being *drawn*, and `collapsed` is the saved state a
+/// click will flip. The flyout draws the full rail while the preference
+/// is still collapsed, so there the control pins the rail open rather
+/// than collapsing one that is already collapsed — and the chevron and
+/// the label both follow the action, not the drawing, so the glyph
+/// cannot promise the opposite of what the tooltip says.
+pub fn nav_toggle(ui: &mut Ui, theme: &Palette, compact: bool, collapsed: bool) -> Response {
+    let label = if collapsed {
         "Expand sidebar"
     } else {
         "Collapse sidebar"
@@ -359,7 +375,7 @@ pub fn nav_toggle(ui: &mut Ui, theme: &Palette, compact: bool) -> Response {
         Rect::from_center_size(center, Vec2::splat(icons::INLINE)),
         Icon::ChevronRight,
         theme::rgb(theme.text_muted),
-        if compact { 0.0 } else { 0.5 },
+        if collapsed { 0.0 } else { 0.5 },
     );
     if !compact {
         ui.painter().text(
@@ -1465,11 +1481,18 @@ pub fn text_cell(ui: &mut Ui, theme: &Palette, text: &str, muted: bool) {
 /// A borderless icon button, for the title bar and toolbars.
 pub fn icon_button(ui: &mut Ui, theme: &Palette, icon: Icon, tooltip: &str) -> Response {
     /// The button's square size. Matches the title bar's own height less
-    /// its padding, so the window controls fill the bar's full height and
-    /// are hittable by throwing the pointer at the corner.
+    /// its padding.
     const SIZE: f32 = theme::CONTROL_HEIGHT;
 
     let (rect, response) = ui.allocate_exact_size(Vec2::new(SIZE, SIZE), Sense::click());
+    // Not the right edge: the close button is the outermost control, and
+    // stretching these to an edge they do not touch would have them
+    // answering clicks over their neighbour.
+    let response = ui.interact(
+        caption_hit_area(ui, rect, false),
+        response.id,
+        Sense::click(),
+    );
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), tooltip));
     let fill = selectable_surface(ui, theme, response.id, &response, false, theme.app);
@@ -1487,6 +1510,46 @@ pub fn icon_button(ui: &mut Ui, theme: &Palette, icon: Icon, tooltip: &str) -> R
         .on_hover_text(tooltip)
 }
 
+/// A caption control's hit area, closed up to any window edge it sits
+/// against.
+///
+/// Fitts's law, and the corner is the whole of the point: a pointer
+/// cannot travel past the edge of the screen, so on a maximised window
+/// the top-right corner is a target of effectively infinite size — it is
+/// hit by throwing the pointer at it, without aiming, which is how the
+/// close button is used. Inset from that corner by even a few points, the
+/// corner becomes dead space: the throw lands on nothing and the button
+/// has to be aimed at like any other. Every system's own caption buttons
+/// run to the edge, and that is why.
+///
+/// The title bar earns its padding elsewhere, so only the *hit area*
+/// grows. The fill and the glyph stay where the layout put them, which
+/// is what keeps the bar looking padded while behaving as though it is
+/// not.
+///
+/// Which edges to close up is stated by the caller rather than guessed
+/// from how far the control sits from them. A distance test looks
+/// tidier and is wrong: the gap to the right edge is the title bar's
+/// padding *plus* the layout's own item spacing, and the first attempt
+/// at this measured twelve points where the real gap was twenty, so the
+/// close button kept a dead corner while appearing to be fixed. The
+/// caller knows which control is the outermost one; the control cannot.
+///
+/// Both of this module's caption controls sit in the title bar and
+/// nowhere else, so the top edge is always theirs to take.
+fn caption_hit_area(ui: &Ui, painted: Rect, to_right_edge: bool) -> Rect {
+    // `content_rect`, the same rectangle `chrome::resize_handles`
+    // measures its border against, so the two agree on where the window
+    // ends.
+    let window = ui.ctx().content_rect();
+    let mut hit = painted;
+    hit.min.y = window.top();
+    if to_right_edge {
+        hit.max.x = window.right();
+    }
+    hit
+}
+
 /// The window's close button, which highlights in the danger colour.
 ///
 /// Separate from [`icon_button`] because it is the one control in the app
@@ -1496,6 +1559,13 @@ pub fn icon_button(ui: &mut Ui, theme: &Palette, icon: Icon, tooltip: &str) -> R
 pub fn close_button(ui: &mut Ui, theme: &Palette) -> Response {
     const SIZE: f32 = theme::CONTROL_HEIGHT;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(SIZE, SIZE), Sense::click());
+    // The outermost control in the caption, so this one takes the
+    // corner — which is the whole reason any of this is here.
+    let response = ui.interact(
+        caption_hit_area(ui, rect, true),
+        response.id,
+        Sense::click(),
+    );
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), "Close"));
     let fill = hover_fill(ui, response.id, response.hovered(), theme.app, theme.danger);

@@ -103,9 +103,20 @@ cargo clippy --all-targets --all-features --target x86_64-pc-windows-msvc -- -D 
 
 That type-checks the whole Windows half without linking anything, which
 catches a broken `unsafe extern` block, a struct-layout assertion, or an
-egui API that moved. It cannot run a test and it cannot tell you the
-window looks right. **Anything visual, and anything that reads a real
-machine, needs a Windows run and a screenshot in the pull request.**
+egui API that moved. It cannot run a test.
+
+To run them, and to see the window, build for `x86_64-pc-windows-gnu`
+and go through Wine — `scripts/cloud-ui.sh`, documented in
+[`docs/CLOUD_TESTING.md`](docs/CLOUD_TESTING.md). It needs no change to
+the source and it is the same code the `windows` job builds. Use it, and
+say in the pull request that you did.
+
+Read that document's limits before leaning on it. It settles layout,
+geometry, state and interaction; it settles nothing about a driver that
+falls over, what the machine reports about itself, or typography.
+**Anything that depends on real hardware still needs a Windows run, and
+a visible change still wants a screenshot in the pull request** — which
+`scripts/cloud-ui.sh shot` will now produce for you.
 
 CI is arranged the same way: a `windows` job that is the authority, and a
 `portable` job on Linux whose value is in its *failure* — it says a

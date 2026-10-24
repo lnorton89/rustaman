@@ -39,7 +39,7 @@
 use super::theme::{
     self, NAV_WIDTH, PAD, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TITLE_BAR_HEIGHT,
 };
-use super::widgets;
+use super::{motion, widgets};
 use crate::gui::app::{App, SamplerHealth, View, TOAST_SECONDS};
 use crate::icon::Icon;
 use crate::theme::Palette;
@@ -189,7 +189,18 @@ fn drag_region(ui: &mut Ui, app: &mut App) {
 /// control that happens to sit against the window edge — a table's
 /// scrollbar is exactly there, and losing the resize to it would make the
 /// window feel stuck.
-pub fn resize_handles(ui: &mut Ui) {
+/// `maximised` suppresses them entirely, and that is not an optimisation.
+/// A maximised window has no resizable edge — dragging one does nothing
+/// — but these are a *foreground* layer, so they win the hit test over
+/// whatever is beneath them. At the top right that is the close button,
+/// and it is precisely when the window is maximised that the corner
+/// matters most: it is the one place the pointer can be thrown without
+/// aiming. Handles for a gesture the window cannot perform were taking
+/// the corner from the control that can.
+pub fn resize_handles(ui: &mut Ui, maximised: bool) {
+    if maximised {
+        return;
+    }
     let rect = ui.ctx().content_rect();
     resize_handles_in(ui, rect);
 }
@@ -307,9 +318,35 @@ fn resize_regions(rect: Rect) -> [(Rect, ResizeDirection, egui::CursorIcon); 8] 
 }
 
 /// Draws the navigation rail.
+///
+/// A collapsed rail reveals itself under the pointer. That reveal is an
+/// *overlay* over the content rather than a wider panel, and the
+/// difference is not cosmetic: every table in this app sizes its columns
+/// against the pane it is handed (see `details::draw`), so a rail that
+/// grew on hover would reflow the whole view — on every accidental pass
+/// of the pointer, for a reveal nobody asked for. The overlay leaves the
+/// content exactly where it is.
+///
+/// **A collapsed rail's controls live in that overlay and only there.**
+/// The first version drew them in the panel and swapped them for the
+/// overlay's copy as the reveal opened, so that no destination appeared
+/// twice. The swap was driven by the previous frame's hover, which meant
+/// a frame where the panel had already given its controls up and the
+/// overlay had not yet taken them — and a press and its release land on
+/// different frames, so a click that straddled the swap was delivered to
+/// a widget that no longer existed and silently went nowhere. The
+/// sidebar could be collapsed and then not expanded again.
+///
+/// So where the controls are drawn now depends on `collapsed` alone: a
+/// state that only a click changes, and a click cannot land across its
+/// own result. Hovering changes how wide the overlay is and nothing
+/// about who owns the controls.
 pub fn nav_rail(app: &mut App, ui: &mut Ui) {
     let theme = app.theme.clone();
     let compact = app.config.nav_collapsed.unwrap_or(false);
+    if !compact {
+        app.nav_flyout = false;
+    }
     let width = if compact {
         theme::NAV_MINI_WIDTH
     } else {
@@ -321,7 +358,7 @@ pub fn nav_rail(app: &mut App, ui: &mut Ui) {
     // gap, touching neither side, which is exactly what a grab handle
     // looks like. This panel is `resizable(false)`, so that is an
     // affordance for a gesture it cannot answer.
-    egui::Panel::left("nav-rail")
+    let rail = egui::Panel::left("nav-rail")
         .exact_size(width)
         .resizable(false)
         .show_separator_line(false)
@@ -331,67 +368,190 @@ pub fn nav_rail(app: &mut App, ui: &mut Ui) {
                 .inner_margin(theme::margin(PAD)),
         )
         .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = SPACE_XS;
-            if widgets::nav_toggle(ui, &theme, compact).clicked() {
-                app.config.nav_collapsed = Some(!compact);
+            // Collapsed, the panel reserves the width and paints the
+            // surface; `nav_flyout` owns the controls.
+            if !compact {
+                rail_body(app, ui, false, false);
             }
-            theme::gap(ui, SPACE_MD);
-            for view in View::ALL {
-                // Settings sits at the bottom, away from the views that
-                // are switched between constantly — a destination reached
-                // occasionally should not be one keystroke from the one
-                // reached every time.
-                if view == View::Settings {
-                    continue;
-                }
-                if view == View::Services {
-                    theme::gap(ui, SPACE_LG);
-                }
-                if widgets::nav_destination(
-                    ui,
-                    &theme,
-                    view.icon(),
-                    view.label(),
-                    app.view == view,
-                    compact,
-                )
-                .clicked()
-                {
-                    app.view = view;
-                }
-            }
+        })
+        .response
+        .rect;
 
-            ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                if widgets::nav_destination(
-                    ui,
-                    &theme,
-                    View::Settings.icon(),
-                    View::Settings.label(),
-                    app.view == View::Settings,
-                    compact,
-                )
-                .clicked()
-                {
-                    app.view = View::Settings;
-                }
+    if compact {
+        nav_flyout(app, ui, rail);
+    }
+}
 
-                // The elevation notice. Not a warning — running
-                // unelevated is a perfectly reasonable way to use this —
-                // but the missing columns need an explanation, or they
-                // look like a bug in the app.
-                if !app.elevated {
-                    let response = if compact {
-                        widgets::access_notice(ui, &theme)
-                    } else {
-                        widgets::chip(ui, "Limited access", theme.raised, theme.text_muted)
-                    };
-                    response.on_hover_text(
-                        "Some processes hide owner, path or architecture. \
-                         Administrator rights improve access, but protected \
-                         processes can still refuse it.",
-                    );
-                }
-            });
+/// The rail's contents, drawn either in the panel or in the hover flyout.
+///
+/// One function for both so a destination cannot appear in the flyout
+/// that the rail does not have, or answer a click differently there.
+///
+/// `compact` is how this copy is drawn; `collapsed` is the saved
+/// preference. They differ in the flyout, which draws the full rail
+/// while the preference is still collapsed — so its toggle pins the
+/// rail open instead of collapsing one that is already collapsed.
+fn rail_body(app: &mut App, ui: &mut Ui, compact: bool, collapsed: bool) {
+    let theme = app.theme.clone();
+    ui.spacing_mut().item_spacing.y = SPACE_XS;
+    if widgets::nav_toggle(ui, &theme, compact, collapsed).clicked() {
+        let now_collapsed = !collapsed;
+        app.config.nav_collapsed = Some(now_collapsed);
+        // The pointer is resting on the control that just narrowed the
+        // rail. A flyout unfolding under it on the next frame would
+        // undo the only visible result of the click.
+        app.nav_flyout_shut = now_collapsed;
+    }
+    theme::gap(ui, SPACE_MD);
+    for view in View::ALL {
+        // Settings sits at the bottom, away from the views that
+        // are switched between constantly — a destination reached
+        // occasionally should not be one keystroke from the one
+        // reached every time.
+        if view == View::Settings {
+            continue;
+        }
+        if view == View::Services {
+            theme::gap(ui, SPACE_LG);
+        }
+        if widgets::nav_destination(
+            ui,
+            &theme,
+            view.icon(),
+            view.label(),
+            app.view == view,
+            compact,
+        )
+        .clicked()
+        {
+            app.view = view;
+        }
+    }
+
+    ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+        if widgets::nav_destination(
+            ui,
+            &theme,
+            View::Settings.icon(),
+            View::Settings.label(),
+            app.view == View::Settings,
+            compact,
+        )
+        .clicked()
+        {
+            app.view = View::Settings;
+        }
+
+        // The elevation notice. Not a warning — running
+        // unelevated is a perfectly reasonable way to use this —
+        // but the missing columns need an explanation, or they
+        // look like a bug in the app.
+        if !app.elevated {
+            let response = if compact {
+                widgets::access_notice(ui, &theme)
+            } else {
+                widgets::chip(ui, "Limited access", theme.raised, theme.text_muted)
+            };
+            response.on_hover_text(
+                "Some processes hide owner, path or architecture. \
+                 Administrator rights improve access, but protected \
+                 processes can still refuse it.",
+            );
+        }
+    });
+}
+
+/// The collapsed rail's hover reveal: the full rail, over the content.
+///
+/// Held open by the pointer being anywhere over the flyout, not over the
+/// narrow rail that spawned it. Testing the rail alone shuts the reveal
+/// the instant the pointer reaches the labels it just opened, which is
+/// the one place the reader was going.
+fn nav_flyout(app: &mut App, ui: &mut Ui, rail: Rect) {
+    // The region that keeps it open: the rail while shut, the whole
+    // flyout once open. `app.nav_flyout` carries the answer from last
+    // frame, which is a frame of lag on a pointer that needs dozens to
+    // cross the rail.
+    let reach = if app.nav_flyout {
+        Rect::from_min_size(rail.min, Vec2::new(NAV_WIDTH, rail.height()))
+    } else {
+        rail
+    };
+    // Geometric, like the resize handles above and for the same reason:
+    // this is a foreground layer over whatever the view put underneath,
+    // and asking egui which widget owns the pointer answers about the
+    // table below as readily as about this.
+    let pointer = ui
+        .ctx()
+        .input(|input| input.pointer.hover_pos())
+        .is_some_and(|pos| reach.contains(pos));
+    if !pointer {
+        app.nav_flyout_shut = false;
+    }
+    // Three things that are not a hover over the rail, because the
+    // pointer test above is geometric and cannot see any of them:
+    //
+    // - A drag that began elsewhere. A column being resized or a row
+    //   being reordered must not be interrupted by a rail unfolding
+    //   over the table it is crossing.
+    // - A confirmation awaiting an answer. Its scrim covers the rail,
+    //   and this layer would unfold straight through it.
+    // - The about panel, for the same reason.
+    let blocked = app.pending.is_some() || app.about || ui.ctx().dragged_id().is_some();
+    let open = pointer && !app.nav_flyout_shut && !blocked;
+    app.nav_flyout = open;
+
+    // Always drawn, however shut: this layer owns a collapsed rail's
+    // controls, so it cannot come and go without taking them with it.
+    // Only its width answers the pointer.
+    let progress = motion::transition(
+        ui.ctx(),
+        egui::Id::unique("nav-flyout"),
+        open,
+        motion::QUICK,
+    );
+    let width = theme::NAV_MINI_WIDTH + (NAV_WIDTH - theme::NAV_MINI_WIDTH) * progress;
+    let theme = app.theme.clone();
+    egui::Area::new(egui::Id::unique("nav-flyout-area"))
+        .order(egui::Order::Foreground)
+        .constrain(false)
+        .fixed_pos(rail.min)
+        .show(ui.ctx(), |ui| {
+            // The frame's lift fades in with the reveal while the fill
+            // stays solid. Fading the fill too would show the content
+            // through a half-transparent rail on the way past.
+            let lift = (progress * 255.0) as u8;
+            egui::Frame::new()
+                .fill(theme::rgb(theme.panel))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    theme::translucent(theme.border, lift),
+                ))
+                .corner_radius(CornerRadius {
+                    nw: 0,
+                    sw: 0,
+                    ne: theme::RADIUS,
+                    se: theme::RADIUS,
+                })
+                .inner_margin(theme::margin(PAD))
+                .shadow(egui::epaint::Shadow {
+                    offset: [8, 0],
+                    blur: 24,
+                    spread: 0,
+                    // Alpha-only: a shadow is lighting, not a theme
+                    // colour. See `gui::ui::theme`.
+                    color: egui::Color32::from_black_alpha(lift.saturating_sub(159)),
+                })
+                .show(ui, |ui| {
+                    ui.set_width(width - PAD * 2.0);
+                    ui.set_height(rail.height() - PAD * 2.0);
+                    // The labels appear with the room for them, and the
+                    // growing edge clips them in. `collapsed` is read
+                    // live so the toggle decides from the state as it
+                    // stands rather than from a stale copy of it.
+                    let collapsed = app.config.nav_collapsed.unwrap_or(false);
+                    rail_body(app, ui, !open, collapsed);
+                });
         });
 }
 
@@ -730,8 +890,213 @@ mod tests {
         assert_eq!(harness.state().view, View::Performance);
         harness.get_by_label("Expand sidebar").click();
         harness.run();
-        assert_eq!(harness.state().config.nav_collapsed, Some(false));
+        assert_eq!(
+            harness.state().config.nav_collapsed,
+            Some(false),
+            "the rail's own toggle must expand it again (flyout open: {}, \
+             held shut: {})",
+            harness.state().nav_flyout,
+            harness.state().nav_flyout_shut,
+        );
         assert!(harness.get_by_label("Performance").rect().width() > 100.0);
+    }
+
+    #[test]
+    fn the_caption_controls_reach_the_window_corner() {
+        // Fitts's law: a pointer cannot travel past the edge of the
+        // screen, so on a maximised window the top-right corner is a
+        // target of effectively infinite size and the close button is
+        // hit by throwing the pointer at it. The title bar's own padding
+        // was insetting the controls out of that corner — 4 points below
+        // the top edge and 12 short of the right — so the throw landed
+        // on nothing.
+        let window = egui::vec2(780.0, 480.0);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(window)
+            .build_ui_state(
+                |ui, app: &mut App| {
+                    theme::apply(ui.ctx(), &app.theme.clone());
+                    let _ = title_bar(app, ui);
+                },
+                App::new(crate::config::Config::default()),
+            );
+        harness.run();
+
+        let close = harness.get_by_label("Close").rect();
+        assert!(
+            close.top() <= 0.01,
+            "the close button must reach the top edge of the window, got {close:?}"
+        );
+        assert!(
+            close.right() >= window.x - 0.01,
+            "and the right edge, got {close:?} in a window {window:?} wide"
+        );
+
+        // The neighbours reach the top too — the whole caption strip is
+        // one unbroken band — but they are not at the right edge and
+        // must not be stretched to it.
+        for label in ["Maximise", "Minimise"] {
+            let rect = harness.get_by_label(label).rect();
+            assert!(
+                rect.top() <= 0.01,
+                "{label} must reach the top edge, got {rect:?}"
+            );
+            assert!(
+                rect.right() < close.left() + 0.01,
+                "{label} must stay left of Close rather than growing to the \
+                 edge it does not touch, got {rect:?}"
+            );
+        }
+    }
+
+    /// A rail collapsed, with the pointer parked clear of it.
+    fn collapsed_rail() -> egui_kittest::Harness<'static, App> {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(780.0, 480.0))
+            .build_ui_state(
+                |ui, app: &mut App| {
+                    theme::apply(ui.ctx(), &app.theme.clone());
+                    nav_rail(app, ui);
+                },
+                App::new(crate::config::Config {
+                    nav_collapsed: Some(true),
+                    ..crate::config::Config::default()
+                }),
+            );
+        // Well to the right of the widest the rail can get, so the
+        // flyout is shut before a test asks it to open.
+        harness.hover_at(egui::pos2(600.0, 240.0));
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn a_collapsed_rail_unfolds_under_the_pointer_without_being_un_collapsed() {
+        let mut harness = collapsed_rail();
+        assert!(
+            harness
+                .query_by_label("Performance")
+                .is_none_or(|node| node.rect().width() < NAV_WIDTH / 2.0),
+            "with the pointer away, the rail stays narrow"
+        );
+
+        harness.hover_at(egui::pos2(theme::NAV_MINI_WIDTH / 2.0, 240.0));
+        harness.run();
+        harness.run();
+        let performance = harness.get_by_label("Performance");
+        assert!(
+            performance.rect().width() > NAV_WIDTH / 2.0,
+            "hovering a collapsed rail should reveal the full-width \
+             destinations, got {:?}",
+            performance.rect()
+        );
+        assert_eq!(
+            harness.state().config.nav_collapsed,
+            Some(true),
+            "a hover is where the pointer is, not a preference — the rail \
+             must still be collapsed once the pointer leaves"
+        );
+
+        harness.hover_at(egui::pos2(600.0, 240.0));
+        harness.run();
+        harness.run();
+        assert!(
+            harness.get_by_label("Performance").rect().width() < NAV_WIDTH / 2.0,
+            "and it folds back up when the pointer leaves"
+        );
+    }
+
+    #[test]
+    fn the_unfolded_rail_reaches_its_own_labels() {
+        // The reveal is held open by the pointer being anywhere over the
+        // flyout. Keyed to the narrow rail that spawned it, it would
+        // shut the moment the pointer crossed onto the labels — which is
+        // the one place the reader is going.
+        let mut harness = collapsed_rail();
+        harness.hover_at(egui::pos2(theme::NAV_MINI_WIDTH / 2.0, 240.0));
+        harness.run();
+        harness.run();
+        let label_x = harness.get_by_label("Performance").rect().center().x;
+        assert!(
+            label_x > theme::NAV_MINI_WIDTH,
+            "this test is pointless unless the label sits outside the \
+             narrow rail, got {label_x}"
+        );
+        harness.hover_at(egui::pos2(label_x, 240.0));
+        harness.run();
+        harness.run();
+        assert!(
+            harness.get_by_label("Performance").rect().width() > NAV_WIDTH / 2.0,
+            "the flyout must survive the pointer moving onto it"
+        );
+    }
+
+    #[test]
+    fn a_click_begun_on_the_narrow_rail_is_not_swallowed_by_the_reveal() {
+        // A press and its release arrive on separate frames. The reveal
+        // takes the narrow rail's own body off screen, so if it opens
+        // between the two, the widget egui recorded the press against
+        // has stopped existing by the release frame and the click is
+        // lost — the control under the pointer simply stops answering.
+        //
+        // This is not hypothetical: it is what the reveal did to the
+        // rail's own toggle the first time, and the symptom was a
+        // sidebar that could be collapsed and then not expanded again.
+        let mut harness = collapsed_rail();
+        harness.get_by_label("Memory").click();
+        harness.run();
+        assert_eq!(
+            harness.state().view,
+            View::Memory,
+            "a destination clicked on the narrow rail must still answer \
+             while the pointer's arrival is opening the flyout over it"
+        );
+    }
+
+    #[test]
+    fn the_unfolded_rail_pins_open_rather_than_collapsing_what_is_collapsed() {
+        let mut harness = collapsed_rail();
+        harness.hover_at(egui::pos2(theme::NAV_MINI_WIDTH / 2.0, 240.0));
+        harness.run();
+        harness.run();
+        // The control reads "Expand sidebar" in the flyout, because that
+        // is what clicking it does: the rail is collapsed underneath,
+        // and a second "Collapse" would be a no-op wearing the label of
+        // the thing it cannot do.
+        harness.get_by_label("Expand sidebar").click();
+        harness.run();
+        assert_eq!(harness.state().config.nav_collapsed, Some(false));
+    }
+
+    #[test]
+    fn collapsing_the_rail_does_not_immediately_unfold_it_again() {
+        // The pointer ends the click resting on the toggle, which is
+        // inside the rail — so without holding the flyout shut until the
+        // pointer leaves, the rail springs straight back to full width
+        // and the click looks as though it did nothing.
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(780.0, 480.0))
+            .build_ui_state(
+                |ui, app: &mut App| {
+                    theme::apply(ui.ctx(), &app.theme.clone());
+                    nav_rail(app, ui);
+                },
+                App::new(crate::config::Config::default()),
+            );
+        harness.run();
+        harness.get_by_label("Collapse sidebar").click();
+        harness.run();
+        harness.run();
+        assert_eq!(harness.state().config.nav_collapsed, Some(true));
+        assert!(
+            !harness.state().nav_flyout,
+            "the rail must stay folded while the pointer is still on the \
+             control that folded it"
+        );
+        assert!(
+            harness.get_by_label("Performance").rect().width() < NAV_WIDTH / 2.0,
+            "and it must look folded, too"
+        );
     }
 
     #[test]
