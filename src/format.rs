@@ -244,6 +244,27 @@ pub fn link_speed(bits_per_second: u64) -> String {
     }
 }
 
+/// Formats a nominal clock in MHz: `"3.59 GHz"`, `"800 MHz"`. Zero —
+/// which is what a machine whose registry carries no `~MHz` reports —
+/// renders as an em dash.
+///
+/// Written in gigahertz from a gigahertz up, because that is the unit a
+/// processor is sold and spoken of in: the same chip is "3.59 GHz" on
+/// every spec sheet and "3593 MHz" nowhere. Two decimals rather than
+/// [`significant`]'s three, which would render a round 4 GHz part as
+/// "4.00 GHz" beside a 3.59 GHz one and imply a precision neither
+/// figure has — the registry stores a whole number of megahertz.
+#[must_use]
+pub fn clock(megahertz: u32) -> String {
+    if megahertz == 0 {
+        return DASH.to_string();
+    }
+    if megahertz < 1000 {
+        return format!("{megahertz} MHz");
+    }
+    format!("{:.2} GHz", f64::from(megahertz) / 1000.0)
+}
+
 /// The em dash standing in for "no value here".
 ///
 /// A `pub const` rather than a literal at each call site because the
@@ -503,5 +524,27 @@ mod tests {
             "1,048,576",
             "grouping should not depend on the digit count being a multiple of three"
         );
+    }
+
+    #[test]
+    fn a_clock_is_written_in_the_unit_the_part_is_sold_in() {
+        assert_eq!(
+            clock(0),
+            DASH,
+            "an unreadable clock is not a zero-megahertz processor"
+        );
+        assert_eq!(clock(3593), "3.59 GHz", "a desktop part's base clock");
+        assert_eq!(
+            clock(4000),
+            "4.00 GHz",
+            "a round clock keeps the same two decimals as its neighbours"
+        );
+        assert_eq!(
+            clock(800),
+            "800 MHz",
+            "below a gigahertz the smaller unit is the readable one"
+        );
+        assert_eq!(clock(999), "999 MHz", "the last value before the step");
+        assert_eq!(clock(1000), "1.00 GHz", "the first value after it");
     }
 }

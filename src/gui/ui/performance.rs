@@ -268,6 +268,14 @@ struct PickerSummary {
 }
 
 /// Only snapshot facts: the summary has the same scope as its headline and history.
+///
+/// The two supporting lines have different jobs, and keeping them to
+/// those jobs is what makes five cards readable as a column: the first
+/// says *what* the resource is, the second gives the figures that
+/// qualify the headline. Both are truncated to a card that is narrower
+/// than a sentence, so a line spending its room on something the line
+/// above already implies, or on an identifier that means nothing once
+/// cut, has spent it badly.
 fn picker_summaries(system: &SystemSample) -> [PickerSummary; 5] {
     use crate::format::{bytes, percent, rate, DASH};
     let cpu = &system.cpu;
@@ -288,6 +296,13 @@ fn picker_summaries(system: &SystemSample) -> [PickerSummary; 5] {
         .count();
     let send = system.network_send_rate();
     let receive = (system.network_rate() - send).max(0.0);
+    let busiest_adapter = system
+        .adapters
+        .iter()
+        .filter(|adapter| (adapter.hardware || !has_hardware) && adapter.state.is_online())
+        .max_by(|a, b| (a.receive_rate + a.send_rate).total_cmp(&(b.receive_rate + b.send_rate)))
+        .map(|adapter| adapter.name.trim())
+        .filter(|name| !name.is_empty());
     let busiest_gpu = system
         .gpus
         .iter()
@@ -297,30 +312,50 @@ fn picker_summaries(system: &SystemSample) -> [PickerSummary; 5] {
             focus: PerformanceFocus::Cpu,
             value: percent(cpu.total_percent),
             context: if cpu.name.is_empty() { "Processor details unavailable".to_string() } else { cpu.name.clone() },
-            detail: if cpu.logical_cores == 0 { "Core count unavailable".to_string() }
-                else if cpu.physical_cores == 0 { format!("{} logical processors", cpu.logical_cores) }
-                else { format!("{} cores · {} logical", cpu.physical_cores, cpu.logical_cores) },
+            detail: cpu_shape(cpu),
             hint: "Overall utilisation across all logical processors.",
         },
         PickerSummary {
             focus: PerformanceFocus::Memory,
             value: if memory.total == 0 { DASH.to_string() } else { percent(memory.used_percent()) },
-            context: if memory.total == 0 { "Physical memory unavailable".to_string() } else { format!("{} / {} used", bytes(memory.used()), bytes(memory.total)) },
-            detail: if memory.total == 0 { "Capacity not reported".to_string() } else { format!("{} available", bytes(memory.available)) },
-            hint: "Physical memory in use, installed capacity, and memory available to apps.",
+            context: if memory.total == 0 { "Physical memory unavailable".to_string() } else { format!("{} used of {}", bytes(memory.used()), bytes(memory.total)) },
+            // Not "available", which the line above already states:
+            // `available` is `total - used` by definition, so a card
+            // carrying both says one thing twice and leaves the reader
+            // to notice. The commit charge is the independent fact —
+            // it counts memory the system has *promised*, pagefile
+            // included, and it is the figure that runs out first on a
+            // machine about to start refusing allocations.
+            detail: if memory.commit_limit > 0 { format!("Committed {} of {}", bytes(memory.committed), bytes(memory.commit_limit)) }
+                else if memory.total > 0 { format!("{} available", bytes(memory.available)) }
+                else { "Capacity not reported".to_string() },
+            hint: "Physical memory in use against installed capacity, and the commit charge against the commit limit.",
         },
         PickerSummary {
             focus: PerformanceFocus::Disk,
             value: if disk_count == 0 { DASH.to_string() } else { rate(read + write) },
+            // "busiest", because the percentage is one disk's active
+            // time and not the set's: five idle disks beside one at 90%
+            // read as a machine 90% busy otherwise, and the hint was
+            // the only thing saying so.
             context: if disk_count == 0 { "No physical disks reported".to_string() } else {
-                format!("{disk_count} disk{} · {} active", if disk_count == 1 { "" } else { "s" }, percent(active)) },
-            detail: if disk_count == 0 { "Activity unavailable".to_string() } else { format!("R {} · W {}", rate(read), rate(write)) },
-            hint: "Combined physical disk throughput. R: read, W: write. Active time is the busiest disk.",
+                format!("{disk_count} disk{} · busiest {} active", if disk_count == 1 { "" } else { "s" }, percent(active)) },
+            // Spelled out rather than "R"/"W": the card below writes
+            // "Rx"/"Tx", and a reader who has to learn two abbreviation
+            // schemes for two adjacent cards learns neither.
+            detail: if disk_count == 0 { "Activity unavailable".to_string() } else { format!("Read {} · Write {}", rate(read), rate(write)) },
+            hint: "Combined physical disk throughput. Active time is the busiest single disk.",
         },
         PickerSummary {
             focus: PerformanceFocus::Network,
             value: if system.adapters.is_empty() { DASH.to_string() } else { rate(system.network_rate()) },
+            // Named where there is a name to use. Every other card's
+            // first line identifies its hardware, and a bare count left
+            // this one the only card that said nothing about what it
+            // was measuring. The count stays leftmost so it survives
+            // the truncation that a long adapter name causes.
             context: if system.adapters.is_empty() { "No adapters reported".to_string() }
+                else if let Some(name) = busiest_adapter { format!("{connected} connected · {name}") }
                 else { format!("{connected} connected adapter{}", if connected == 1 { "" } else { "s" }) },
             detail: if system.adapters.is_empty() { "Traffic unavailable".to_string() } else { format!("Rx {} · Tx {}", rate(receive), rate(send)) },
             hint: "Rx: received, Tx: sent. Hardware traffic is shown when hardware adapters exist; otherwise all adapters are included.",
@@ -329,14 +364,90 @@ fn picker_summaries(system: &SystemSample) -> [PickerSummary; 5] {
             focus: PerformanceFocus::Gpu,
             value: busiest_gpu.map_or_else(|| DASH.to_string(), |gpu| percent(gpu.utilisation)),
             context: busiest_gpu.map_or_else(|| "GPU counters unavailable".to_string(), |gpu| {
-                if system.gpus.len() > 1 { format!("{} adapters · {}", system.gpus.len(), gpu.name) }
-                else if gpu.name.is_empty() { "Graphics adapter".to_string() } else { gpu.name.clone() }
+                match (names_its_adapter(gpu), system.gpus.len()) {
+                    (true, 1) => gpu.name.clone(),
+                    (true, count) => format!("{count} adapters · {}", gpu.name),
+                    (false, 1) => "Graphics adapter".to_string(),
+                    (false, count) => format!("{count} display adapters"),
+                }
             }),
-            detail: busiest_gpu.filter(|gpu| gpu.memory_total > 0).map_or_else(|| "Dedicated memory not reported".to_string(),
-                |gpu| format!("VRAM {} / {}", bytes(gpu.memory_used), bytes(gpu.memory_total))),
-            hint: "Utilisation and dedicated video memory of the busiest graphics adapter.",
+            // Never the dead line "Dedicated memory not reported",
+            // which is what this card showed on every machine whose
+            // driver publishes engine counters but no capacity — a
+            // whole line spent saying that a line could not be filled.
+            // The busiest engine is real, always present where the
+            // headline is, and the fact a reader wants next: a GPU at
+            // 20% on its video decoder is doing something quite
+            // different from one at 20% on its 3D engine.
+            detail: busiest_gpu.map_or_else(|| "Engine counters unavailable".to_string(), |gpu| {
+                if gpu.memory_total > 0 { format!("VRAM {} of {}", bytes(gpu.memory_used), bytes(gpu.memory_total)) }
+                else { format!("Busiest engine: {}", busiest_engine(system)) }
+            }),
+            hint: "Utilisation of the busiest graphics adapter, with its dedicated video memory where the driver reports one.",
         },
     ]
+}
+
+/// The processor's shape: cores, logical processors, and nominal clock.
+///
+/// The line above already carries the marketing core count — every
+/// desktop part is sold as an "8-Core Processor" — so this line earns
+/// its place by what the name does *not* say: the thread count and the
+/// clock. Each part is dropped rather than guessed when its source did
+/// not report it, so the line shortens instead of claiming a zero.
+fn cpu_shape(cpu: &crate::model::CpuSample) -> String {
+    let cores = match (cpu.physical_cores, cpu.logical_cores) {
+        (0, 0) => None,
+        // Spelled out when it stands alone: "16 logical" reads as an
+        // abbreviation of the pair, and without the pair it is just
+        // elliptical.
+        (0, logical) => Some(format!("{logical} logical processors")),
+        (physical, 0) => Some(format!("{physical} cores")),
+        (physical, logical) => Some(format!("{physical} cores · {logical} logical")),
+    };
+    let clock = (cpu.megahertz > 0).then(|| crate::format::clock(cpu.megahertz));
+    match (cores, clock) {
+        (Some(cores), Some(clock)) => format!("{cores} · {clock}"),
+        (Some(cores), None) => cores,
+        (None, Some(clock)) => clock,
+        (None, None) => "Core count unavailable".to_string(),
+    }
+}
+
+/// Whether a sample carries a real adapter description.
+///
+/// `win::gpu::describe` falls back to `GPU <luid>` when the registry
+/// cannot be joined to the counters, which it deliberately leaves
+/// unjoined whenever more than one adapter is installed — see there. In
+/// the detail panel's heading that stand-in is honest, because the whole
+/// string is readable. In a card this narrow it truncates to
+/// `GPU 0x00000000_0x00…`, which identifies nothing, and spends the
+/// card's one identity line doing it.
+///
+/// Tested by containment rather than by the `GPU ` prefix so this cannot
+/// quietly stop matching if that wording changes: the stand-in is the
+/// only name that can hold the adapter's own LUID, since a driver's
+/// `DriverDesc` never does.
+fn names_its_adapter(gpu: &crate::model::GpuSample) -> bool {
+    let name = gpu.name.trim();
+    !name.is_empty() && !name.contains(&gpu.luid)
+}
+
+/// The engine family doing the most work, across every adapter.
+///
+/// Same reading and same wording as the GPU panel's own "Busiest engine"
+/// row, so the card and the panel it opens cannot disagree.
+fn busiest_engine(system: &SystemSample) -> String {
+    system
+        .gpus
+        .iter()
+        .flat_map(|gpu| &gpu.engines)
+        .filter(|(_, value)| *value > 0.0)
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map_or_else(
+            || "Idle".to_string(),
+            |(name, _)| engine_family(name).to_string(),
+        )
 }
 
 /// One consistent resource card: identity, current reading, context, and recent history.
@@ -2157,6 +2268,136 @@ mod tests {
             crate::format::rate(150_000_000.0),
             "virtual-only guests keep their real traffic"
         );
+    }
+
+    #[test]
+    fn no_card_identifies_its_hardware_by_a_luid_it_cannot_finish_printing() {
+        // `win::gpu::describe` leaves an adapter named `GPU <luid>`
+        // whenever the registry cannot be joined to the counters, which
+        // is every machine with more than one display adapter. That
+        // stand-in is readable in the detail panel's heading and is not
+        // readable here: the card truncated it to
+        // `3 adapters · GPU 0x00000000_0x00…`, spending its one identity
+        // line on nothing at all.
+        let unnamed = |luid: &str| crate::model::GpuSample {
+            luid: luid.to_string(),
+            name: format!("GPU {luid}"),
+            utilisation: 20.0,
+            engines: vec![("VideoDecode · 0:3".to_string(), 20.0)],
+            ..Default::default()
+        };
+        let system = SystemSample {
+            gpus: vec![
+                unnamed("luid_0x00000000_0x0000c4f1"),
+                unnamed("luid_0x00000000_0x0000c502"),
+                unnamed("luid_0x00000000_0x0000c513"),
+            ],
+            ..Default::default()
+        };
+        let gpu = &picker_summaries(&system)[4];
+        assert_eq!(gpu.context, "3 display adapters");
+        assert!(
+            !gpu.context.contains("0x"),
+            "a half-printed LUID identifies nothing: {}",
+            gpu.context
+        );
+        assert_eq!(
+            gpu.detail, "Busiest engine: Video decode",
+            "a driver that publishes engines but no capacity must still \
+             fill the second line with something true"
+        );
+
+        let named = SystemSample {
+            gpus: vec![crate::model::GpuSample {
+                luid: "luid_0x00000000_0x0000c4f1".to_string(),
+                name: "NVIDIA GeForce RTX 4070".to_string(),
+                memory_used: 3_221_225_472,
+                memory_total: 12_884_901_888,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let gpu = &picker_summaries(&named)[4];
+        assert_eq!(gpu.context, "NVIDIA GeForce RTX 4070");
+        assert_eq!(
+            gpu.detail,
+            format!(
+                "VRAM {} of {}",
+                crate::format::bytes(3_221_225_472),
+                crate::format::bytes(12_884_901_888)
+            ),
+            "a reported capacity is the more useful second line"
+        );
+    }
+
+    #[test]
+    fn a_supporting_line_never_restates_the_line_above_it() {
+        // Available memory is `total - available` run backwards: a card
+        // showing "21.9 GB used of 47.9 GB" above "26.0 GB available"
+        // spends its second line on arithmetic the reader can do from
+        // the first. The commit charge cannot be derived from either.
+        let system = SystemSample {
+            memory: crate::model::MemorySample {
+                total: 48 * 1024 * 1024 * 1024,
+                available: 26 * 1024 * 1024 * 1024,
+                committed: 24 * 1024 * 1024 * 1024,
+                commit_limit: 56 * 1024 * 1024 * 1024,
+                ..Default::default()
+            },
+            cpu: crate::model::CpuSample {
+                name: "AMD Ryzen 7 3700X 8-Core Processor".to_string(),
+                physical_cores: 8,
+                logical_cores: 16,
+                megahertz: 3593,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let summaries = picker_summaries(&system);
+        assert_eq!(
+            summaries[1].detail,
+            format!(
+                "Committed {} of {}",
+                crate::format::bytes(24 * 1024 * 1024 * 1024),
+                crate::format::bytes(56 * 1024 * 1024 * 1024)
+            )
+        );
+        assert!(
+            !summaries[1].detail.contains("available"),
+            "the available figure is the first line restated"
+        );
+        // Likewise the processor: its name already says "8-Core", so the
+        // line under it carries what the name cannot.
+        assert_eq!(summaries[0].detail, "8 cores · 16 logical · 3.59 GHz");
+    }
+
+    #[test]
+    fn a_processor_line_shortens_rather_than_reporting_a_zero_it_did_not_read() {
+        let shape = |physical, logical, megahertz| {
+            cpu_shape(&crate::model::CpuSample {
+                physical_cores: physical,
+                logical_cores: logical,
+                megahertz,
+                ..Default::default()
+            })
+        };
+        assert_eq!(shape(8, 16, 3593), "8 cores · 16 logical · 3.59 GHz");
+        assert_eq!(
+            shape(8, 16, 0),
+            "8 cores · 16 logical",
+            "an unreadable clock drops out rather than reading 0 MHz"
+        );
+        assert_eq!(
+            shape(0, 16, 3593),
+            "16 logical processors · 3.59 GHz",
+            "a thread count standing alone is spelled out"
+        );
+        assert_eq!(
+            shape(0, 0, 3593),
+            "3.59 GHz",
+            "a clock alone still beats an empty line"
+        );
+        assert_eq!(shape(0, 0, 0), "Core count unavailable");
     }
 
     use super::*;
