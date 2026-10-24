@@ -702,6 +702,25 @@ pub struct App {
     pub pending: Option<Pending>,
     /// Whether the about panel is open.
     pub about: bool,
+    /// Whether the collapsed rail's hover flyout is open.
+    ///
+    /// Deliberately *not* in [`Config`]: this is where the pointer is,
+    /// which is not a preference and must not survive a restart. The
+    /// rail's collapsed state is the preference, and that one is saved.
+    ///
+    /// Kept on the app rather than read back out of egui's animation
+    /// memory because the flyout's own width decides the region that
+    /// holds it open — see `chrome::nav_rail` — and a value that is both
+    /// the question and the answer cannot be read in one frame.
+    pub nav_flyout: bool,
+    /// Whether the flyout is held shut until the pointer leaves the rail.
+    ///
+    /// Set when the rail is collapsed by its own toggle. The pointer is
+    /// then resting on the control that has just narrowed the rail, and
+    /// a flyout unfolding under it on the very next frame makes the
+    /// click look as though it did nothing. It re-arms the moment the
+    /// pointer leaves.
+    pub nav_flyout_shut: bool,
     /// The most recent status message.
     pub toast: Option<Toast>,
     /// Whether the window draws its own title bar.
@@ -813,6 +832,8 @@ impl App {
             memory_view: MemoryView::default(),
             pending: None,
             about: false,
+            nav_flyout: false,
+            nav_flyout_shut: false,
             toast: None,
             // Custom chrome by default: the system title bar on Windows 10
             // is a light grey caption that no amount of theming can reach

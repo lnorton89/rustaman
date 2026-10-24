@@ -282,7 +282,15 @@ pub fn nav_destination(
     // `allocate_exact_size` derives from the slot: the rail is a fixed
     // list today, and would hand one destination another's animation
     // the day a view is added in the middle.
-    let id = egui::Id::unique(("nav", label));
+    //
+    // Salted from the enclosing scope rather than rooted at the label,
+    // because the rail is drawn twice while the hover flyout is open —
+    // once narrow in the panel, once full-width over it. A label-rooted
+    // id is the same id in both, so the two would write one hover
+    // animation in the same frame and the destination under the pointer
+    // would be told it is not hovered by the copy that is hidden behind
+    // the flyout.
+    let id = ui.scope_id().with(("nav", label));
     let fill = selectable_surface(ui, theme, id, &response, active, theme.panel);
     painter.rect_filled(rect, CornerRadius::same(RADIUS), fill);
 
@@ -333,8 +341,16 @@ pub fn nav_destination(
 }
 
 /// A stable, visible rail toggle; the chevron points toward the resulting width.
-pub fn nav_toggle(ui: &mut Ui, theme: &Palette, compact: bool) -> Response {
-    let label = if compact {
+///
+/// Two flags, because the two differ in the hover flyout: `compact` is
+/// how this rail is being *drawn*, and `collapsed` is the saved state a
+/// click will flip. The flyout draws the full rail while the preference
+/// is still collapsed, so there the control pins the rail open rather
+/// than collapsing one that is already collapsed — and the chevron and
+/// the label both follow the action, not the drawing, so the glyph
+/// cannot promise the opposite of what the tooltip says.
+pub fn nav_toggle(ui: &mut Ui, theme: &Palette, compact: bool, collapsed: bool) -> Response {
+    let label = if collapsed {
         "Expand sidebar"
     } else {
         "Collapse sidebar"
@@ -359,7 +375,7 @@ pub fn nav_toggle(ui: &mut Ui, theme: &Palette, compact: bool) -> Response {
         Rect::from_center_size(center, Vec2::splat(icons::INLINE)),
         Icon::ChevronRight,
         theme::rgb(theme.text_muted),
-        if compact { 0.0 } else { 0.5 },
+        if collapsed { 0.0 } else { 0.5 },
     );
     if !compact {
         ui.painter().text(
