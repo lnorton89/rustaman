@@ -53,10 +53,30 @@ cargo clippy --all-targets --all-features --target x86_64-pc-windows-msvc -- -D 
 `rustup target add x86_64-pc-windows-msvc` first. This type-checks the
 whole Windows half without linking, which catches a broken
 `unsafe extern` block, a wrong struct layout, or an egui API that moved.
-It cannot run a test, and it cannot tell you the window looks right.
-**Anything visual, and anything that reads a real machine, needs a
-Windows run and a screenshot.** CI runs both halves; see the `windows`
-and `portable` jobs.
+It cannot run a test.
+
+**But you can run the tests, and you can see the window.** A Linux box
+builds this crate for `x86_64-pc-windows-gnu` and runs it under Wine,
+GUI and all, with no `cfg` added and no module moved:
+
+```bash
+scripts/cloud-ui.sh setup          # once per machine
+scripts/cloud-ui.sh test chrome::  # one module, about a second
+scripts/cloud-ui.sh shot cpu       # a PNG of the real panel
+```
+
+Read [`docs/CLOUD_TESTING.md`](docs/CLOUD_TESTING.md) before relying on
+it, because the boundary matters: it proves layout, geometry, state and
+interaction — which is most of what goes wrong here — and it proves
+nothing about a driver that falls over, what the machine reports about
+itself, or typography. Three `win::` tests fail under Wine for reasons
+that are Wine's; the doc names them.
+
+**Do not report a UI change as unverifiable from a Linux session.** Run
+it there, say so, and leave the real window to the `windows` CI job and
+to a person on real hardware — which the D3D12 note further down is
+still the reason for. CI runs both halves; see the `windows` and
+`portable` jobs.
 
 ### Getting that screenshot without driving the app
 
