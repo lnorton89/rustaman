@@ -189,7 +189,18 @@ fn drag_region(ui: &mut Ui, app: &mut App) {
 /// control that happens to sit against the window edge — a table's
 /// scrollbar is exactly there, and losing the resize to it would make the
 /// window feel stuck.
-pub fn resize_handles(ui: &mut Ui) {
+/// `maximised` suppresses them entirely, and that is not an optimisation.
+/// A maximised window has no resizable edge — dragging one does nothing
+/// — but these are a *foreground* layer, so they win the hit test over
+/// whatever is beneath them. At the top right that is the close button,
+/// and it is precisely when the window is maximised that the corner
+/// matters most: it is the one place the pointer can be thrown without
+/// aiming. Handles for a gesture the window cannot perform were taking
+/// the corner from the control that can.
+pub fn resize_handles(ui: &mut Ui, maximised: bool) {
+    if maximised {
+        return;
+    }
     let rect = ui.ctx().content_rect();
     resize_handles_in(ui, rect);
 }
@@ -899,6 +910,54 @@ mod tests {
             harness.state().nav_flyout_shut,
         );
         assert!(harness.get_by_label("Performance").rect().width() > 100.0);
+    }
+
+    #[test]
+    fn the_caption_controls_reach_the_window_corner() {
+        // Fitts's law: a pointer cannot travel past the edge of the
+        // screen, so on a maximised window the top-right corner is a
+        // target of effectively infinite size and the close button is
+        // hit by throwing the pointer at it. The title bar's own padding
+        // was insetting the controls out of that corner — 4 points below
+        // the top edge and 12 short of the right — so the throw landed
+        // on nothing.
+        let window = egui::vec2(780.0, 480.0);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(window)
+            .build_ui_state(
+                |ui, app: &mut App| {
+                    theme::apply(ui.ctx(), &app.theme.clone());
+                    let _ = title_bar(app, ui);
+                },
+                App::new(crate::config::Config::default()),
+            );
+        harness.run();
+
+        let close = harness.get_by_label("Close").rect();
+        assert!(
+            close.top() <= 0.01,
+            "the close button must reach the top edge of the window, got {close:?}"
+        );
+        assert!(
+            close.right() >= window.x - 0.01,
+            "and the right edge, got {close:?} in a window {window:?} wide"
+        );
+
+        // The neighbours reach the top too — the whole caption strip is
+        // one unbroken band — but they are not at the right edge and
+        // must not be stretched to it.
+        for label in ["Maximise", "Minimise"] {
+            let rect = harness.get_by_label(label).rect();
+            assert!(
+                rect.top() <= 0.01,
+                "{label} must reach the top edge, got {rect:?}"
+            );
+            assert!(
+                rect.right() < close.left() + 0.01,
+                "{label} must stay left of Close rather than growing to the \
+                 edge it does not touch, got {rect:?}"
+            );
+        }
     }
 
     /// A rail collapsed, with the pointer parked clear of it.

@@ -136,7 +136,7 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     if app.custom_chrome {
         // Last, so they win the hit test against a control at the window
         // edge — a table's scrollbar is exactly there.
-        chrome::resize_handles(ui);
+        chrome::resize_handles(ui, app.maximised);
     }
 
     if closing {

@@ -1481,11 +1481,11 @@ pub fn text_cell(ui: &mut Ui, theme: &Palette, text: &str, muted: bool) {
 /// A borderless icon button, for the title bar and toolbars.
 pub fn icon_button(ui: &mut Ui, theme: &Palette, icon: Icon, tooltip: &str) -> Response {
     /// The button's square size. Matches the title bar's own height less
-    /// its padding, so the window controls fill the bar's full height and
-    /// are hittable by throwing the pointer at the corner.
+    /// its padding.
     const SIZE: f32 = theme::CONTROL_HEIGHT;
 
     let (rect, response) = ui.allocate_exact_size(Vec2::new(SIZE, SIZE), Sense::click());
+    let response = ui.interact(caption_hit_area(ui, rect), response.id, Sense::click());
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), tooltip));
     let fill = selectable_surface(ui, theme, response.id, &response, false, theme.app);
@@ -1503,6 +1503,42 @@ pub fn icon_button(ui: &mut Ui, theme: &Palette, icon: Icon, tooltip: &str) -> R
         .on_hover_text(tooltip)
 }
 
+/// A caption control's hit area, closed up to any window edge it sits
+/// against.
+///
+/// Fitts's law, and the corner is the whole of the point: a pointer
+/// cannot travel past the edge of the screen, so on a maximised window
+/// the top-right corner is a target of effectively infinite size — it is
+/// hit by throwing the pointer at it, without aiming, which is how the
+/// close button is used. Inset from that corner by even a few points, the
+/// corner becomes dead space: the throw lands on nothing and the button
+/// has to be aimed at like any other. Every system's own caption buttons
+/// run to the edge, and that is why.
+///
+/// The title bar earns its padding elsewhere, so only the *hit area*
+/// grows. The fill and the glyph stay where the layout put them, which
+/// is what keeps the bar looking padded while behaving as though it is
+/// not.
+///
+/// An edge is only closed up when the control is already against it —
+/// within the padding that separates the two. A control in the middle of
+/// the bar keeps its own bounds, so this cannot quietly grow something
+/// that was never meant to reach an edge.
+fn caption_hit_area(ui: &Ui, painted: Rect) -> Rect {
+    // `content_rect`, the same rectangle `chrome::resize_handles`
+    // measures its border against, so the two agree on where the window
+    // ends.
+    let window = ui.ctx().content_rect();
+    let mut hit = painted;
+    if painted.top() - window.top() <= theme::PAD {
+        hit.min.y = window.top();
+    }
+    if window.right() - painted.right() <= theme::PAD {
+        hit.max.x = window.right();
+    }
+    hit
+}
+
 /// The window's close button, which highlights in the danger colour.
 ///
 /// Separate from [`icon_button`] because it is the one control in the app
@@ -1512,6 +1548,7 @@ pub fn icon_button(ui: &mut Ui, theme: &Palette, icon: Icon, tooltip: &str) -> R
 pub fn close_button(ui: &mut Ui, theme: &Palette) -> Response {
     const SIZE: f32 = theme::CONTROL_HEIGHT;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(SIZE, SIZE), Sense::click());
+    let response = ui.interact(caption_hit_area(ui, rect), response.id, Sense::click());
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), "Close"));
     let fill = hover_fill(ui, response.id, response.hovered(), theme.app, theme.danger);
