@@ -164,6 +164,14 @@ mod windows {
         focus: PerformanceFocus,
         /// Whether the Network panel's virtual-adapter group starts open.
         expanded: bool,
+        /// Whether the navigation rail starts collapsed to its icons.
+        ///
+        /// A scene of its own rather than only the `--mini-nav` flag,
+        /// because the collapsed rail has a second state the flag cannot
+        /// reach: it unfolds under the pointer, and that reveal is drawn
+        /// by a foreground layer over the content. Paired with `hover`
+        /// parked on the rail, this is the only way to look at it.
+        collapsed: bool,
         /// The size to draw at, overriding [`DEFAULT_SIZE`].
         size: Option<(f32, f32)>,
         /// Whether to draw this machine instead of the fabricated one.
@@ -182,13 +190,14 @@ mod windows {
     }
 
     /// Every scene, in the order `--list` prints them.
-    const SCENES: [Scene; 32] = [
+    const SCENES: [Scene; 34] = [
         Scene {
             name: "live-system",
             about: "System Information on THIS machine, really sampled",
             view: View::System,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: true,
             select: false,
@@ -201,6 +210,7 @@ mod windows {
             view: View::Performance,
             focus: PerformanceFocus::Network,
             expanded: true,
+            collapsed: false,
             size: Some((1280.0, 1500.0)),
             live: true,
             select: false,
@@ -213,6 +223,7 @@ mod windows {
             view: View::Performance,
             focus: PerformanceFocus::Gpu,
             expanded: true,
+            collapsed: false,
             size: Some((1280.0, 1100.0)),
             live: true,
             select: false,
@@ -225,6 +236,7 @@ mod windows {
             view: View::Performance,
             focus: PerformanceFocus::Cpu,
             expanded: true,
+            collapsed: false,
             size: Some((1280.0, 1400.0)),
             live: true,
             select: false,
@@ -237,6 +249,7 @@ mod windows {
             view: View::Performance,
             focus: PerformanceFocus::Disk,
             expanded: true,
+            collapsed: false,
             size: Some((1280.0, 1200.0)),
             live: true,
             select: false,
@@ -249,6 +262,7 @@ mod windows {
             view: View::Memory,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: true,
             select: false,
@@ -261,6 +275,7 @@ mod windows {
             view: View::Processes,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: true,
             select: false,
@@ -273,6 +288,7 @@ mod windows {
             view: View::Performance,
             focus: PerformanceFocus::Network,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -285,6 +301,7 @@ mod windows {
             view: View::Performance,
             focus: PerformanceFocus::Network,
             expanded: false,
+            collapsed: false,
             size: Some((1480.0, 900.0)),
             live: false,
             select: false,
@@ -297,6 +314,7 @@ mod windows {
             view: View::Performance,
             focus: PerformanceFocus::Network,
             expanded: true,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -309,6 +327,7 @@ mod windows {
             view: View::Performance,
             focus: PerformanceFocus::Network,
             expanded: false,
+            collapsed: false,
             size: Some((900.0, 720.0)),
             live: false,
             select: false,
@@ -321,6 +340,7 @@ mod windows {
             view: View::Performance,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -333,6 +353,7 @@ mod windows {
             view: View::Performance,
             focus: PerformanceFocus::Memory,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -345,6 +366,7 @@ mod windows {
             view: View::Performance,
             focus: PerformanceFocus::Disk,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -357,6 +379,7 @@ mod windows {
             view: View::Performance,
             focus: PerformanceFocus::Gpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -369,6 +392,7 @@ mod windows {
             view: View::Performance,
             focus: PerformanceFocus::Gpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -381,6 +405,7 @@ mod windows {
             view: View::Processes,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -393,6 +418,7 @@ mod windows {
             view: View::Details,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -405,6 +431,7 @@ mod windows {
             view: View::Services,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -417,6 +444,7 @@ mod windows {
             view: View::Startup,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -429,6 +457,7 @@ mod windows {
             view: View::Details,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: true,
@@ -441,6 +470,7 @@ mod windows {
             view: View::Processes,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: true,
@@ -453,6 +483,7 @@ mod windows {
             view: View::Processes,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: true,
@@ -465,6 +496,7 @@ mod windows {
             view: View::Processes,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -483,6 +515,7 @@ mod windows {
             view: View::Details,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -495,6 +528,7 @@ mod windows {
             view: View::Services,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -507,6 +541,7 @@ mod windows {
             view: View::Startup,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -521,6 +556,7 @@ mod windows {
             view: View::Performance,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: Some((1440.0, 1600.0)),
             live: false,
             select: false,
@@ -533,6 +569,7 @@ mod windows {
             view: View::Memory,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -545,6 +582,7 @@ mod windows {
             view: View::Memory,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: true,
@@ -557,6 +595,7 @@ mod windows {
             view: View::System,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
@@ -569,11 +608,47 @@ mod windows {
             view: View::Settings,
             focus: PerformanceFocus::Cpu,
             expanded: false,
+            collapsed: false,
             size: None,
             live: false,
             select: false,
             modal: false,
             hover: None,
+        },
+        // The rail's two collapsed states. The second is the only way to
+        // see the hover reveal at all: it is a foreground layer that
+        // exists for as long as the pointer is over the rail, so it
+        // cannot be caught by opening the app and taking a picture, and
+        // it is not reachable through `--mini-nav` either.
+        Scene {
+            name: "nav-collapsed",
+            about: "The rail collapsed to its icons, pointer away",
+            view: View::Processes,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            collapsed: true,
+            size: None,
+            live: false,
+            select: false,
+            modal: false,
+            hover: None,
+        },
+        Scene {
+            name: "nav-revealed",
+            about: "The collapsed rail unfolded under the pointer",
+            view: View::Processes,
+            focus: PerformanceFocus::Cpu,
+            expanded: false,
+            collapsed: true,
+            size: None,
+            live: false,
+            select: false,
+            modal: false,
+            // Inside the collapsed rail: narrower than
+            // `theme::NAV_MINI_WIDTH` and below the title bar, so the
+            // reveal is open and the pointer is resting on a
+            // destination rather than between two.
+            hover: Some((28.0, 240.0)),
         },
     ];
 
@@ -739,7 +814,10 @@ mod windows {
         let (width, height) = size.or(scene.size).unwrap_or(DEFAULT_SIZE);
 
         let config = rustaman::config::Config {
-            nav_collapsed: Some(cli.mini_nav),
+            // `--mini-nav` collapses any scene; a scene may also ask
+            // for it, because the rail's reveal is a thing to look at
+            // rather than a flag to pass.
+            nav_collapsed: Some(cli.mini_nav || scene.collapsed),
             performance_width: cli.secondary_width,
             inspector_width: cli.secondary_width,
             theme: theme.map(str::to_string),
