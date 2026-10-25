@@ -447,12 +447,7 @@ fn rail_body(app: &mut App, ui: &mut Ui, compact: bool, collapsed: bool) {
         // but the missing columns need an explanation, or they
         // look like a bug in the app.
         if !app.elevated {
-            let response = if compact {
-                widgets::access_notice(ui, &theme)
-            } else {
-                widgets::chip(ui, "Limited access", theme.raised, theme.text_muted)
-            };
-            response.on_hover_text(
+            widgets::access_notice(ui, &theme, compact).on_hover_text(
                 "Some processes hide owner, path or architecture. \
                  Administrator rights improve access, but protected \
                  processes can still refuse it.",
@@ -1029,6 +1024,85 @@ mod tests {
             harness.get_by_label("Performance").rect().width() > NAV_WIDTH / 2.0,
             "the flyout must survive the pointer moving onto it"
         );
+    }
+
+    /// Every stroke the rail paints inside its own collapsed width — the
+    /// destinations' icons, the toggle's chevron, the access notice's
+    /// glyph — in paint order.
+    ///
+    /// Fills and text are left out on purpose. A hover fill and a label
+    /// are *meant* to differ between a shut rail and an unfolded one; an
+    /// icon is not, and icons are the only strokes in there.
+    fn rail_strokes(harness: &egui_kittest::Harness<'_, App>) -> Vec<Rect> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<Rect>) {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, out)),
+                egui::Shape::Path(_)
+                | egui::Shape::LineSegment { .. }
+                | egui::Shape::Circle(_)
+                | egui::Shape::Ellipse(_)
+                | egui::Shape::QuadraticBezier(_)
+                | egui::Shape::CubicBezier(_) => out.push(shape.visual_bounding_rect()),
+                egui::Shape::Noop
+                | egui::Shape::Rect(_)
+                | egui::Shape::Text(_)
+                | egui::Shape::Mesh(_)
+                | egui::Shape::Band(_)
+                | egui::Shape::Callback(_) => {}
+            }
+        }
+        let mut strokes = Vec::new();
+        for clipped in &harness.output().shapes {
+            walk(&clipped.shape, &mut strokes);
+        }
+        strokes.retain(|rect| rect.max.x <= theme::NAV_MINI_WIDTH);
+        strokes
+    }
+
+    #[test]
+    fn unfolding_the_rail_moves_none_of_its_icons() -> anyhow::Result<()> {
+        // The reveal should uncover labels beside icons that stay put.
+        // It moved three of them. The destinations sat in a column of
+        // their own in the wide rail, seven points right of where the
+        // narrow rail centred them; the toggle's chevron went from the
+        // centre of the narrow rail to the far edge of the wide one; and
+        // the access notice swapped its icon for a chip. Each is a
+        // stroke inside the narrow rail's width, so the strokes there
+        // have to be the same strokes in both states.
+        let mut harness = collapsed_rail();
+        // The notice is drawn only for an unelevated session, and is the
+        // one item in the rail that used to change shape rather than
+        // position — so it has to be in the picture.
+        harness.state_mut().elevated = false;
+        harness.run();
+        let shut = rail_strokes(&harness);
+
+        harness.hover_at(egui::pos2(theme::NAV_MINI_WIDTH / 2.0, 240.0));
+        harness.run();
+        harness.run();
+        assert!(
+            harness.state().nav_flyout,
+            "the rail has to actually unfold for this to test anything"
+        );
+        let open = rail_strokes(&harness);
+
+        anyhow::ensure!(
+            !shut.is_empty(),
+            "found no icon strokes in the collapsed rail, so the comparison \
+             below would pass on anything"
+        );
+        assert_eq!(
+            shut.len(),
+            open.len(),
+            "the rail painted a different set of icons once unfolded"
+        );
+        for (before, after) in shut.iter().zip(&open) {
+            assert!(
+                (before.center() - after.center()).length() < 0.5,
+                "an icon moved as the rail unfolded: {before:?} became {after:?}"
+            );
+        }
+        Ok(())
     }
 
     #[test]
