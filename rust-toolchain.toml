@@ -12,6 +12,6 @@
 # deliberate change someone is looking at, instead of turning a green
 # build red on a morning nobody touched the code.
 [toolchain]
-channel = "1.98.0"
+channel = "1.99.1"
 components = ["clippy", "rustfmt"]
 targets = ["x86_64-pc-windows-msvc"]
