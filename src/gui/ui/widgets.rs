@@ -267,9 +267,6 @@ pub fn nav_destination(
     /// The rail entry's height. Taller than a table row — this is a
     /// primary destination, not a list item.
     const HEIGHT: f32 = theme::CONTROL_HEIGHT;
-    /// The icon column's width, so every label starts on one column
-    /// whatever shape the icon beside it draws.
-    const ICON_COLUMN: f32 = 22.0;
 
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::click());
@@ -308,22 +305,23 @@ pub fn nav_destination(
     } else {
         text_color
     };
-    // Centred in a fixed icon column rather than laid out beside the
-    // label, so every label in the rail starts on one x however wide the
-    // icon beside it happens to draw.
-    let icon_box = Rect::from_center_size(
-        if compact {
-            rect.center()
-        } else {
-            egui::pos2(rect.left() + SPACE_MD + ICON_COLUMN / 2.0, rect.center().y)
-        },
-        Vec2::splat(icons::NAV),
-    );
+    // Centred in a leading square the height of the row, whatever the
+    // rail's width. A collapsed rail's entry *is* that square, so the
+    // icon lands on the same x collapsed, unfolded and pinned open, and
+    // the hover reveal uncovers labels beside icons that do not move.
+    //
+    // It used to sit in a column of its own, inset from the entry's
+    // edge — which put it seven points further right in the wide rail
+    // than in the narrow one, so every icon stepped sideways as the rail
+    // unfolded. A fixed column still exists; it is this square, and every
+    // label starts on its right edge however wide the icon draws.
+    let leading = Rect::from_min_size(rect.min, Vec2::splat(HEIGHT));
+    let icon_box = Rect::from_center_size(leading.center(), Vec2::splat(icons::NAV));
     icons::paint(painter, icon_box, icon, icon_colour);
 
     if !compact {
         painter.text(
-            rect.left_center() + Vec2::new(SPACE_MD + ICON_COLUMN + SPACE_XS, 0.0),
+            egui::pos2(leading.right() + SPACE_XS, rect.center().y),
             Align2::LEFT_CENTER,
             label,
             TextStyle::Body.resolve(ui.style()),
@@ -365,21 +363,21 @@ pub fn nav_toggle(ui: &mut Ui, theme: &Palette, compact: bool, collapsed: bool) 
         CornerRadius::same(RADIUS),
         selectable_surface(ui, theme, response.id, &response, false, theme.panel),
     );
-    let center = if compact {
-        rect.center()
-    } else {
-        rect.right_center() - Vec2::new(SPACE_MD, 0.0)
-    };
+    // In the same leading square as every destination's icon, for the
+    // same reason. This one moved furthest of anything in the rail: it
+    // sat centred in the narrow rail and against the far edge of the wide
+    // one, so unfolding the rail sent it a hundred-odd points across.
+    let leading = Rect::from_min_size(rect.min, Vec2::splat(theme::CONTROL_HEIGHT));
     icons::paint_rotated(
         ui.painter(),
-        Rect::from_center_size(center, Vec2::splat(icons::INLINE)),
+        Rect::from_center_size(leading.center(), Vec2::splat(icons::INLINE)),
         Icon::ChevronRight,
         theme::rgb(theme.text_muted),
         if collapsed { 0.0 } else { 0.5 },
     );
     if !compact {
         ui.painter().text(
-            rect.left_center() + Vec2::new(SPACE_SM, 0.0),
+            egui::pos2(leading.right() + SPACE_XS, rect.center().y),
             Align2::LEFT_CENTER,
             "Navigation",
             TextStyle::Small.resolve(ui.style()),
@@ -392,17 +390,40 @@ pub fn nav_toggle(ui: &mut Ui, theme: &Palette, compact: bool, collapsed: bool) 
         .on_hover_text(label)
 }
 
-/// Non-interactive compact counterpart of the rail's access notice.
-pub fn access_notice(ui: &mut Ui, theme: &Palette) -> Response {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::splat(theme::CONTROL_HEIGHT), Sense::hover());
+/// The rail's note that the session is not elevated.
+///
+/// One widget at both widths, laid out like a destination — its glyph in
+/// the leading square, its words beside it — rather than an icon in the
+/// narrow rail and a chip in the wide one. Two widgets meant the hover
+/// reveal swapped one for the other mid-unfold, so the only thing at the
+/// foot of the rail that was not a destination changed shape as you
+/// looked at it.
+///
+/// Not interactive, and drawn without a destination's hover fill or
+/// pointer cursor, so it does not offer a click it cannot answer.
+pub fn access_notice(ui: &mut Ui, theme: &Palette, compact: bool) -> Response {
+    const LABEL: &str = "Limited access";
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), theme::CONTROL_HEIGHT),
+        Sense::hover(),
+    );
+    let leading = Rect::from_min_size(rect.min, Vec2::splat(theme::CONTROL_HEIGHT));
     icons::paint(
         ui.painter(),
-        Rect::from_center_size(rect.center(), Vec2::splat(icons::INLINE)),
+        Rect::from_center_size(leading.center(), Vec2::splat(icons::INLINE)),
         Icon::Info,
         theme::rgb(theme.text_muted),
     );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, "Limited access"));
+    if !compact {
+        ui.painter().text(
+            egui::pos2(leading.right() + SPACE_XS, rect.center().y),
+            Align2::LEFT_CENTER,
+            LABEL,
+            TextStyle::Small.resolve(ui.style()),
+            theme::rgb(theme.text_muted),
+        );
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, LABEL));
     response
 }
 
