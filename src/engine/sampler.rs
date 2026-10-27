@@ -138,6 +138,11 @@ pub struct Sampler {
     /// rate counters and a fresh query always reads zero. `None` on a
     /// machine that does not publish them.
     gpu: Option<win::gpu::Session>,
+    /// The last GPU reading, republished across a sample whose counters
+    /// came back empty. See [`crate::model::gpu::Hold`] — without it one
+    /// dropped PDH array takes the GPU entry out of the Performance
+    /// picker and puts it back on the next sample.
+    gpu_hold: crate::model::gpu::Hold,
     /// The rolling read of per-process efficiency mode.
     efficiency: EfficiencySweep,
     /// Monotonic snapshot counter.
@@ -269,6 +274,7 @@ impl Sampler {
             previous_adapters: HashMap::new(),
             identity: win::identity::Cache::new(),
             gpu: win::gpu::Session::open(),
+            gpu_hold: crate::model::gpu::Hold::default(),
             efficiency: EfficiencySweep::new(),
             sequence: 0,
         }
@@ -462,7 +468,7 @@ impl Sampler {
             disks: self.sample_disks(elapsed),
             volumes,
             adapters: self.sample_adapters(elapsed),
-            gpus: Self::sample_gpus(gpu),
+            gpus: self.gpu_hold.resolve(Self::sample_gpus(gpu)),
             uptime_seconds: win::system::uptime(),
             // Preferring the enumeration's own count over
             // `GetPerformanceInfo`'s: the two are taken at different

@@ -144,6 +144,14 @@ Pure, portable, and where the arithmetic that is easy to get wrong lives.
   `pid:4242`.
 - **`history.rs`** holds the ring buffers behind the graphs and picks
   their vertical scale.
+- **`gpu.rs`** republishes the last GPU reading across a sample whose
+  performance counters came back empty. The `GPU Engine` instances are
+  one per process per engine, so the set churns constantly and PDH drops
+  an array now and then — and an empty reading is indistinguishable from
+  a machine with no GPU counters at all, which is why one dropped sample
+  used to take the GPU entry out of the Performance picker and put it
+  back on the next tick. Bounded to three consecutive gaps, after which
+  the GPU has genuinely gone.
 
 ### `ProcessKey`, everywhere
 

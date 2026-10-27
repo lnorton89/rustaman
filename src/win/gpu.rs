@@ -261,21 +261,65 @@ impl Session {
 /// strings those items point into — so the buffer has to stay alive while
 /// the names are read, which is why the strings are copied out before it
 /// is dropped.
+///
+/// ## The fetch can fail because the answer grew
+///
+/// The instances of `\GPU Engine(*)` are **one per process per engine**,
+/// so the set changes whenever anything on the machine opens or closes a
+/// GPU context — which, on a desktop, is constantly. A set that grows
+/// between the ask and the fetch makes the fetch fail: PDH answers
+/// `PDH_MORE_DATA`, or on some releases `PDH_INVALID_ARGUMENT`, because
+/// the buffer it was handed is the size the previous instant needed.
+///
+/// A single round therefore loses the whole reading to a race that is
+/// expected to happen, and the engine map comes back empty — which the
+/// Performance view could only read as "this machine has no GPU", so the
+/// card vanished for a frame and returned. Hence the retry.
+///
+/// **The whole ask is redone, not just the fetch.** The documentation is
+/// explicit that a non-zero input size that proves too small leaves the
+/// returned size unusable ("you should not rely on the returned size to
+/// reallocate the buffer"), so the next round starts from a zero-size
+/// query, which is the only form PDH promises an answer to.
 fn formatted_array(counter: HANDLE) -> Vec<(String, f64)> {
-    let mut size = 0u32;
-    let mut count = 0u32;
-    query_formatted_array_size(counter, &mut size, &mut count);
-    let capacity = usize::try_from(size).unwrap_or(0);
-    if capacity == 0 {
-        return Vec::new();
-    }
+    /// How many ask-then-fetch rounds one reading may take.
+    ///
+    /// Two would do for a set that grows once; three leave room for the
+    /// pathological case of it growing again on the retry. Bounded
+    /// rather than looping until it works, because this runs on the
+    /// sampler thread and the UI waits on it — a machine churning
+    /// instances fast enough to lose three rounds running is better
+    /// served by one dropped reading, which [`crate::model::gpu::Hold`]
+    /// bridges, than by a sampler that does not return.
+    const ROUNDS: u32 = 3;
 
-    let mut buffer = vec![0u8; capacity];
-    let status = read_formatted_array(counter, &mut size, &mut count, &mut buffer);
-    if status != 0 {
-        return Vec::new();
-    }
+    for _ in 0..ROUNDS {
+        let mut size = 0u32;
+        let mut count = 0u32;
+        query_formatted_array_size(counter, &mut size, &mut count);
+        let capacity = usize::try_from(size).unwrap_or(0);
+        if capacity == 0 {
+            // No instances, or PDH declined to answer at all. Neither is
+            // retryable within one collection: the instance set is fixed
+            // until the next `PdhCollectQueryData`.
+            return Vec::new();
+        }
 
+        let mut buffer = vec![0u8; capacity];
+        if read_formatted_array(counter, &mut size, &mut count, &mut buffer) == 0 {
+            return decode_items(&buffer, count);
+        }
+    }
+    Vec::new()
+}
+
+/// Walks one fetched PDH array, copying each name out of the buffer.
+///
+/// Split from [`formatted_array`] so the retry above reads as a retry
+/// rather than as a loop with a walk inside it. `count` is PDH's own item
+/// count and is treated as a claim about `buffer`, not a fact: a count
+/// the buffer cannot back ends the walk.
+fn decode_items(buffer: &[u8], count: u32) -> Vec<(String, f64)> {
     let items = usize::try_from(count).unwrap_or(0);
     let stride = std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>();
     let mut found = Vec::with_capacity(items);
@@ -297,7 +341,7 @@ fn formatted_array(counter: HANDLE) -> Vec<(String, f64)> {
         if item.szName.is_null() {
             continue;
         }
-        let Some(name) = wide_from_buffer(item.szName, &buffer) else {
+        let Some(name) = wide_from_buffer(item.szName, buffer) else {
             continue;
         };
         if let Some(value) = formatted_double(&item.FmtValue) {

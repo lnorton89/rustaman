@@ -288,6 +288,21 @@ for the process, wrapped in an owning `Drop` type like everything else.
 A machine with no GPU counters (a VM, a very old driver) loses the GPU
 section and nothing else.
 
+`PdhGetFormattedCounterArrayW` is an ask-then-fetch pair, and the
+`GPU Engine` instances are **one per process per engine** — so the set
+changes whenever anything opens or closes a GPU context, and a set that
+grew between the two calls makes the fetch fail. The read uses a bounded
+retry for the same reason the connection tables do, and redoes the
+*whole* ask each round: the documentation is explicit that a non-zero
+input size which proves too small leaves the returned size unusable, so
+only a zero-size query is worth asking a second time.
+
+A reading that still comes back empty is not treated as "no GPU".
+Nothing downstream can tell that apart from a machine with no counters,
+so one lost array used to remove the GPU entry from the Performance
+picker for a tick and put it back — `model::gpu::Hold` republishes the
+last reading across up to three consecutive gaps instead.
+
 Note the handle types: PDH query and counter handles are `*mut c_void` in
 `windows-sys` 0.61, not `isize`.
 

@@ -38,6 +38,7 @@
 
 pub mod columns;
 pub mod filter;
+pub mod gpu;
 pub mod history;
 pub mod rates;
 pub mod sort;
